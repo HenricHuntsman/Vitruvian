@@ -47,6 +47,7 @@ typedef int32 sem_id;
 typedef pid_t team_id;
 typedef pid_t thread_id;
 typedef int32 vref_id;
+typedef uint64 vref_key;
 
 #if defined(__cplusplus)
   #define TYPE_ASSERT(expr, msg) static_assert((expr), msg)
@@ -352,8 +353,12 @@ typedef struct {
 
 extern thread_id	spawn_thread(thread_func, const char *name, int32 priority,
 						void *data);
+/* V\OS: Linux cannot kill a single thread, so kill_thread() kills the
+ * whole team the thread belongs to (it is kill_team() on that team). To stop
+ * one thread, have it return and wait_for_thread() on it. */
 extern status_t		kill_thread(thread_id thread);
 extern status_t		resume_thread(thread_id thread);
+/* V\OS: not supported, always returns B_NOT_SUPPORTED. */
 extern status_t		suspend_thread(thread_id thread);
 
 extern status_t		rename_thread(thread_id thread, const char *newName);
@@ -395,8 +400,8 @@ extern status_t		convert_to_pthread(thread_id thread, pthread_t *_thread);
 
 /* Time */
 
-extern unsigned long real_time_clock(void);
-extern void			set_real_time_clock(unsigned long secsSinceJan1st1970);
+extern uint64_t real_time_clock(void);
+extern void			set_real_time_clock(uint64_t secsSinceJan1st1970);
 extern bigtime_t	real_time_clock_usecs(void);
 extern bigtime_t	system_time(void);
 						/* time since booting in microseconds */
@@ -445,6 +450,7 @@ extern void			ktrace_vprintf(const char *format, va_list args);
 typedef struct {
 	bigtime_t	active_time;	/* usec of doing useful work since boot */
 	bool		enabled;
+	uint64		current_frequency;	/* current CPU frequency in Hz */
 } cpu_info;
 
 typedef struct {
@@ -668,12 +674,65 @@ extern ssize_t		wait_for_objects_etc(object_wait_info* infos, int numInfos,
 
 // V\OS API
 
-extern vref_id		create_vref(int fd);
-extern status_t		acquire_vref_etc(vref_id id, int* fd);
-extern status_t		acquire_vref(vref_id id);
-extern int			open_vref(vref_id id);
-extern status_t		release_vref(vref_id id);
+// Keyed vref primitives. Every successful acquire (including create) returns
+// a fresh key bound to a private kernel slot for this team. Release consumes
+// the slot identified by (id, key). Open requires a valid (id, key) owned by
+// the calling team. Losing a key leaks the slot until team exit.
+extern vref_id		create_vref(int fd, vref_key* outKey);
+extern status_t		acquire_vref(vref_id id, vref_key* outKey);
+extern int			open_vref(vref_id id, vref_key key);
+extern status_t		release_vref(vref_id id, vref_key key);
 extern dev_t		get_vref_dev();
+
+// Port capability transport.
+//
+// A cap is a structured side-channel descriptor that travels alongside a
+// port message. Today the only kind is B_PORT_CAP_VREF: the sender names
+// a vref_id it owns; the kernel mints a fresh per-team slot for the
+// receiver and returns the new key in `port_cap_out`. The receiver
+// registers the (id, key) via BPrivate::VRefCache::AdoptCaps before
+// touching the message bytes — no separate acquire round-trip is
+// needed for cross-team handoff.
+//
+// `buffer_offset` is receiver-side bookkeeping (offset within the message
+// buffer where the corresponding wire field lives); the kernel does not
+// interpret message bytes.
+#define B_PORT_CAP_VREF		1
+
+typedef struct port_cap_in {
+	uint32			kind;
+	int32			vref_id_;
+	uint32			buffer_offset;
+	uint32			_pad;
+} port_cap_in;
+
+typedef struct port_cap_out {
+	uint32			kind;
+	int32			vref_id_;
+	uint32			buffer_offset;
+	uint32			_pad;
+	uint64			key;	// freshly minted slot in receiver team
+} port_cap_out;
+
+extern status_t		write_port_with_caps(port_id id, int32 msgCode,
+						const void* msgBuffer, size_t bufferSize,
+						const port_cap_in* caps, size_t capsCount,
+						uint32 flags, bigtime_t timeout);
+// `bufferSize` and `capsCount` are in/out: capacity in, actual out.
+// Returns `B_BUFFER_OVERFLOW` if either is insufficient — the out values
+// then tell the caller how much to reallocate.
+extern ssize_t		read_port_with_caps(port_id id, int32* msgCode,
+						void* msgBuffer, size_t* bufferSize,
+						port_cap_out* caps, size_t* capsCount,
+						uint32 flags, bigtime_t timeout);
+// Same as read_port_with_caps, but also returns the writer's uid/gid/team
+// via `senderInfo` (kernel-populated on the message actually consumed).
+// Pass NULL to ignore.
+extern ssize_t		read_port_with_caps_etc(port_id id, int32* msgCode,
+						void* msgBuffer, size_t* bufferSize,
+						port_cap_out* caps, size_t* capsCount,
+						uint32 flags, bigtime_t timeout,
+						port_message_info* senderInfo);
 
 
 #ifdef __cplusplus

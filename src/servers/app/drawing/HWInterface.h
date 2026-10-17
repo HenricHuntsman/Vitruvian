@@ -1,5 +1,6 @@
 /*
  * Copyright 2005-2012, Haiku.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -68,6 +69,7 @@ public:
 	// You need to WriteLock
 	virtual	status_t			Initialize();
 	virtual	status_t			Shutdown() = 0;
+	virtual status_t			InitCheck() const { return B_OK; }
 
 	// allocating a DrawingEngine attached to this HWInterface
 	virtual	DrawingEngine*		CreateDrawingEngine();
@@ -95,6 +97,22 @@ public:
 	virtual	status_t			GetPreferredMode(display_mode* mode);
 	virtual status_t			GetMonitorInfo(monitor_info* info);
 
+	// The user's rotation, 0..3 as DRM_MODE_PANEL_ORIENTATION_*, relative
+	// to how the panel is mounted: NORMAL is upright as the device is held.
+	virtual	int32				PanelOrientation() const { return 0; }
+	// -1 is the same as NORMAL; B_UNSUPPORTED backends hide the control.
+	virtual	status_t			SetPanelOrientation(int32)
+									{ return B_UNSUPPORTED; }
+	// What the scanout applies: the mounting composed with the user's
+	// rotation. Devices glued to the panel are mapped through this.
+	virtual	int32				PanelScanoutOrientation() const
+									{ return PanelOrientation(); }
+
+	// B_PANEL_REFLECTION_*; NONE unless overridden. No auto-detected state.
+	virtual	int32				PanelReflection() const { return 0; }
+	virtual	status_t			SetPanelReflection(int32)
+									{ return B_UNSUPPORTED; }
+
 	virtual sem_id				RetraceSemaphore() = 0;
 	virtual status_t			WaitForRetrace(
 									bigtime_t timeout = B_INFINITE_TIMEOUT) = 0;
@@ -106,8 +124,22 @@ public:
 	virtual status_t			SetBrightness(float) = 0;
 	virtual status_t			GetBrightness(float*) = 0;
 
+	// Color temperature (Kelvin).  6500 = neutral; lower = warmer,
+	// higher = cooler.  B_NOT_SUPPORTED when the output cannot do it.
+	virtual status_t			SetTemperature(float kelvin)
+									{ return B_NOT_SUPPORTED; }
+	virtual status_t			GetTemperature(float* kelvin)
+									{ return B_NOT_SUPPORTED; }
+
+	// Connector name as the kernel names it (HDMI-A-1, eDP-1, ...).
+	virtual status_t			GetConnectorName(BString& name)
+									{ return B_NOT_SUPPORTED; }
+
 	virtual status_t			GetAccelerantPath(BString& path);
 	virtual status_t			GetDriverPath(BString& path);
+
+	virtual	void				OnSeatEnabled();
+	virtual	void				OnSeatDisabled();
 
 	// cursor handling (these do their own Read/Write locking)
 			ServerCursorReference Cursor() const;
@@ -148,6 +180,7 @@ public:
 	virtual	status_t			Invalidate(const BRect& frame);
 	// while CopyBackToFront() actually performs the operation
 	virtual	status_t			CopyBackToFront(const BRect& frame);
+	virtual	status_t			CopyBackToFront(const BRegion& region);
 
 protected:
 	virtual	void				_CopyBackToFront(/*const*/ BRegion& region);
@@ -180,7 +213,8 @@ protected:
 	virtual	void				_DrawCursor(IntRect area) const;
 
 	// does the actual transfer and handles color space conversion
-			void				_CopyToFront(uint8* src, uint32 srcBPR, int32 x,
+	// virtual: rotated scanouts must write physical coordinates
+	virtual	void				_CopyToFront(uint8* src, uint32 srcBPR, int32 x,
 									int32 y, int32 right, int32 bottom) const;
 
 			IntRect				_CursorFrame() const;

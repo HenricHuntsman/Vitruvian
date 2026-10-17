@@ -37,6 +37,8 @@ All rights reserved.
 
 #include <string.h>
 
+#include <set>
+
 #include <Alert.h>
 #include <Application.h>
 #include <Button.h>
@@ -47,6 +49,7 @@ All rights reserved.
 #include <FindDirectory.h>
 #include <GridView.h>
 #include <Locale.h>
+#include <Locker.h>
 #include <MenuBar.h>
 #include <MenuField.h>
 #include <MenuItem.h>
@@ -191,6 +194,11 @@ TFilePanel::TFilePanel(file_panel_mode mode, BMessenger* target, const BEntry* s
 	Lock();
 	InitIconPreloader();
 
+	{
+		AutoLock<BLocker> registryLock(sLiveWindowsLock);
+		sLiveWindows.insert(this);
+	}
+
 	fIsSavePanel = (mode == B_SAVE_PANEL);
 
 	const float labelSpacing = be_control_look->DefaultLabelSpacing();
@@ -294,10 +302,44 @@ TFilePanel::TFilePanel(file_panel_mode mode, BMessenger* target, const BEntry* s
 
 TFilePanel::~TFilePanel()
 {
+	{
+		AutoLock<BLocker> registryLock(sLiveWindowsLock);
+		sLiveWindows.erase(this);
+	}
+
 	BMessenger tracker(kTrackerSignature);
 	BHandler::StopWatching(tracker, kDesktopFilePanelRootChanged);
 
 	delete fMessage;
+}
+
+
+BLocker TFilePanel::sLiveWindowsLock("file panel registry");
+std::set<const BWindow*> TFilePanel::sLiveWindows;
+
+
+void
+TFilePanel::Quit()
+{
+	// Mark this window gone before BContainerWindow::Quit() runs (and
+	// eventually self-deletes via BLooper::Quit()), so a racing
+	// BFilePanel::~BFilePanel() -- e.g. when the app's shutdown sequence
+	// quits this window ahead of the client's own teardown -- knows not
+	// to touch it again.
+	{
+		AutoLock<BLocker> registryLock(sLiveWindowsLock);
+		sLiveWindows.erase(this);
+	}
+
+	_inherited::Quit();
+}
+
+
+bool
+TFilePanel::IsLive(const BWindow* window)
+{
+	AutoLock<BLocker> registryLock(sLiveWindowsLock);
+	return sLiveWindows.find(window) != sLiveWindows.end();
 }
 
 
@@ -405,7 +447,7 @@ TFilePanel::FSFilter(BMessage* message, BHandler**, BMessageFilter* filter)
 			entry_ref dirRef;
 			message->FindRef("virtual:to directory", &dirRef);
 
-			node_ref dirNode = node_ref(dirRef.dev(), dirRef.dir());
+			node_ref dirNode = node_ref(dirRef.vdevice(), dirRef.vdirectory());
 			// if current directory moved, update entry ref and menu
 			// but not wind title
 			if (*(panel->TargetModel()->NodeRef()) == itemNode) {
@@ -431,10 +473,8 @@ TFilePanel::FSFilter(BMessage* message, BHandler**, BMessageFilter* filter)
 				BDirectory root;
 				volume.GetRootDirectory(&root);
 
-				BEntry entry;
 				entry_ref ref;
-				root.GetEntry(&entry);
-				entry.GetRef(&ref);
+				root.GetRef(&ref);
 
 				panel->SwitchDirectory(&ref);
 				return B_SKIP_MESSAGE;
@@ -1503,11 +1543,14 @@ TFilePanel::SwitchDirToDesktopIfNeeded(entry_ref &ref)
 
 	BDirectory desktopDir;
 	FSGetDeskDir(&desktopDir);
-	if (FSIsDeskDir(&entry) || (!settings.ShowDisksIcon() && FSIsRootDir(&entry))) {
+	if (FSIsDeskDir(&entry)
+#ifndef __VOS__
+		|| (!settings.ShowDisksIcon() && FSIsRootDir(&entry))
+#endif
+		) {
 		// navigated into desktop folder or hit "root" level, switch to Desktop
 
-		desktopDir.GetEntry(&entry);
-		entry.GetRef(&ref);
+		desktopDir.GetRef(&ref);
 		return true;
 	}
 
@@ -1544,14 +1587,12 @@ TFilePanel::ShowCenteredAlert(const char* text, const char* button1,
 		B_WIDTH_AS_USUAL, B_WARNING_ALERT);
 	alert->MoveTo(Frame().left + 10, Frame().top + 10);
 
-#if 0
 	if (button1 != NULL && !strncmp(button1, "Cancel", 7))
 		alert->SetShortcut(0, B_ESCAPE);
 	else if (button2 != NULL && !strncmp(button2, "Cancel", 7))
 		alert->SetShortcut(1, B_ESCAPE);
 	else if (button3 != NULL && !strncmp(button3, "Cancel", 7))
 		alert->SetShortcut(2, B_ESCAPE);
-#endif
 
 	return alert->Go();
 }

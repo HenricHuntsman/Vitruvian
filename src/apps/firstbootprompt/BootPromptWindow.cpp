@@ -3,6 +3,7 @@
  * Copyright 2010-2021, Adrien Destugues, pulkomandy@pulkomandy.tk.
  * Copyright 2011, Axel Dörfler, axeld@pinc-software.de.
  * Copyright 2020-2021, Panagiotis "Ivory" Vasilopoulos <git@n0toose.net>
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  *
  * All rights reserved. Distributed under the terms of the MIT License.
  */
@@ -12,6 +13,8 @@
 
 #include <new>
 #include <stdio.h>
+#include <string.h>
+#include <unistd.h>
 
 #include <Alert.h>
 #include <Bitmap.h>
@@ -29,6 +32,7 @@
 #include <LayoutBuilder.h>
 #include <ListView.h>
 #include <Locale.h>
+#include <LocaleRoster.h>
 #include <Menu.h>
 #include <MutableLocaleRoster.h>
 #include <ObjectList.h>
@@ -36,7 +40,6 @@
 #include <Roster.h>
 #include <Screen.h>
 #include <ScrollView.h>
-#include <SeparatorView.h>
 #include <StringItem.h>
 #include <StringView.h>
 #include <TextView.h>
@@ -57,6 +60,10 @@ using BPrivate::MutableLocaleRoster;
 namespace BPrivate {
 	void ForceUnloadCatalog();
 };
+
+
+// Read by the Installer too; keep the two in step.
+static const char* kFirstBootHandoffPath = "/run/vos/firstboot.conf";
 
 
 static const char* kLanguageKeymapMappings[] = {
@@ -83,12 +90,14 @@ public:
 	LanguageItem(const char* label, const char* language)
 		:
 		BStringItem(label),
-		fLanguage(language)
+		fLanguage(language),
+		fIcon(NULL)
 	{
 	}
 
 	~LanguageItem()
 	{
+		delete fIcon;
 	}
 
 	const char* Language() const
@@ -96,13 +105,74 @@ public:
 		return fLanguage.String();
 	}
 
+	void Update(BView* owner, const BFont* font)
+	{
+		BStringItem::Update(owner, font);
+
+		// Reserve the icon column whether or not a flag is found, so the
+		// labels line up with the rows that have one.
+		float iconSize = Height();
+		SetWidth(Width() + iconSize
+			+ be_control_look->DefaultLabelSpacing());
+
+		// Drop previous bitmap (Update() runs again on font/attach change, preventing leaks)
+		delete fIcon;
+		fIcon = new(std::nothrow) BBitmap(
+			BRect(0, 0, iconSize - 1, iconSize - 1), B_RGBA32);
+		if (fIcon != NULL
+			&& BLocaleRoster::Default()->GetFlagIconForLanguage(fIcon,
+				fLanguage.String()) != B_OK) {
+			delete fIcon;
+			fIcon = NULL;
+		}
+	}
+
 	void DrawItem(BView* owner, BRect frame, bool complete)
 	{
-		BStringItem::DrawItem(owner, frame, true/*complete*/);
+		if (Text() == NULL) {
+			BStringItem::DrawItem(owner, frame, true/*complete*/);
+			return;
+		}
+
+		float iconSize = fIcon != NULL && fIcon->IsValid()
+			? fIcon->Bounds().Width() : Height();
+		float spacing = be_control_look->DefaultLabelSpacing();
+		rgb_color lowColor = owner->LowColor();
+
+		owner->SetLowColor(IsSelected()
+			? ui_color(B_LIST_SELECTED_BACKGROUND_COLOR)
+			: owner->ViewColor());
+		owner->FillRect(frame, B_SOLID_LOW);
+
+		BRect iconFrame(frame.left + spacing, frame.top,
+			frame.left + spacing + iconSize - 1, frame.top + iconSize - 1);
+
+		if (fIcon != NULL && fIcon->IsValid()) {
+			owner->SetDrawingMode(B_OP_OVER);
+			owner->DrawBitmap(fIcon, iconFrame);
+			owner->SetDrawingMode(B_OP_COPY);
+		} else {
+			// No single country to show; draw muted outline as flag slot
+			rgb_color border = ui_color(B_CONTROL_BORDER_COLOR);
+			border.alpha = 90;
+			rgb_color high = owner->HighColor();
+			owner->SetDrawingMode(B_OP_ALPHA);
+			owner->SetHighColor(border);
+			owner->StrokeRoundRect(iconFrame.InsetByCopy(0, iconSize / 6), 2, 2);
+			owner->SetHighColor(high);
+			owner->SetDrawingMode(B_OP_COPY);
+		}
+
+		owner->MovePenTo(frame.left + spacing * 2 + iconSize,
+			frame.top + BaselineOffset());
+		owner->DrawString(Text());
+
+		owner->SetLowColor(lowColor);
 	}
 
 private:
 			BString				fLanguage;
+			BBitmap*			fIcon;
 };
 
 
@@ -155,7 +225,8 @@ BootPromptWindow::BootPromptWindow()
 	size_t size = 0;
 	const uint8_t* data;
 
-	const BRect iconRect = BRect(BPoint(0, 0), be_control_look->ComposeIconSize(24));
+	const BRect iconRect = BRect(BPoint(0, 0),
+		be_control_look->ComposeIconSize(24));
 	BBitmap desktopIcon(iconRect, B_RGBA32);
 	data = (const uint8_t*)res->LoadResource('VICN', "Desktop", &size);
 	BIconUtils::GetVectorIcon(data, size, &desktopIcon);
@@ -164,14 +235,14 @@ BootPromptWindow::BootPromptWindow()
 	data = (const uint8_t*)res->LoadResource('VICN', "Installer", &size);
 	BIconUtils::GetVectorIcon(data, size, &installerIcon);
 
-	fDesktopButton = new BButton("", new BMessage(MSG_BOOT_DESKTOP));
-	fDesktopButton->SetTarget(be_app);
-	fDesktopButton->MakeDefault(true);
-	fDesktopButton->SetIcon(&desktopIcon);
+	fTryItButton = new BButton("desktop", "",
+		new BMessage(MSG_BOOT_DESKTOP));
+	fTryItButton->SetIcon(&desktopIcon);
+	fTryItButton->MakeDefault(true);
 
-	fInstallerButton = new BButton("", new BMessage(MSG_RUN_INSTALLER));
-	fInstallerButton->SetTarget(be_app);
-	fInstallerButton->SetIcon(&installerIcon);
+	fInstallButton = new BButton("installer", "",
+		new BMessage(MSG_RUN_INSTALLER));
+	fInstallButton->SetIcon(&installerIcon);
 
 	data = (const uint8_t*)res->LoadResource('VICN', "Language", &size);
 	IconView* languageIcon = new IconView(B_LARGE_ICON);
@@ -190,8 +261,8 @@ BootPromptWindow::BootPromptWindow()
 	fKeymapsMenuLabel->SetFont(be_bold_font);
 	fKeymapsMenuLabel->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED,
 		B_SIZE_UNSET));
-	// Make sure there is enough space to display the text even in verbose
-	// locales, to avoid width changes on language changes
+	// Reserve room for verbose locales so width doesn't jump on language
+	// changes.
 	float labelWidth = fKeymapsMenuLabel->StringWidth("Disposition du clavier")
 		+ 16;
 	fKeymapsMenuLabel->SetExplicitMinSize(BSize(labelWidth, B_SIZE_UNSET));
@@ -200,14 +271,12 @@ BootPromptWindow::BootPromptWindow()
 	BScrollView* languagesScrollView = new BScrollView("languagesScroll",
 		fLanguagesListView, B_WILL_DRAW, false, true);
 
-	// Carefully designed to not exceed the 640x480 resolution with a 12pt font.
+	// Sized so the window fits within 640x480 at a 12pt font.
 	float width = 640 * be_plain_font->Size() / 12 - (labelWidth + 64);
 	float height = be_plain_font->Size() * 23;
 	fInfoTextView->SetExplicitMinSize(BSize(width, height));
 	fInfoTextView->SetExplicitMaxSize(BSize(width, B_SIZE_UNSET));
 
-	// Make sure the language list view is always wide enough to show the
-	// largest language
 	fLanguagesListView->SetExplicitMinSize(
 		BSize(fLanguagesListView->StringWidth("Português (Brasil)"),
 		height));
@@ -243,14 +312,13 @@ BootPromptWindow::BootPromptWindow()
 			.AddGroup(B_HORIZONTAL)
 				.SetInsets(0)
 				.AddGlue()
-				.Add(fInstallerButton)
-				.Add(fDesktopButton)
+				.Add(fInstallButton)
+				.Add(fTryItButton)
 			.End()
 		.End();
 
 	fLanguagesListView->MakeFocus();
 
-	// Force the info text view to use a reasonable size
 	fInfoTextView->SetText("x\n\n\n\n\n\n\n\n\n\n\n\n\n\nx");
 	ResizeToPreferred();
 
@@ -275,7 +343,6 @@ BootPromptWindow::MessageReceived(BMessage* message)
 				_InitCatalog(true);
 				_UpdateKeymapsMenu();
 
-				// Select default keymap by language
 				BLanguage language(item->Language());
 				BMenuItem* keymapItem = _KeymapItemForLanguage(language);
 				if (keymapItem != NULL) {
@@ -283,13 +350,19 @@ BootPromptWindow::MessageReceived(BMessage* message)
 					_ActivateKeymap(keymapItem->Message());
 				}
 			}
-			// Calling it here is a cheap way of preventing the user to have
-			// no item selected. Always the current item will be selected.
+			// Also refreshes the visible strings; guarantees an item stays
+			// selected even if the ListView tried to clear its selection.
 			_UpdateStrings();
 			break;
 
 		case MSG_KEYMAP_SELECTED:
 			_ActivateKeymap(message);
+			break;
+
+		case MSG_BOOT_DESKTOP:
+		case MSG_RUN_INSTALLER:
+			_ApplyLocaleToSession();
+			be_app->PostMessage(message);
 			break;
 
 		default:
@@ -298,37 +371,49 @@ BootPromptWindow::MessageReceived(BMessage* message)
 }
 
 
+void
+BootPromptWindow::_ApplyLocaleToSession()
+{
+	// Not /run/vos/setup.conf: vos-install-helper truncates that file. The
+	// keymap is already in the live session settings.
+	BString language;
+	if (LanguageItem* item = static_cast<LanguageItem*>(
+			fLanguagesListView->ItemAt(
+				fLanguagesListView->CurrentSelection(0)))) {
+		language = item->Language();
+	}
+
+	if (language.IsEmpty())
+		return;
+
+	FILE* f = fopen(kFirstBootHandoffPath, "w");
+	if (f == NULL)
+		return;
+	fprintf(f, "language=%s\n", language.String());
+	fclose(f);
+}
+
+
 bool
 BootPromptWindow::QuitRequested()
 {
-	// If the Deskbar is not running, then FirstBootPrompt is
-	// is the only thing visible on the screen and that we won't
-	// have anything else to show. In that case, it would make
-	// sense to reboot the machine instead, but doing so without
-	// a warning could be confusing.
-	//
-	// Rebooting is managed by BootPrompt.cpp.
-
+	// Closing the window from the WM chrome exits FBP; the app's Quit path
+	// decides whether to reboot (no Deskbar = we're the only thing on
+	// screen, so a reboot is the safe action).
 	BAlert* alert = new(std::nothrow) BAlert(
-		B_TRANSLATE_SYSTEM_NAME("Quit Haiku"),
+		B_TRANSLATE_SYSTEM_NAME("Quit"),
 		B_TRANSLATE("Are you sure you want to close this window? This will "
 			"restart your system!"),
 		B_TRANSLATE("Cancel"), B_TRANSLATE("Restart system"), NULL,
 		B_WIDTH_AS_USUAL, B_STOP_ALERT);
 
-	// If there is not enough memory to create the alert here, we may as
-	// well try to reboot. There probably isn't much else to do anyway.
 	if (alert != NULL) {
 		alert->SetShortcut(0, B_ESCAPE);
 
-		if (alert->Go() == 0) {
-			// User doesn't want to exit after all
+		if (alert->Go() == 0)
 			return false;
-		}
 	}
 
-	// If deskbar is running, don't actually reboot: we are in test mode
-	// (probably run by a developer manually).
 	if (!be_roster->IsRunning(kDeskbarSignature))
 		be_app->PostMessage(MSG_REBOOT_REQUESTED);
 
@@ -339,16 +424,23 @@ BootPromptWindow::QuitRequested()
 void
 BootPromptWindow::_InitCatalog(bool saveSettings)
 {
-	// Initilialize the Locale Kit
 	BPrivate::ForceUnloadCatalog();
 
 	if (!saveSettings)
 		return;
 
+	// English has no catalog: take the selected language, or the ID stays
+	// empty and the conventions fall back to the ICU root locale.
 	BMessage settings;
 	BString language;
-	if (BLocaleRoster::Default()->GetCatalog()->GetLanguage(&language) == B_OK)
-		settings.AddString("language", language.String());
+	if (BLocaleRoster::Default()->GetCatalog()->GetLanguage(&language) != B_OK
+		|| language.IsEmpty()) {
+		BMessage preferred;
+		BLocaleRoster::Default()->GetPreferredLanguages(&preferred);
+		if (preferred.FindString("language", &language) != B_OK)
+			language = "en";
+	}
+	settings.AddString("language", language.String());
 
 	MutableLocaleRoster::Default()->SetPreferredLanguages(&settings);
 
@@ -361,53 +453,15 @@ BootPromptWindow::_InitCatalog(bool saveSettings)
 void
 BootPromptWindow::_UpdateStrings()
 {
-	BString titleTextHaiku = B_TRANSLATE("Welcome to Haiku!");
-	BString mainTextHaiku = B_TRANSLATE_COMMENT(
-		"Thank you for trying out Haiku! We hope you'll like it!\n\n"
-		"Please select your preferred language and keymap. Both settings can "
-		"also be changed later when running Haiku.\n\n"
-
-		"Do you wish to install Haiku now, or try it out first?",
-
-		"For other languages, a note could be added: \""
-		"Note: Localization of Haiku applications and other components is "
-		"an on-going effort. You will frequently encounter untranslated "
-		"strings, but if you like, you can join in the work at "
-		"<www.haiku-os.org>.\"");
-	BString desktopTextHaiku = B_TRANSLATE("Try Haiku");
-	BString installTextHaiku = B_TRANSLATE("Install Haiku");
-
-	BString titleTextDebranded = B_TRANSLATE("Welcome!");
-	BString mainTextDebranded = B_TRANSLATE_COMMENT(
-			"Thank you for trying out our operating system! We hope you'll "
-			"like it!\n\n"
-			"Please select your preferred language and keymap. Both settings "
-			"can also be changed later.\n\n"
-
-			"Do you wish to install the operating system now, or try it out "
-			"first?",
-
-			"This notice appears when the build of Haiku that's currently "
-			"being used is unofficial, as in, not distributed by Haiku itself."
-			"For other languages, a note could be added: \""
-			"Note: Localization of Haiku applications and other components is "
-			"an on-going effort. You will frequently encounter untranslated "
-			"strings, but if you like, you can join in the work at "
-			"<www.haiku-os.org>.\"");
-	BString desktopTextDebranded = B_TRANSLATE("Try it out");
-	BString installTextDebranded = B_TRANSLATE("Install");
-
-#ifdef HAIKU_DISTRO_COMPATIBILITY_OFFICIAL
-	SetTitle(titleTextHaiku);
-	fInfoTextView->SetText(mainTextHaiku);
-	fDesktopButton->SetLabel(desktopTextHaiku);
-	fInstallerButton->SetLabel(installTextHaiku);
-#else
-	SetTitle(titleTextDebranded);
-	fInfoTextView->SetText(mainTextDebranded);
-	fDesktopButton->SetLabel(desktopTextDebranded);
-	fInstallerButton->SetLabel(installTextDebranded);
-#endif
+	SetTitle(B_TRANSLATE("Welcome"));
+	fInfoTextView->SetText(B_TRANSLATE_COMMENT(
+			"Thank you for trying out Vitruvian! Please select your "
+			"preferred language and keymap. Both settings can also be "
+			"changed later.\n\n"
+			"Do you wish to install the system now, or try it out first?",
+			"FBP intro; both buttons follow this text."));
+	fTryItButton->SetLabel(B_TRANSLATE("Try It Now"));
+	fInstallButton->SetLabel(B_TRANSLATE("Install"));
 
 	fLanguagesLabelView->SetText(B_TRANSLATE("Language"));
 	fKeymapsMenuLabel->SetText(B_TRANSLATE("Keymap"));
@@ -419,15 +473,11 @@ BootPromptWindow::_UpdateStrings()
 void
 BootPromptWindow::_PopulateLanguages()
 {
-	// TODO: detect language/country from IP address
-
-	// Get current first preferred language of the user
 	BMessage preferredLanguages;
 	BLocaleRoster::Default()->GetPreferredLanguages(&preferredLanguages);
 	const char* firstPreferredLanguage;
 	if (preferredLanguages.FindString("language", &firstPreferredLanguage)
 			!= B_OK) {
-		// Fall back to built-in language of this application.
 		firstPreferredLanguage = "en";
 	}
 
@@ -435,13 +485,25 @@ BootPromptWindow::_PopulateLanguages()
 	BLocaleRoster::Default()->GetAvailableCatalogs(&installedCatalogs,
 		"x-vnd.Haiku-FirstBootPrompt");
 
+	// English is the source language, so it ships no catalog of its own and
+	// the scan above never finds it. Offer it anyway; it is always built in.
+	bool haveEnglish = false;
+	const char* catalogID;
+	for (int32 i = 0; installedCatalogs.FindString("language", i, &catalogID)
+			== B_OK; i++) {
+		if (strcmp(catalogID, "en") == 0) {
+			haveEnglish = true;
+			break;
+		}
+	}
+	if (!haveEnglish)
+		installedCatalogs.AddString("language", "en");
+
 	BFont font;
 	fLanguagesListView->GetFont(&font);
 
-	// Try to instantiate a BCatalog for each language, it will only work
-	// for translations of this application. So the list of languages will be
-	// limited to catalogs written for this application, which is on purpose!
-
+	// The catalog list becomes the language list: this app only ships
+	// languages it has been translated into.
 	const char* languageID;
 	LanguageItem* currentItem = NULL;
 	for (int32 i = 0; installedCatalogs.FindString("language", i, &languageID)
@@ -452,13 +514,12 @@ BootPromptWindow::_PopulateLanguages()
 			BString name;
 			language->GetNativeName(name);
 
-			// TODO: the following block fails to detect a couple of language
-			// names as containing glyphs we can't render. Why's that?
+			// Drop any language whose native name can't be rendered by the
+			// current font — fall back to the English name in that case.
 			bool hasGlyphs[name.CountChars()];
 			font.GetHasGlyphs(name.String(), name.CountChars(), hasGlyphs);
 			for (int32 i = 0; i < name.CountChars(); ++i) {
 				if (!hasGlyphs[i]) {
-					// replace by name translated to current language
 					language->GetName(name);
 					break;
 				}
@@ -467,7 +528,6 @@ BootPromptWindow::_PopulateLanguages()
 			LanguageItem* item = new LanguageItem(name.String(),
 				languageID);
 			fLanguagesListView->AddItem(item);
-			// Select this item if it is the first preferred language
 			if (strcmp(firstPreferredLanguage, languageID) == 0)
 				currentItem = item;
 
@@ -481,7 +541,6 @@ BootPromptWindow::_PopulateLanguages()
 		fLanguagesListView->Select(fLanguagesListView->IndexOf(currentItem));
 	fLanguagesListView->ScrollToSelection();
 
-	// Re-enable sending the selection message.
 	fLanguagesListView->SetSelectionMessage(
 		new BMessage(MSG_LANGUAGE_SELECTED));
 }
@@ -494,13 +553,13 @@ BootPromptWindow::_UpdateKeymapsMenu()
 	BMenuItem* item;
 	BList itemsList;
 
-	// Recreate keymapmenu items list, since BMenu could not sort its items.
+	// BMenu can't sort itself; drain and re-add sorted.
 	while ((item = menu->ItemAt(0)) != NULL) {
 		BMessage* message = item->Message();
-		entry_ref ref;
-		message->FindRef("ref", &ref);
-		item-> SetLabel(B_TRANSLATE_NOCOLLECT_ALL((ref.name),
-		"KeymapNames", NULL));
+		BString name;
+		message->FindString("name", &name);
+		item->SetLabel(B_TRANSLATE_NOCOLLECT_ALL(name.String(),
+			"KeymapNames", NULL));
 		itemsList.AddItem(item);
 		menu->RemoveItem((int32)0);
 	}
@@ -512,8 +571,6 @@ BootPromptWindow::_UpdateKeymapsMenu()
 void
 BootPromptWindow::_PopulateKeymaps()
 {
-	// Get the name of the current keymap, so we can mark the correct entry
-	// in the list view.
 	BString currentName;
 	entry_ref currentRef;
 	if (_GetCurrentKeymapRef(currentRef) == B_OK) {
@@ -521,56 +578,68 @@ BootPromptWindow::_PopulateKeymaps()
 		node.ReadAttrString("keymap:name", &currentName);
 	}
 
-	// TODO: common keymaps!
-	BPath path;
-	if (find_directory(B_SYSTEM_DATA_DIRECTORY, &path) != B_OK
-		|| path.Append("Keymaps") != B_OK) {
-		return;
-	}
-
-	// US-International is the default keymap, if we could not found a
-	// matching one
 	BString usInternational("US-International");
 
-	// Populate the menu
-	BDirectory directory;
-	if (directory.SetTo(path.Path()) == B_OK) {
-		entry_ref ref;
-		BList itemsList;
-		while (directory.GetNextRef(&ref) == B_OK) {
-			BMessage* message = new BMessage(MSG_KEYMAP_SELECTED);
-			message->AddRef("ref", &ref);
-			BMenuItem* item =
-				new BMenuItem(B_TRANSLATE_NOCOLLECT_ALL((ref.name),
-				"KeymapNames", NULL), message);
-			itemsList.AddItem(item);
-			if (currentName == ref.name)
-				item->SetMarked(true);
+	BList itemsList;
+	int32 count = xkb_layout_table_count();
+	for (int32 i = 0; i < count; i++) {
+		const char* name = xkb_layout_table_name_at(i);
+		if (name == NULL)
+			continue;
 
-			if (usInternational == ref.name)
-				fDefaultKeymapItem = item;
-		}
-		itemsList.SortItems(compare_void_menu_items);
-		fKeymapsMenuField->Menu()->AddList(&itemsList, 0);
+		BMessage* message = new BMessage(MSG_KEYMAP_SELECTED);
+		message->AddString("name", name);
+		BMenuItem* item =
+			new BMenuItem(B_TRANSLATE_NOCOLLECT_ALL(name, "KeymapNames",
+				NULL), message);
+		itemsList.AddItem(item);
+		if (currentName == name)
+			item->SetMarked(true);
+
+		if (usInternational == name)
+			fDefaultKeymapItem = item;
 	}
+	itemsList.SortItems(compare_void_menu_items);
+	fKeymapsMenuField->Menu()->AddList(&itemsList, 0);
 }
 
 
 void
 BootPromptWindow::_ActivateKeymap(const BMessage* message) const
 {
-	entry_ref ref;
-	if (message == NULL || message->FindRef("ref", &ref) != B_OK)
+	BString name;
+	if (message == NULL || message->FindString("name", &name) != B_OK)
 		return;
 
-	// Load and use the new keymap
+	const char* layout;
+	const char* variant;
+	look_up_xkb_layout(name.String(), layout, variant);
+
+	// Preserve the active Ctrl/Command mapping instead of reverting.
+	BKeymap active;
+	active.SetToCurrent();
+	const char* options = look_up_xkb_modifier_options(active.Map());
+
 	Keymap keymap;
-	if (keymap.Load(ref) != B_OK) {
-		fprintf(stderr, "Failed to load new keymap file (%s).\n", ref.name);
+	if (keymap.PopulateFromXkbNames("evdev", keymap.Model(), layout, variant,
+			options) != B_OK) {
+		fprintf(stderr, "Failed to derive keymap \"%s\".\n", name.String());
 		return;
 	}
+	keymap.SetName(name.String());
 
-	// Get entry_ref to the Key_map file in the user settings.
+	// A canonical "xkb:layout[:variant]" id, not the label above. Our menu
+	// is built from the curated kXkbLayoutTable while the Keymap preflet
+	// lists evdev.lst descriptions, and the two name spaces do not meet
+	// ("US-International" appears nowhere in evdev.lst), so only the id
+	// can identify this layout to the preflet afterwards.
+	BString layoutId("xkb:");
+	layoutId << layout;
+	if (variant != NULL && variant[0] != '\0')
+		layoutId << ':' << variant;
+
+	keymap.SetLayoutName(layoutId.String());
+
 	entry_ref currentRef;
 	if (_GetCurrentKeymapRef(currentRef) != B_OK) {
 		fprintf(stderr, "Failed to get ref to user keymap file.\n");
@@ -578,11 +647,15 @@ BootPromptWindow::_ActivateKeymap(const BMessage* message) const
 	}
 
 	if (keymap.Save(currentRef) != B_OK) {
-		fprintf(stderr, "Failed to save new keymap file (%s).\n", ref.name);
+		fprintf(stderr, "Failed to save new keymap file (%s).\n",
+			currentRef.name);
 		return;
 	}
 
-	keymap.Use();
+	// Machine-wide (allowed to fail quietly; /etc/default is root-owned) and per-user
+	// (janus ferries to real user at login). Written before activation triggers recompile.
+	keymap.WriteSystemXkbLayout();
+	keymap.ApplyXkbLayout();
 }
 
 
@@ -607,7 +680,6 @@ BootPromptWindow::_KeymapItemForLanguage(BLanguage& language) const
 	if (language.GetName(name, &english) != B_OK)
 		return fDefaultKeymapItem;
 
-	// Check special mappings first
 	for (size_t i = 0; i < kLanguageKeymapMappingsSize; i += 2) {
 		if (!strcmp(name, kLanguageKeymapMappings[i])) {
 			name = kLanguageKeymapMappings[i + 1];
@@ -620,9 +692,10 @@ BootPromptWindow::_KeymapItemForLanguage(BLanguage& language) const
 		BMenuItem* item = menu->ItemAt(i);
 		BMessage* message = item->Message();
 
-		entry_ref ref;
-		if (message->FindRef("ref", &ref) == B_OK
-			&& name == ref.name)
+		// The menu carries layout names now, not refs.
+		BString itemName;
+		if (message->FindString("name", &itemName) == B_OK
+			&& name == itemName)
 			return item;
 	}
 

@@ -15,6 +15,8 @@ class BEntry;
 class BString;
 struct entry_ref;
 
+namespace BPrivate { class VRefTrackAccess; }
+
 
 struct node_ref {
 	node_ref();
@@ -24,15 +26,18 @@ struct node_ref {
 	node_ref(const node_ref& other);
 	~node_ref();
 
-	// This is experimental V\OS API. It will change.
-	dev_t dev() const { return device; }
-	ino_t ino() const { return node; }
+	dev_t vdevice() const;
+	ino_t vnode() const;
+
+	dev_t device() const;
+	ino_t node() const;
+
+	void set_to(dev_t device, ino_t node);
 
 	status_t init_check() const;
 
 	vref_id id() const;
 	bool is_virtual() const;
-	const node_ref dereference() const;
 	void unset();
 
 	bool operator==(const node_ref& other) const;
@@ -40,23 +45,22 @@ struct node_ref {
 	bool operator<(const node_ref& other) const;
 	node_ref& operator=(const node_ref& other);
 
-#ifdef __VOS_NEW_ENTRY_REF__
 protected:
-#else
-public:
-#endif
+	dev_t virtual_device;
+	ino_t virtual_node;
 
-	dev_t device;
-	ino_t node;
-
-protected:
-	mutable dev_t	real_device;
-	mutable ino_t	real_node;
+	dev_t	real_device;
+	ino_t	real_node;
+	uint64 cache_ticket;
 
 private:
+	void _AcquireNodeSlot();
+	void _ReleaseNodeSlot();
+
 	team_id team;
 
-	friend class entry_ref;
+	friend struct entry_ref;
+	friend class BPrivate::VRefTrackAccess;
 };
 
 
@@ -73,6 +77,7 @@ public:
 			status_t			InitCheck() const;
 
 	virtual	status_t			GetStat(struct stat* st) const;
+	virtual	status_t			GetStatX(struct statx* stx) const;
 
 			status_t			SetTo(const entry_ref* ref);
 			status_t			SetTo(const BEntry* entry);
@@ -123,8 +128,10 @@ private:
 	virtual	void				_RudeNode5();
 	virtual	void				_RudeNode6();
 
-private:
+protected:
 			status_t			set_fd(int fd);
+
+private:
 	virtual	void				close_fd();
 			void				set_status(status_t newStatus);
 

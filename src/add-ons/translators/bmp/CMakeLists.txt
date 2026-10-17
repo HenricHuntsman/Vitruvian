@@ -1,6 +1,6 @@
 
-Application(
-	BMPTranslator
+TranslatorAddOn(
+	BMPTranslator SHARED
 
 	SOURCES
 	BMPMain.cpp
@@ -14,3 +14,4 @@ Application(
 
 	RDEF BMPTranslator.rdef
 )
+DoCatalogs("x-vnd.Haiku-BMPTranslator" add-ons/translators/bmp)

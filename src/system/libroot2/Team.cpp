@@ -8,16 +8,22 @@
 #include "Team.h"
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdio.h>
+#include <string.h>
 #include <syscall.h>
+#include <unistd.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 
-#include <list>
+#include <set>
 #include <string>
 
 #include "KernelDebug.h"
 #include "syscalls.h"
+#include <syscall_process_info.h>
 
 #include "../kernel/nexus/nexus/nexus.h"
 
@@ -26,49 +32,56 @@ int32 __gCPUCount = BKernelPrivate::Team::GetCPUCount();
 mode_t __gUmask = BKernelPrivate::Team::GetUmask();
 int __libc_argc = 0;
 char** __libc_argv = NULL;
+char** argv_save = NULL;
 
 
 namespace BKernelPrivate {
 
 
 static pthread_once_t gTeamOnce = PTHREAD_ONCE_INIT;
-static bool gPreinitDone = false;
 
 static int gNexus = -1;
-static int gNexusSem = -1;
 static int gNexusArea = -1;
-static int gNexusVRef = -1;
 static int gNexusNodeMonitor = -1;
 static struct udev* gUdev = NULL;
+static pthread_mutex_t gDevicesLock = PTHREAD_MUTEX_INITIALIZER;
 
-// TODO replace with DIR*
-static std::list<int> gTeams;
+// Pids this team spawned via LoadImage(), reaped opportunistically so they
+// don't sit as zombies against RLIMIT_NPROC. Never touches pids we didn't
+// create ourselves, so it can't steal children waited on elsewhere (janus).
+static pthread_mutex_t gLoadedPidsLock = PTHREAD_MUTEX_INITIALIZER;
+static std::set<pid_t> gLoadedPids;
+static const size_t kMaxTrackedPids = 256;
 
+
+// Reaps already-exited tracked pids with WNOHANG. Called with gLoadedPidsLock held.
+static void
+ReapLoadedPidsLocked()
+{
+	for (std::set<pid_t>::iterator it = gLoadedPids.begin();
+			it != gLoadedPids.end(); ) {
+		int status;
+		pid_t result = waitpid(*it, &status, WNOHANG);
+		if (result == *it || (result == -1 && errno == ECHILD))
+			gLoadedPids.erase(it++);
+		else
+			++it;
+	}
+}
 
 static void
 OpenNexusDevices()
 {
-	if (gPreinitDone)
-		return;
+	pthread_mutex_lock(&gDevicesLock);
 
-	if (gNexus < 0) {
-		const char* nexusFdEnv = getenv("__VITRUVIAN_NEXUS_FD");
-		if (nexusFdEnv != NULL) {
-			gNexus = atoi(nexusFdEnv);
-			unsetenv("__VITRUVIAN_NEXUS_FD");
-		} else {
-			gNexus = open("/dev/nexus", O_RDWR);
-		}
-	}
-
-	if (gNexusSem < 0)
-		gNexusSem = open("/dev/nexus_sem", O_RDWR);
+	if (gNexus < 0)
+		gNexus = open("/dev/nexus", O_RDWR | O_CLOEXEC);
 	if (gNexusArea < 0)
 		gNexusArea = open("/dev/nexus_area", O_RDWR | O_CLOEXEC);
-	if (gNexusVRef < 0)
-		gNexusVRef = open("/dev/nexus_vref", O_RDWR | O_CLOEXEC);
+	if (gNexusNodeMonitor < 0)
+		gNexusNodeMonitor = open("/dev/nexus_node_monitor", O_RDWR | O_CLOEXEC);
 
-	gPreinitDone = true;
+	pthread_mutex_unlock(&gDevicesLock);
 }
 
 
@@ -108,7 +121,7 @@ init_team(int argc, char** argv)
 	TRACE("init_team() %d\n", argc);
 
 	__libc_argc = argc;
-	__libc_argv = argv;
+	__libc_argv = argv_save = argv;
 
 	__gCPUCount = BKernelPrivate::Team::GetCPUCount();
 	__gUmask = BKernelPrivate::Team::GetUmask();
@@ -124,10 +137,6 @@ deinit_team()
 {
 	TRACE("deinit_team()\n");
 
-	if (gNexusSem >= 0) {
-		close(gNexusSem);
-		gNexusSem = -1;
-	}
 	if (gNexus >= 0) {
 		close(gNexus);
 		gNexus = -1;
@@ -135,10 +144,6 @@ deinit_team()
 	if (gNexusArea >= 0) {
 		close(gNexusArea);
 		gNexusArea = -1;
-	}
-	if (gNexusVRef >= 0) {
-		close(gNexusVRef);
-		gNexusVRef = -1;
 	}
 	if (gNexusNodeMonitor >= 0) {
 		close(gNexusNodeMonitor);
@@ -157,11 +162,13 @@ Team::InitTeam()
 
 	setenv("TARGET_SCREEN", "root", 1);
 
-	// Register atfork handlers. This should be good for us - we register the
-	// first set of callbacks that will be executed before any other set the
-	// user may register. Calling pthread_atfork again adds to the list.
-	pthread_atfork(&Team::PrepareFatherAtFork,
-		&Team::SyncFatherAtFork, &Team::ReinitChildAtFork);
+	// Register once per image: handlers inherit across fork(), but re-running
+	// in ReinitChildAtFork() would duplicate the handlers each generation.
+	static bool sAtForkRegistered = false;
+	if (!sAtForkRegistered) {
+		sAtForkRegistered = true;
+		pthread_atfork(NULL, NULL, &Team::ReinitChildAtFork);
+	}
 
 	struct sigaction sa;
 	memset(&sa, 0, sizeof(sa));
@@ -175,24 +182,9 @@ Team::InitTeam()
 	sigaction(SIGABRT, &sa, NULL);
 
 	if (gNexus < 0) {
-		const char* nexusFdEnv = getenv("__VITRUVIAN_NEXUS_FD");
-		if (nexusFdEnv != NULL) {
-			gNexus = atoi(nexusFdEnv);
-			unsetenv("__VITRUVIAN_NEXUS_FD");
-			TRACE("Team::InitTeam: using inherited nexus fd %d\n", gNexus);
-		} else {
-			gNexus = open("/dev/nexus", O_RDWR);
-			if (gNexus < 0) {
-				printf("Can't open Nexus IPC\n");
-				exit(-1);
-			}
-		}
-	}
-
-	if (gNexusSem < 0) {
-		gNexusSem = open("/dev/nexus_sem", O_RDWR);
-		if (gNexusSem < 0) {
-			printf("Can't open Nexus Sem\n");
+		gNexus = open("/dev/nexus", O_RDWR | O_CLOEXEC);
+		if (gNexus < 0) {
+			printf("Can't open Nexus IPC\n");
 			exit(-1);
 		}
 	}
@@ -205,21 +197,13 @@ Team::InitTeam()
 		}
 	}
 
-	if (gNexusVRef < 0) {
-		gNexusVRef = open("/dev/nexus_vref", O_RDWR | O_CLOEXEC);
-		if (gNexusVRef < 0) {
-			printf("Can't open Nexus VRef\n");
+	if (gNexusNodeMonitor < 0) {
+		gNexusNodeMonitor = open("/dev/nexus_node_monitor", O_RDWR | O_CLOEXEC);
+		if (gNexusNodeMonitor < 0) {
+			printf("Can't open Nexus Node Monitor\n");
 			exit(-1);
 		}
 	}
-
-#ifdef __ENABLE_NODE_MONITOR__
-	gNexusNodeMonitor = open("/dev/nexus_node_monitor", O_RDWR | O_CLOEXEC);
-	if (gNexusNodeMonitor < 0) {
-		printf("Can't open Nexus Node Monitor module\n");
-		exit(-1);
-	}
-#endif
 }
 
 
@@ -236,10 +220,10 @@ Team::GetNexusDescriptor()
 int
 Team::GetSemDescriptor()
 {
-	if (gNexusSem == -1)
+	if (gNexus == -1)
 		OpenNexusDevices();
 
-	return gNexusSem;
+	return gNexus;
 }
 
 
@@ -256,15 +240,15 @@ Team::GetAreaDescriptor()
 int
 Team::GetVRefDescriptor(dev_t* dev)
 {
-	if (gNexusVRef == -1)
+	if (gNexusNodeMonitor == -1 || gNexus == -1)
 		OpenNexusDevices();
 
 	if (dev != NULL) {
 		struct stat st;
-		fstat(gNexusVRef, &st);
-		*dev = st.st_dev;
+		fstat(gNexus, &st);
+		*dev = st.st_rdev;
 	}
-	return gNexusVRef;
+	return gNexusNodeMonitor;
 }
 
 
@@ -306,27 +290,11 @@ Team::GetCPUCount()
 
 
 void
-Team::PrepareFatherAtFork()
-{
-	TRACE("PrepareFatherAtFork()\n");
-}
-
-
-void
-Team::SyncFatherAtFork()
-{
-	TRACE("SyncFatherAtFork()\n");
-
-	int nexus = BKernelPrivate::Team::GetNexusDescriptor();
-	thread_id id = nexus_io(nexus, NEXUS_THREAD_WAIT_NEWBORN, NULL);
-	if (id < 0)
-		printf("Fork failed\n");
-}
-
-
-void
 Team::ReinitChildAtFork()
 {
+	// Reset tid cache before find_thread(NULL) — parent's stale tid must not persist.
+	ResetCachedThreadId();
+
 	TRACE("ReinitChildAtFork()\n");
 
 	__gCPUCount = BKernelPrivate::Team::GetCPUCount();
@@ -336,17 +304,9 @@ Team::ReinitChildAtFork()
 		close(gNexus);
 		gNexus = -1;
 	}
-	if (gNexusSem >= 0) {
-		close(gNexusSem);
-		gNexusSem = -1;
-	}
 	if (gNexusArea >= 0) {
 		close(gNexusArea);
 		gNexusArea = -1;
-	}
-	if (gNexusVRef >= 0) {
-		close(gNexusVRef);
-		gNexusVRef = -1;
 	}
 	if (gNexusNodeMonitor >= 0) {
 		close(gNexusNodeMonitor);
@@ -357,18 +317,23 @@ Team::ReinitChildAtFork()
 		gUdev = NULL;
 	}
 
-	gNexus = open("/dev/nexus", O_RDWR);
+	// Locks are inherited in whatever state they had at fork time; another
+	// thread may have held one, deadlocking the first user of it here.
+	pthread_mutex_init(&gLoadedPidsLock, NULL);
+	pthread_mutex_init(&gDevicesLock, NULL);
+
+	// Inherited pids belong to the parent's LoadImage() calls, not ours;
+	// waiting on them here would race the parent's own reaping.
+	gLoadedPids.clear();
+
+	// Opening /dev/nexus creates our team; nothing to park on here.
+	gNexus = open("/dev/nexus", O_RDWR | O_CLOEXEC);
 	if (gNexus < 0) {
 		printf("ReinitChildAtFork: Can't open Nexus IPC\n");
 		exit(1);
 	}
 
-	thread_id id = nexus_io(gNexus, NEXUS_THREAD_CLONE_EXECUTED, 1);
-	if (id < 0)
-		printf("clone failed (child)\n");
-
 	gTeamOnce = PTHREAD_ONCE_INIT;
-	gPreinitDone = false;
 	pthread_once(&gTeamOnce, &Team::InitTeam);
 }
 
@@ -383,38 +348,31 @@ Team::LoadImage(int32 argc, const char** argv, const char** envp)
 
 	TRACE("load_image: %s (argc=%d)\n", argv[0], argc);
 
-	TRACE("LoadImage: about to clone(), gNexus=%d gNexusSem=%d gNexusArea=%d gNexusVRef=%d\n",
-		gNexus, gNexusSem, gNexusArea, gNexusVRef);
+	TRACE("LoadImage: about to clone(), gNexus=%d gNexusArea=%d gNexusNodeMonitor=%d\n",
+		gNexus, gNexusArea, gNexusNodeMonitor);
+
+	pthread_mutex_lock(&gLoadedPidsLock);
+	ReapLoadedPidsLocked();
+	pthread_mutex_unlock(&gLoadedPidsLock);
 
 	pid_t pid = syscall(SYS_clone, SIGCHLD, 0, NULL, NULL, 0);
 	if (pid == -1) {
 		TRACE("load_image: clone failed: %s\n", strerror(errno));
+		fprintf(stderr, "load_image: clone failed: %s\n", strerror(errno));
 		return -errno;
 	}
 
 	if (pid == 0) {
-		// Set environment variable to indicate this is load_image, not fork
-		// This prevents libbe's initialize_forked_child() from running
-		setenv("__VITRUVIAN_LOAD_IMAGE", "1", 1);
-
-		TRACE("LoadImage CHILD: closing nexus fds gNexus=%d gNexusSem=%d gNexusArea=%d gNexusVRef=%d\n",
-			gNexus, gNexusSem, gNexusArea, gNexusVRef);
+		TRACE("LoadImage CHILD: closing nexus fds gNexus=%d gNexusArea=%d gNexusNodeMonitor=%d\n",
+			gNexus, gNexusArea, gNexusNodeMonitor);
 
 		if (gNexus >= 0) {
 			close(gNexus);
 			gNexus = -1;
 		}
-		if (gNexusSem >= 0) {
-			close(gNexusSem);
-			gNexusSem = -1;
-		}
 		if (gNexusArea >= 0) {
 			close(gNexusArea);
 			gNexusArea = -1;
-		}
-		if (gNexusVRef >= 0) {
-			close(gNexusVRef);
-			gNexusVRef = -1;
 		}
 		if (gNexusNodeMonitor >= 0) {
 			close(gNexusNodeMonitor);
@@ -425,22 +383,25 @@ Team::LoadImage(int32 argc, const char** argv, const char** envp)
 			gUdev = NULL;
 		}
 
+		// Deliberately no O_CLOEXEC: nexus_release() tears the team down
+		// when open_count hits 0, which would fire in the window between
+		// this open() and the exec below if the fd carried CLOEXEC.
 		gNexus = open("/dev/nexus", O_RDWR);
-		if (gNexus >= 0) {
-			char fdStr[16];
-			snprintf(fdStr, sizeof(fdStr), "%d", gNexus);
-			setenv("__VITRUVIAN_NEXUS_FD", fdStr, 1);
-		}
 
 		int nexus = BKernelPrivate::Team::GetNexusDescriptor();
+
+		// Park until the creator's resume_thread().
 		thread_id id = nexus_io(nexus, NEXUS_THREAD_CLONE_EXECUTED, NULL);
-		if (id < 0)
-			printf("Fork failed\n");
+		if (id < 0) {
+			fprintf(stderr, "load_image child: nexus park failed (%d)\n",
+				(int)id);
+			_exit(127);
+		}
 
 		execvpe(argv[0], const_cast<char* const*>(argv),
 			envp ? const_cast<char* const*>(envp) : environ);
 
-		TRACE("load_image child: exec failed for '%s': %s\n",
+		fprintf(stderr, "load_image child: exec failed for '%s': %s\n",
 			argv[0], strerror(errno));
 
 		 // command not found
@@ -448,11 +409,20 @@ Team::LoadImage(int32 argc, const char** argv, const char** envp)
 	}
 
 	int nexus = BKernelPrivate::Team::GetNexusDescriptor();
-	thread_id id = nexus_io(nexus, NEXUS_THREAD_WAIT_NEWBORN, NULL);
+	// Creator-side registration: nexus pre-creates the child's team, so a
+	// resume_thread() that lands before the child opens /dev/nexus is kept.
+	thread_id id = nexus_io(nexus, NEXUS_THREAD_REGISTER, (void*)(intptr_t)pid);
 	if (id < 0) {
 		printf("Fork failed\n");
 		return B_BAD_THREAD_ID;
 	}
+
+	pthread_mutex_lock(&gLoadedPidsLock);
+	if (gLoadedPids.size() >= kMaxTrackedPids)
+		ReapLoadedPidsLocked();
+	if (gLoadedPids.size() < kMaxTrackedPids)
+		gLoadedPids.insert(pid);
+	pthread_mutex_unlock(&gLoadedPidsLock);
 
 	TRACE("load_image: success\n");
 	return id;
@@ -588,8 +558,26 @@ _get_team_info(team_id id, team_info* info, size_t size)
 	}
 
 	info->team = id;
+	info->name[0] = '\0';
+
 	while (fgets(buffer, sizeof(buffer), statusFile) != NULL) {
-		if (strncmp(buffer, "Uid:", 4) == 0) {
+		if (strncmp(buffer, "Name:", 5) == 0) {
+			const char* name = buffer + 5;
+			while (*name == ' ' || *name == '\t')
+				name++;
+
+			size_t length = 0;
+			while (length < B_OS_NAME_LENGTH - 1) {
+				unsigned char c = (unsigned char)name[length];
+				if (c == '\0' || c == '\n' || c == '\r'
+					|| c < 0x20 || c == 0x7f) {
+					break;
+				}
+				info->name[length] = name[length];
+				length++;
+			}
+			info->name[length] = '\0';
+		} else if (strncmp(buffer, "Uid:", 4) == 0) {
 			uid_t ruid = 0, euid = 0, suid = 0, fuid = 0;
 			sscanf(buffer + 4, "%u %u %u %u", &ruid, &euid, &suid, &fuid);
 			info->real_uid = ruid;
@@ -609,111 +597,125 @@ _get_team_info(team_id id, team_info* info, size_t size)
 
 	fclose(statusFile);
 
-	int cmdFd = open(commandProcPath, O_RDONLY);
+	info->argc = 0;
+	info->args[0] = '\0';
+
+	int cmdFd = open(commandProcPath, O_RDONLY | O_CLOEXEC);
 	if (cmdFd >= 0) {
-		ssize_t n = read(cmdFd, buffer, sizeof(buffer) - 1);
-		if (n > 0) {
+		ssize_t length = read(cmdFd, buffer, sizeof(buffer) - 1);
+		close(cmdFd);
+
+		if (length > 0) {
 			int argc = 0;
-			for (ssize_t i = 0; i < n; i++) {
-				if (buffer[i] == '\0') {
+			for (ssize_t i = 0; i < length; i++) {
+				unsigned char c = (unsigned char)buffer[i];
+				if (c == '\0') {
 					argc++;
+					buffer[i] = ' ';
+				} else if (c < 0x20 || c == 0x7f) {
+					// Processes can poke arbitrary bytes into their cmdline.
 					buffer[i] = ' ';
 				}
 			}
-			if (n > 0 && argc == 0)
-				argc = 1;
-			buffer[n] = '\0';
 
-			info->argc = argc;
-			strncpy(info->args, buffer, sizeof(info->args) - 1);
-			info->args[sizeof(info->args) - 1] = '\0';
+			while (length > 0 && buffer[length - 1] == ' ')
+				length--;
+			buffer[length] = '\0';
+
+			if (length > 0) {
+				info->argc = (argc > 0) ? argc : 1;
+				strlcpy(info->args, buffer, sizeof(info->args));
+			}
 		}
-		close(cmdFd);
-	} else {
-		info->argc = 0;
-		info->args[0] = '\0';
 	}
 
-	{
-		char mapsPath[B_PATH_NAME_LENGTH];
-		snprintf(mapsPath, sizeof(mapsPath), "/proc/%d/maps", id);
-		FILE* maps = fopen(mapsPath, "r");
-		if (maps) {
-			int images = 0;
-			int areas = 0;
-			char lastPath[PATH_MAX] = {0};
-			while (fgets(buffer, sizeof(buffer), maps)) {
-				areas++;
-				char* p = strchr(buffer, '/');
-				if (p) {
-					char* nl = strchr(p, '\n');
-					if (nl) *nl = '\0';
-					if (lastPath[0] == '\0' || strcmp(p, lastPath) != 0) {
-						images++;
-						strncpy(lastPath, p, sizeof(lastPath) - 1);
-						lastPath[sizeof(lastPath) - 1] = '\0';
-					}
+	// Kernel threads have an empty cmdline; fall back to Name: in brackets
+	// so callers that only look at args don't render a blank row.
+	if (info->args[0] == '\0' && info->name[0] != '\0') {
+		snprintf(info->args, sizeof(info->args), "[%s]", info->name);
+		info->argc = 1;
+	}
+
+	char mapsPath[B_PATH_NAME_LENGTH];
+	snprintf(mapsPath, sizeof(mapsPath), "/proc/%d/maps", id);
+	FILE* maps = fopen(mapsPath, "r");
+	if (maps != NULL) {
+		int images = 0;
+		int areas = 0;
+		char lastPath[PATH_MAX] = {0};
+		while (fgets(buffer, sizeof(buffer), maps)) {
+			areas++;
+			char* p = strchr(buffer, '/');
+			if (p != NULL) {
+				char* nl = strchr(p, '\n');
+				if (nl != NULL)
+					*nl = '\0';
+				if (lastPath[0] == '\0' || strcmp(p, lastPath) != 0) {
+					images++;
+					strlcpy(lastPath, p, sizeof(lastPath));
 				}
 			}
-			fclose(maps);
-			info->image_count = images;
-			info->area_count = areas;
-		} else {
-			info->image_count = 0;
-			info->area_count = 0;
 		}
+		fclose(maps);
+		info->image_count = images;
+		info->area_count = areas;
 	}
 
 	info->debugger_nub_thread = -1;
 	info->debugger_nub_port = 0;
 
-	{
-		char statPath[B_PATH_NAME_LENGTH];
-		snprintf(statPath, sizeof(statPath), "/proc/%d/stat", id);
-		FILE* stat = fopen(statPath, "r");
-		if (stat) {
-			char statbuf[4096];
-			size_t r = fread(statbuf, 1, sizeof(statbuf) - 1, stat);
-			statbuf[r] = '\0';
-			char* rp = strrchr(statbuf, ')');
-			if (rp) {
-				char* rest = rp + 2;
-				char* saveptr = NULL;
-				(void)strtok_r(rest, " ", &saveptr);
-				(void)strtok_r(NULL, " ", &saveptr);
-				char* tok = strtok_r(NULL, " ", &saveptr);
-				if (tok) info->group_id = (pid_t)strtol(tok, NULL, 10);
-				tok = strtok_r(NULL, " ", &saveptr);
-				if (tok) info->session_id = (pid_t)strtol(tok, NULL, 10);
+	char statPath[B_PATH_NAME_LENGTH];
+	snprintf(statPath, sizeof(statPath), "/proc/%d/stat", id);
+	FILE* statFile = fopen(statPath, "r");
+	if (statFile != NULL) {
+		char statBuffer[4096];
+		size_t length = fread(statBuffer, 1, sizeof(statBuffer) - 1, statFile);
+		statBuffer[length] = '\0';
+		fclose(statFile);
 
-				int field = 5;
-				while (field < 22 && (tok = strtok_r(NULL, " ", &saveptr)))
-					field++;
-				if (tok) {
-					unsigned long long starttime = strtoull(tok, NULL, 10);
-					if (starttime != 0) {
-						long ticks = sysconf(_SC_CLK_TCK);
-						if (ticks <= 0) ticks = 100;
+		char* rparen = strrchr(statBuffer, ')');
+		if (rparen != NULL) {
+			char* saveptr = NULL;
+			(void)strtok_r(rparen + 2, " ", &saveptr);
+			(void)strtok_r(NULL, " ", &saveptr);
 
-						FILE* uptime = fopen("/proc/uptime", "r");
-						double up = 0.0;
-						if (uptime) {
-							if (fscanf(uptime, "%lf", &up) != 1)
-								up = 0.0;
-							fclose(uptime);
-						}
+			char* token = strtok_r(NULL, " ", &saveptr);
+			if (token != NULL)
+				info->group_id = (pid_t)strtol(token, NULL, 10);
 
-						struct timespec now;
-						if (clock_gettime(CLOCK_REALTIME, &now) == 0 && up > 0.0) {
-							double boot_time = now.tv_sec - up;
-							double proc_start_secs = ((double)starttime) / (double)ticks;
-							double proc_start_time = boot_time + proc_start_secs;
-							info->start_time = (bigtime_t)(proc_start_time * 1e6);
-						}
+			token = strtok_r(NULL, " ", &saveptr);
+			if (token != NULL)
+				info->session_id = (pid_t)strtol(token, NULL, 10);
+
+			int field = 5;
+			while (field < 22 && (token = strtok_r(NULL, " ", &saveptr)))
+				field++;
+
+			if (token != NULL) {
+				unsigned long long starttime = strtoull(token, NULL, 10);
+				if (starttime != 0) {
+					long ticks = sysconf(_SC_CLK_TCK);
+					if (ticks <= 0)
+						ticks = 100;
+
+					double uptime = 0.0;
+					FILE* uptimeFile = fopen("/proc/uptime", "r");
+					if (uptimeFile != NULL) {
+						if (fscanf(uptimeFile, "%lf", &uptime) != 1)
+							uptime = 0.0;
+						fclose(uptimeFile);
+					}
+
+					struct timespec now;
+					if (clock_gettime(CLOCK_REALTIME, &now) == 0
+						&& uptime > 0.0) {
+						double bootTime = now.tv_sec - uptime;
+						double startSeconds = (double)starttime / (double)ticks;
+						info->start_time
+							= (bigtime_t)((bootTime + startSeconds) * 1e6);
 					}
 				}
 			}
-			fclose(stat);
 		}
 	}
 
@@ -727,36 +729,42 @@ status_t
 _get_next_team_info(int32* cookie, team_info* info, size_t size)
 {
 	if (cookie == NULL || *cookie < 0 || info == NULL
-			|| size != sizeof(team_info)) {
+		|| size != sizeof(team_info)) {
 		return B_BAD_VALUE;
 	}
 
+	// The cookie holds the open /proc fd between calls, encoded as fd+1 so
+	// that 0 still means "start fresh".
+	int fd;
 	if (*cookie == 0) {
-		// TODO rewrite keeping a static DIR*
-		DIR* procDir = opendir("/proc");
-		struct dirent* dir = NULL;
-
-		if (procDir != NULL) {
-			while ((dir = readdir(procDir)) != NULL) {
-				if (atoi(dir->d_name) > 0)
-					BKernelPrivate::gTeams.push_front(atoi(dir->d_name));
-			}
-		} else
+		fd = _kern_open_dir(-1, "/proc");
+		if (fd < 0)
 			return B_ERROR;
+	} else
+		fd = *cookie - 1;
 
-		closedir(procDir);
+	union {
+		struct dirent entry;
+		char buffer[sizeof(struct dirent) + NAME_MAX + 1];
+	} dirent;
+
+	while (true) {
+		ssize_t count = _kern_read_dir(fd, &dirent.entry, sizeof(dirent), 1);
+		if (count <= 0) {
+			_kern_close(fd);
+			*cookie = 0;
+			return B_BAD_VALUE;
+		}
+
+		pid_t pid = (pid_t)atoi(dirent.entry.d_name);
+		if (pid <= 0)
+			continue;
+
+		if (_get_team_info((team_id)pid, info, size) == B_OK) {
+			*cookie = fd + 1;
+			return B_OK;
+		}
 	}
-
-	if (*cookie >= (int32)BKernelPrivate::gTeams.size())
-		return B_BAD_VALUE;
-
-	std::list<int>::iterator gTeamsIt = BKernelPrivate::gTeams.begin();
-	std::advance(gTeamsIt, *cookie);
-	unsigned int cur_pid = *gTeamsIt;
-	(*cookie)++;
-
-	return get_team_info(cur_pid, info);
-
 }
 
 
@@ -868,6 +876,37 @@ get_memory_properties(team_id teamID, const void* address, uint32* _protected,
 		close(pidfd);
 	*_lock = 0;
 	return B_OK;
+}
+
+
+pid_t
+_kern_process_info(pid_t process, int32 which)
+{
+	switch (which) {
+		case SESSION_ID:
+			return getsid(process);
+		case GROUP_ID:
+			return getpgid(process);
+		case PARENT_ID: {
+			char path[64];
+			snprintf(path, sizeof(path), "/proc/%d/status", (int)process);
+			FILE* f = fopen(path, "r");
+			if (f == NULL)
+				return -1;
+			char line[256];
+			pid_t ppid = -1;
+			while (fgets(line, sizeof(line), f)) {
+				if (strncmp(line, "PPid:", 5) == 0) {
+					sscanf(line + 5, "%d", &ppid);
+					break;
+				}
+			}
+			fclose(f);
+			return ppid;
+		}
+		default:
+			return -1;
+	}
 }
 
 

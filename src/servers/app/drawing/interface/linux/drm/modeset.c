@@ -1,8 +1,9 @@
 /*
  * modeset - DRM Modesetting Example
  *
- * Written 2012 by David Rheinsberg <david.rheinsberg@gmail.com>
- * Dedicated to the Public Domain.
+ * Copyright (?), David Rheinsberg <david.rheinsberg@gmail.com>
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
+ * Distributed under the terms of the GPL License.
  */
 
 /*
@@ -41,6 +42,15 @@
 #include <unistd.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
+#include <drm/drm_fourcc.h>
+
+#ifdef HAVE_GBM
+#include <gbm.h>
+#endif
+
+/* Matches virtio_gpu's own no-EDID default (XRES_DEF/YRES_DEF). */
+#define MODESET_FALLBACK_MIN_W	1024
+#define MODESET_FALLBACK_MIN_H	768
 
 /*struct modeset_dev;
 static int modeset_find_crtc(int fd, drmModeRes *res, drmModeConnector *conn,
@@ -179,7 +189,7 @@ int modeset_prepare(int fd)
 {
 	drmModeRes *res;
 	drmModeConnector *conn;
-	unsigned int i;
+	int i;
 	struct modeset_dev *dev;
 	int ret;
 
@@ -230,6 +240,41 @@ int modeset_prepare(int fd)
 	return 0;
 }
 
+
+/* True if the connector's "EDID" property blob is non-empty; some
+ * drivers set PREFERRED on a synthetic mode even without one. */
+static bool
+modeset_conn_has_edid(int fd, drmModeConnector *conn)
+{
+	drmModeObjectProperties *props = drmModeObjectGetProperties(fd,
+		conn->connector_id, DRM_MODE_OBJECT_CONNECTOR);
+	if (props == NULL)
+		return false;
+
+	bool has_edid = false;
+	for (uint32_t i = 0; i < props->count_props; i++) {
+		drmModePropertyRes *prop = drmModeGetProperty(fd, props->props[i]);
+		if (prop == NULL)
+			continue;
+
+		if (strcmp(prop->name, "EDID") == 0
+				&& (prop->flags & DRM_MODE_PROP_BLOB)) {
+			drmModePropertyBlobRes *blob =
+				drmModeGetPropertyBlob(fd, props->prop_values[i]);
+			has_edid = (blob != NULL && blob->length > 0);
+			if (blob != NULL)
+				drmModeFreePropertyBlob(blob);
+			drmModeFreeProperty(prop);
+			break;
+		}
+		drmModeFreeProperty(prop);
+	}
+
+	drmModeFreeObjectProperties(props);
+	return has_edid;
+}
+
+
 /*
  * Now we dig deeper into setting up a single connector. As described earlier,
  * we need to check several things first:
@@ -259,19 +304,112 @@ int modeset_prepare(int fd)
  *     framebuffer onto the monitor.
  */
 
+/* Mode policy shared by modeset_setup_dev() and GetPreferredMode(). The
+ * floor/ladder below only applies without EDID, since an EDID-less output
+ * leads with a bogus small mode. Returns NULL if conn->count_modes is 0. */
+const drmModeModeInfo*
+modeset_pick_mode(int fd, drmModeConnector *conn)
+{
+	if (conn->count_modes == 0)
+		return NULL;
+
+	/* A video= mode from the kernel command line is the user's choice; without
+	 * an EDID the probe helper marks 1024x768 PREFERRED next to it. */
+	for (int i = 0; i < conn->count_modes; i++) {
+		if (conn->modes[i].type & DRM_MODE_TYPE_USERDEF)
+			return &conn->modes[i];
+	}
+
+	drmModeModeInfo* preferred = NULL;
+	for (int i = 0; i < conn->count_modes; i++) {
+		if (conn->modes[i].type & DRM_MODE_TYPE_PREFERRED) {
+			preferred = &conn->modes[i];
+			break;
+		}
+	}
+
+	/* Without an EDID, a driver's no-info minimum (e.g. virtio-gpu's
+	 * 640x480) can masquerade as PREFERRED; require it clear the floor. */
+	drmModeModeInfo* picked = NULL;
+	if (preferred != NULL
+			&& (modeset_conn_has_edid(fd, conn)
+				|| (preferred->hdisplay >= MODESET_FALLBACK_MIN_W
+					&& preferred->vdisplay >= MODESET_FALLBACK_MIN_H)))
+		picked = preferred;
+
+	/* Skip the current CRTC mode too; take the smallest above the floor,
+	 * not the largest, which may be a synthetic ceiling. */
+	if (picked == NULL) {
+		for (int i = 0; i < conn->count_modes; i++) {
+			uint32_t w = conn->modes[i].hdisplay;
+			uint32_t h = conn->modes[i].vdisplay;
+			if (w < MODESET_FALLBACK_MIN_W || h < MODESET_FALLBACK_MIN_H)
+				continue;
+			if (picked == NULL
+					|| w * h < (uint32_t)picked->hdisplay * picked->vdisplay)
+				picked = &conn->modes[i];
+		}
+		/* Nothing clears the floor. Rather than accept whatever the
+		 * driver leads with, which is 640x480 on a mode list with no
+		 * display behind it, step down the standard sizes and take the
+		 * largest one actually offered. Anything at or above the floor
+		 * was already handled by the loop above. */
+		if (picked == NULL) {
+			static const struct { uint32_t w, h; } kLadder[] = {
+				{ 800, 600 }, { 640, 480 }
+			};
+
+			for (size_t l = 0;
+					l < sizeof(kLadder) / sizeof(kLadder[0]) && picked == NULL;
+					l++) {
+				for (int i = 0; i < conn->count_modes; i++) {
+					if (conn->modes[i].hdisplay == kLadder[l].w
+							&& conn->modes[i].vdisplay == kLadder[l].h) {
+						picked = &conn->modes[i];
+						break;
+					}
+				}
+			}
+
+			if (picked != NULL) {
+				fprintf(stderr, "no mode clears %dx%d; stepped down to "
+					"%ux%u of %d modes\n", MODESET_FALLBACK_MIN_W,
+					MODESET_FALLBACK_MIN_H, picked->hdisplay,
+					picked->vdisplay, conn->count_modes);
+			}
+		}
+
+		if (picked == NULL) {
+			/* Not even the ladder matched, so a small panel is simply
+			 * small and its own preference is the best guess. */
+			picked = preferred != NULL ? preferred : &conn->modes[0];
+			fprintf(stderr, "no mode clears %dx%d; kept the %s of %d\n",
+				MODESET_FALLBACK_MIN_W, MODESET_FALLBACK_MIN_H,
+				preferred != NULL ? "preferred" : "first",
+				conn->count_modes);
+		} else if (picked->hdisplay >= MODESET_FALLBACK_MIN_W
+				&& picked->vdisplay >= MODESET_FALLBACK_MIN_H) {
+			fprintf(stderr, "untrusted mode list; picked smallest "
+				"above %dx%d of %d modes\n", MODESET_FALLBACK_MIN_W,
+				MODESET_FALLBACK_MIN_H, conn->count_modes);
+		}
+	}
+
+	return picked;
+}
+
+
 int modeset_setup_dev(int fd, drmModeRes *res, drmModeConnector *conn,
 			     struct modeset_dev *dev)
 {
 	int ret;
 
-	/* check if a monitor is connected */
 	if (conn->connection != DRM_MODE_CONNECTED) {
 		fprintf(stderr, "ignoring unused connector %u\n",
 			conn->connector_id);
 		return -ENOENT;
 	}
 
-	/* check if there is at least one valid mode */
 	if (conn->count_modes == 0) {
 		fprintf(stderr, "no valid mode for connector %u\n",
 			conn->connector_id);
@@ -279,13 +417,24 @@ int modeset_setup_dev(int fd, drmModeRes *res, drmModeConnector *conn,
 	}
 
 	for (int i = 0; i < conn->count_modes; i++) {
-	fprintf(stderr, "mode %ux%u\n",
-		conn->modes[i].hdisplay, conn->modes[i].vdisplay);
+		fprintf(stderr, "mode %ux%u%s%s\n",
+			conn->modes[i].hdisplay, conn->modes[i].vdisplay,
+			(conn->modes[i].type & DRM_MODE_TYPE_PREFERRED)
+				? " [preferred]" : "",
+			(conn->modes[i].type & DRM_MODE_TYPE_USERDEF)
+				? " [cmdline]" : "");
 	}
-	/* copy the mode information into our device structure */
-	memcpy(&dev->mode, &conn->modes[0], sizeof(dev->mode));
-	dev->width = conn->modes[0].hdisplay;
-	dev->height = conn->modes[0].vdisplay;
+
+	const drmModeModeInfo* picked = modeset_pick_mode(fd, conn);
+	if (picked == NULL) {
+		fprintf(stderr, "no usable mode for connector %u\n",
+			conn->connector_id);
+		return -EFAULT;
+	}
+
+	memcpy(&dev->mode, picked, sizeof(dev->mode));
+	dev->width  = picked->hdisplay;
+	dev->height = picked->vdisplay;
 	fprintf(stderr, "mode for connector %u is %ux%u\n",
 		conn->connector_id, dev->width, dev->height);
 
@@ -334,8 +483,8 @@ int modeset_find_crtc(int fd, drmModeRes *res, drmModeConnector *conn,
 			     struct modeset_dev *dev)
 {
 	drmModeEncoder *enc;
-	unsigned int i, j;
-	int32_t crtc;
+	int i, j;
+	uint32_t crtc;
 	struct modeset_dev *iter;
 
 	/* first try the currently conected encoder+crtc */
@@ -349,12 +498,12 @@ int modeset_find_crtc(int fd, drmModeRes *res, drmModeConnector *conn,
 			crtc = enc->crtc_id;
 			for (iter = modeset_list; iter; iter = iter->next) {
 				if (iter->crtc == crtc) {
-					crtc = -1;
+					crtc = 0;
 					break;
 				}
 			}
 
-			if (crtc >= 0) {
+			if (crtc != 0) {
 				drmModeFreeEncoder(enc);
 				dev->crtc = crtc;
 				return 0;
@@ -386,13 +535,13 @@ int modeset_find_crtc(int fd, drmModeRes *res, drmModeConnector *conn,
 			crtc = res->crtcs[j];
 			for (iter = modeset_list; iter; iter = iter->next) {
 				if (iter->crtc == crtc) {
-					crtc = -1;
+					crtc = 0;
 					break;
 				}
 			}
 
 			/* we have found a CRTC, so save it and return */
-			if (crtc >= 0) {
+			if (crtc != 0) {
 				drmModeFreeEncoder(enc);
 				dev->crtc = crtc;
 				return 0;
@@ -435,11 +584,9 @@ int modeset_find_crtc(int fd, drmModeRes *res, drmModeConnector *conn,
 int modeset_create_fb(int fd, struct modeset_dev *dev)
 {
 	struct drm_mode_create_dumb creq;
-	struct drm_mode_destroy_dumb dreq;
 	struct drm_mode_map_dumb mreq;
 	int ret;
 
-	/* create dumb buffer */
 	memset(&creq, 0, sizeof(creq));
 	creq.width = dev->width;
 	creq.height = dev->height;
@@ -454,51 +601,136 @@ int modeset_create_fb(int fd, struct modeset_dev *dev)
 	dev->size = creq.size;
 	dev->handle = creq.handle;
 
-	/* create framebuffer object for the dumb-buffer */
-	ret = drmModeAddFB(fd, dev->width, dev->height, 24, 32, dev->stride,
-			   dev->handle, &dev->fb);
-	if (ret) {
-		fprintf(stderr, "cannot create framebuffer (%d): %m\n",
-			errno);
-		ret = -errno;
-		goto err_destroy;
+	{
+		uint32_t handles[4] = { dev->handle, 0, 0, 0 };
+		uint32_t pitches[4] = { dev->stride, 0, 0, 0 };
+		uint32_t offsets[4] = { 0, 0, 0, 0 };
+		ret = drmModeAddFB2(fd, dev->width, dev->height, DRM_FORMAT_XRGB8888,
+				    handles, pitches, offsets, &dev->fb, 0);
+		if (ret) {
+			fprintf(stderr, "cannot create framebuffer (drmModeAddFB2 failed, %d): %m\n",
+				errno);
+			ret = drmModeAddFB(fd, dev->width, dev->height, 24, 32, dev->stride,
+					   dev->handle, &dev->fb);
+			if (ret) {
+				fprintf(stderr, "cannot create framebuffer (legacy fallback failed, %d): %m\n",
+					errno);
+				ret = -errno;
+				struct drm_mode_destroy_dumb dreq = {};
+				dreq.handle = dev->handle;
+				drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
+				dev->handle = 0;
+				return ret;
+			}
+		}
 	}
 
-	/* prepare buffer for memory mapping */
 	memset(&mreq, 0, sizeof(mreq));
 	mreq.handle = dev->handle;
 	ret = drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &mreq);
 	if (ret) {
 		fprintf(stderr, "cannot map dumb buffer (%d): %m\n",
 			errno);
-		ret = -errno;
-		goto err_fb;
+		drmModeRmFB(fd, dev->fb);
+		dev->fb = 0;
+		struct drm_mode_destroy_dumb dreq = {};
+		dreq.handle = dev->handle;
+		drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
+		dev->handle = 0;
+		return -errno;
 	}
 
-	printf("offset %d\n", mreq.offset);
-	/* perform actual memory mapping */
+	printf("offset %llu\n", (unsigned long long)mreq.offset);
 	dev->map = mmap(0, dev->size, PROT_READ | PROT_WRITE, MAP_SHARED,
 		        fd, mreq.offset);
 	if (dev->map == MAP_FAILED) {
 		fprintf(stderr, "cannot mmap dumb buffer (%d): %m\n",
 			errno);
-		ret = -errno;
-		goto err_fb;
+		drmModeRmFB(fd, dev->fb);
+		dev->fb = 0;
+		struct drm_mode_destroy_dumb dreq = {};
+		dreq.handle = dev->handle;
+		drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
+		dev->handle = 0;
+		return -errno;
 	}
 
-	/* clear the framebuffer to 0 */
 	memset(dev->map, 0, dev->size);
-
 	return 0;
-
-err_fb:
-	drmModeRmFB(fd, dev->fb);
-err_destroy:
-	memset(&dreq, 0, sizeof(dreq));
-	dreq.handle = dev->handle;
-	drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
-	return ret;
 }
+
+int modeset_create_back_fb(int fd, struct modeset_dev *dev)
+{
+	struct drm_mode_create_dumb creq;
+	struct drm_mode_map_dumb mreq;
+	int ret;
+
+	memset(&creq, 0, sizeof(creq));
+	creq.width = dev->width;
+	creq.height = dev->height;
+	creq.bpp = 32;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &creq);
+	if (ret < 0) {
+		fprintf(stderr, "back fb: cannot create dumb buffer (%d): %m\n", errno);
+		return -errno;
+	}
+	dev->back_stride = creq.pitch;
+	dev->back_size   = creq.size;
+	dev->back_handle = creq.handle;
+
+	{
+		uint32_t handles[4] = { dev->back_handle, 0, 0, 0 };
+		uint32_t pitches[4] = { dev->back_stride, 0, 0, 0 };
+		uint32_t offsets[4] = { 0, 0, 0, 0 };
+		ret = drmModeAddFB2(fd, dev->width, dev->height, DRM_FORMAT_XRGB8888,
+				    handles, pitches, offsets, &dev->back_fb, 0);
+		if (ret) {
+			ret = drmModeAddFB(fd, dev->width, dev->height, 24, 32,
+				dev->back_stride, dev->back_handle, &dev->back_fb);
+			if (ret) {
+				fprintf(stderr, "back fb: cannot create framebuffer (failed, %d): %m\n", errno);
+				struct drm_mode_destroy_dumb dreq = {};
+				dreq.handle = dev->back_handle;
+				drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
+				dev->back_handle = 0;
+				return -errno;
+			}
+		}
+	}
+
+	memset(&mreq, 0, sizeof(mreq));
+	mreq.handle = dev->back_handle;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &mreq);
+	if (ret) {
+		fprintf(stderr, "back fb: cannot map dumb buffer (%d): %m\n", errno);
+		drmModeRmFB(fd, dev->back_fb);
+		dev->back_fb = 0;
+		struct drm_mode_destroy_dumb dreq = {};
+		dreq.handle = dev->back_handle;
+		drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
+		dev->back_handle = 0;
+		return -errno;
+	}
+
+	dev->back_map = mmap(0, dev->back_size, PROT_READ | PROT_WRITE,
+		MAP_SHARED, fd, mreq.offset);
+	if (dev->back_map == MAP_FAILED) {
+		fprintf(stderr, "back fb: cannot mmap dumb buffer (%d): %m\n", errno);
+		dev->back_map = NULL;
+		drmModeRmFB(fd, dev->back_fb);
+		dev->back_fb = 0;
+		struct drm_mode_destroy_dumb dreq = {};
+		dreq.handle = dev->back_handle;
+		drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
+		dev->back_handle = 0;
+		return -errno;
+	}
+
+	memset(dev->back_map, 0, dev->back_size);
+	return 0;
+}
+
+
 
 /*
  * Finally! We have a connector with a suitable CRTC. We know which mode we want
@@ -665,6 +897,168 @@ void modeset_draw(void)
  * It should be pretty obvious how all of this works.
  */
 
+struct modeset_dev*
+modeset_dev_create(int fd, uint32_t connector_id)
+{
+	drmModeRes* res = drmModeGetResources(fd);
+	if (!res)
+		return NULL;
+
+	drmModeConnector* conn = drmModeGetConnector(fd, connector_id);
+	if (!conn) {
+		drmModeFreeResources(res);
+		return NULL;
+	}
+
+	struct modeset_dev* dev = malloc(sizeof(*dev));
+	if (!dev) {
+		drmModeFreeConnector(conn);
+		drmModeFreeResources(res);
+		return NULL;
+	}
+	memset(dev, 0, sizeof(*dev));
+	dev->conn = connector_id;
+
+	int ret = modeset_setup_dev(fd, res, conn, dev);
+	drmModeFreeConnector(conn);
+	drmModeFreeResources(res);
+
+	if (ret != 0) {
+		free(dev);
+		return NULL;
+	}
+	return dev;
+}
+
+
+void
+modeset_dev_destroy(int fd, struct modeset_dev* dev)
+{
+	if (!dev)
+		return;
+
+	if (dev->saved_crtc) {
+		drmModeSetCrtc(fd, dev->saved_crtc->crtc_id,
+			dev->saved_crtc->buffer_id,
+			dev->saved_crtc->x, dev->saved_crtc->y,
+			&dev->conn, 1, &dev->saved_crtc->mode);
+		drmModeFreeCrtc(dev->saved_crtc);
+	}
+
+	if (dev->map)
+		munmap(dev->map, dev->size);
+
+	if (dev->fb)
+		drmModeRmFB(fd, dev->fb);
+
+	if (dev->handle) {
+		struct drm_mode_destroy_dumb dreq;
+		memset(&dreq, 0, sizeof(dreq));
+		dreq.handle = dev->handle;
+		drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
+	}
+
+	if (dev->back_map)
+		munmap(dev->back_map, dev->back_size);
+
+	if (dev->back_fb)
+		drmModeRmFB(fd, dev->back_fb);
+
+	if (dev->back_handle) {
+		struct drm_mode_destroy_dumb dreq;
+		memset(&dreq, 0, sizeof(dreq));
+		dreq.handle = dev->back_handle;
+		drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
+	}
+
+	if (dev->cursor_fb) {
+		drmModeRmFB(fd, dev->cursor_fb);
+		dev->cursor_fb = 0;
+	}
+	if (dev->cursor_map) {
+		munmap(dev->cursor_map, dev->cursor_size);
+		dev->cursor_map = NULL;
+	}
+	if (dev->cursor_handle) {
+		struct drm_mode_destroy_dumb dreq;
+		memset(&dreq, 0, sizeof(dreq));
+		dreq.handle = dev->cursor_handle;
+		drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
+		dev->cursor_handle = 0;
+	}
+
+	free(dev);
+}
+
+
+int
+modeset_add_connector(int fd, uint32_t connector_id)
+{
+	/* Already tracked: diff the reprobed mode instead of assuming
+	 * nothing changed. Does not mutate dev->* here, see header comment. */
+	struct modeset_dev* iter;
+	for (iter = modeset_list; iter; iter = iter->next) {
+		if (iter->conn != connector_id)
+			continue;
+
+		drmModeConnector* conn = drmModeGetConnector(fd, connector_id);
+		if (conn == NULL)
+			return 0;
+		if (conn->connection != DRM_MODE_CONNECTED) {
+			drmModeFreeConnector(conn);
+			return 0;
+		}
+
+		const drmModeModeInfo* picked = modeset_pick_mode(fd, conn);
+		int changed = picked != NULL
+			&& (picked->hdisplay != iter->width
+				|| picked->vdisplay != iter->height);
+		if (changed) {
+			fprintf(stderr, "hotplug: connector %u geometry changed "
+				"%ux%u -> %ux%u\n", connector_id, iter->width,
+				iter->height, picked->hdisplay, picked->vdisplay);
+		}
+		drmModeFreeConnector(conn);
+		return changed ? 1 : 0;
+	}
+
+	struct modeset_dev* dev = modeset_dev_create(fd, connector_id);
+	if (!dev)
+		return -ENOENT;
+
+	dev->saved_crtc = drmModeGetCrtc(fd, dev->crtc);
+	drmModeSetCrtc(fd, dev->crtc, dev->fb, 0, 0, &dev->conn, 1, &dev->mode);
+
+	dev->next = modeset_list;
+	modeset_list = dev;
+
+	fprintf(stderr, "hotplug: added connector %u (%ux%u)\n",
+		connector_id, dev->width, dev->height);
+	return 0;
+}
+
+
+void
+modeset_remove_connector(int fd, uint32_t connector_id)
+{
+	struct modeset_dev** pp = &modeset_list;
+	while (*pp) {
+		if ((*pp)->conn == connector_id) {
+			struct modeset_dev* dev = *pp;
+			*pp = dev->next;
+			fprintf(stderr, "hotplug: removed connector %u\n", connector_id);
+			/* full teardown — unmaps buffers, drmModeRmFB, destroys
+			 * dumb BOs, frees the struct.  Replaces the previous
+			 * bare free(dev) which leaked the framebuffer + GEM
+			 * handles on every hotplug-out. */
+			modeset_dev_destroy(fd, dev);
+			return;
+		}
+		pp = &(*pp)->next;
+	}
+}
+
+
 void modeset_cleanup(int fd)
 {
 	struct modeset_dev *iter;
@@ -675,31 +1069,263 @@ void modeset_cleanup(int fd)
 		iter = modeset_list;
 		modeset_list = iter->next;
 
-		/* restore saved CRTC configuration */
-		drmModeSetCrtc(fd,
-			       iter->saved_crtc->crtc_id,
-			       iter->saved_crtc->buffer_id,
-			       iter->saved_crtc->x,
-			       iter->saved_crtc->y,
-			       &iter->conn,
-			       1,
-			       &iter->saved_crtc->mode);
-		drmModeFreeCrtc(iter->saved_crtc);
+		/* restore saved CRTC configuration (only if we ever saved it
+		 * — early-init failures can leave saved_crtc NULL) */
+		if (iter->saved_crtc) {
+			drmModeSetCrtc(fd,
+				       iter->saved_crtc->crtc_id,
+				       iter->saved_crtc->buffer_id,
+				       iter->saved_crtc->x,
+				       iter->saved_crtc->y,
+				       &iter->conn,
+				       1,
+				       &iter->saved_crtc->mode);
+			drmModeFreeCrtc(iter->saved_crtc);
+			iter->saved_crtc = NULL;
+		}
 
-		/* unmap buffer */
-		munmap(iter->map, iter->size);
+		/* unmap buffer (guard NULL — same early-init concern) */
+		if (iter->map)
+			munmap(iter->map, iter->size);
 
 		/* delete framebuffer */
 		drmModeRmFB(fd, iter->fb);
-
+		if (iter->back_fb) {
+			drmModeRmFB(fd, iter->back_fb);
+			iter->back_fb = 0;
+		}
 		/* delete dumb buffer */
 		memset(&dreq, 0, sizeof(dreq));
 		dreq.handle = iter->handle;
 		drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
 
+		if (iter->back_handle) {
+			struct drm_mode_destroy_dumb bdreq = {};
+			bdreq.handle = iter->back_handle;
+			drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &bdreq);
+		}
+
+		if (iter->cursor_fb) {
+			drmModeRmFB(fd, iter->cursor_fb);
+			iter->cursor_fb = 0;
+		}
+		if (iter->cursor_map)
+			munmap(iter->cursor_map, iter->cursor_size);
+		if (iter->cursor_handle) {
+			memset(&dreq, 0, sizeof(dreq));
+			dreq.handle = iter->cursor_handle;
+			drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
+		}
+
 		/* free allocated memory */
 		free(iter);
 	}
+}
+
+
+#ifdef HAVE_GBM
+int
+modeset_create_gbm_fb(int fd, struct gbm_device* gbm,
+                      struct modeset_dev* dev, bool isBack)
+{
+	struct gbm_bo* bo = gbm_bo_create(gbm,
+		dev->width, dev->height,
+		GBM_FORMAT_XRGB8888,
+		GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+
+	if (!bo) {
+		fprintf(stderr, "gbm_bo_create failed\n");
+		return -ENOMEM;
+	}
+
+	uint32_t handle = gbm_bo_get_handle(bo).u32;
+	uint32_t stride = gbm_bo_get_stride(bo);
+	uint64_t modifier = gbm_bo_get_modifier(bo);
+	uint32_t fb_id = 0;
+
+	int ret;
+	if (modifier != DRM_FORMAT_MOD_LINEAR && modifier != DRM_FORMAT_MOD_INVALID) {
+		uint32_t handles[4] = { handle };
+		uint32_t pitches[4] = { stride };
+		uint32_t offsets[4] = { 0 };
+		uint64_t modifiers[4] = { modifier };
+		ret = drmModeAddFB2WithModifiers(fd, dev->width, dev->height,
+			DRM_FORMAT_XRGB8888, handles, pitches, offsets, modifiers,
+			&fb_id, DRM_MODE_FB_MODIFIERS);
+	} else {
+		uint32_t handles[4] = { handle };
+		uint32_t pitches[4] = { stride };
+		uint32_t offsets[4] = { 0 };
+		ret = drmModeAddFB2(fd, dev->width, dev->height,
+			DRM_FORMAT_XRGB8888, handles, pitches, offsets, &fb_id, 0);
+	}
+
+	if (ret) {
+		fprintf(stderr, "drmModeAddFB2 for GBM bo failed: %m\n");
+		gbm_bo_destroy(bo);
+		return -errno;
+	}
+
+	uint32_t map_stride = 0;
+	void* map_data = NULL;
+	void* map = gbm_bo_map(bo, 0, 0, dev->width, dev->height,
+		GBM_BO_TRANSFER_WRITE, &map_stride, &map_data);
+
+	if (map == MAP_FAILED || map == NULL) {
+		fprintf(stderr, "gbm_bo_map failed -- falling back to dumb buffer\n");
+		drmModeRmFB(fd, fb_id);
+		gbm_bo_destroy(bo);
+		return -ENOTSUP;
+	}
+
+	if (isBack) {
+		dev->back_bo       = bo;
+		dev->back_fb       = fb_id;
+		dev->back_stride   = map_stride;
+		dev->back_map      = map;
+		dev->back_size     = map_stride * dev->height;
+		dev->back_map_data = map_data;
+	} else {
+		dev->front_bo       = bo;
+		dev->fb             = fb_id;
+		dev->stride         = map_stride;
+		dev->map            = map;
+		dev->size           = map_stride * dev->height;
+		dev->front_map_data = map_data;
+	}
+
+	return 0;
+}
+
+
+int
+modeset_create_render_fb(int fd, struct gbm_device* gbm,
+                       struct modeset_dev* dev)
+{
+	struct gbm_bo* bo = gbm_bo_create(gbm,
+		dev->width, dev->height,
+		GBM_FORMAT_XRGB8888,
+		GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+
+	if (!bo) {
+		fprintf(stderr, "gbm_bo_create failed for render buffer\n");
+		return -ENOMEM;
+	}
+
+	uint32_t handle = gbm_bo_get_handle(bo).u32;
+	uint32_t stride = gbm_bo_get_stride(bo);
+	uint64_t modifier = gbm_bo_get_modifier(bo);
+	uint32_t fb_id = 0;
+
+	int ret;
+	if (modifier != DRM_FORMAT_MOD_LINEAR && modifier != DRM_FORMAT_MOD_INVALID) {
+		uint32_t handles[4] = { handle };
+		uint32_t pitches[4] = { stride };
+		uint32_t offsets[4] = { 0 };
+		uint64_t modifiers[4] = { modifier };
+		ret = drmModeAddFB2WithModifiers(fd, dev->width, dev->height,
+			DRM_FORMAT_XRGB8888, handles, pitches, offsets, modifiers,
+			&fb_id, DRM_MODE_FB_MODIFIERS);
+	} else {
+		uint32_t handles[4] = { handle };
+		uint32_t pitches[4] = { stride };
+		uint32_t offsets[4] = { 0 };
+		ret = drmModeAddFB2(fd, dev->width, dev->height,
+			DRM_FORMAT_XRGB8888, handles, pitches, offsets, &fb_id, 0);
+	}
+
+	if (ret) {
+		fprintf(stderr, "drmModeAddFB2 for render bo failed: %m\n");
+		gbm_bo_destroy(bo);
+		return -errno;
+	}
+
+	uint32_t map_stride = 0;
+	void* map_data = NULL;
+	void* map = gbm_bo_map(bo, 0, 0, dev->width, dev->height,
+		GBM_BO_TRANSFER_WRITE, &map_stride, &map_data);
+
+	if (map == MAP_FAILED || map == NULL) {
+		fprintf(stderr, "gbm_bo_map failed for render buffer\n");
+		drmModeRmFB(fd, fb_id);
+		gbm_bo_destroy(bo);
+		return -ENOTSUP;
+	}
+
+	dev->render_bo       = bo;
+	dev->render_fb       = fb_id;
+	dev->render_stride   = map_stride;
+	dev->render_map      = map;
+	dev->render_map_data = map_data;
+
+	return 0;
+}
+#endif
+
+
+int
+modeset_create_cursor_fb(int fd, struct modeset_dev *dev)
+{
+	uint64_t cursor_width = 64;
+	uint64_t cursor_height = 64;
+	if (drmGetCap(fd, DRM_CAP_CURSOR_WIDTH, &cursor_width) < 0
+			|| cursor_width == 0)
+		cursor_width = 64;
+	if (drmGetCap(fd, DRM_CAP_CURSOR_HEIGHT, &cursor_height) < 0
+			|| cursor_height == 0)
+		cursor_height = 64;
+
+	struct drm_mode_create_dumb creq = {};
+	creq.width  = (uint32_t)cursor_width;
+	creq.height = (uint32_t)cursor_height;
+	creq.bpp    = 32;
+	if (drmIoctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &creq) < 0) {
+		fprintf(stderr, "cursor: cannot create dumb buffer: %m\n");
+		return -errno;
+	}
+
+	struct drm_mode_map_dumb mreq = { .handle = creq.handle };
+	if (drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &mreq) < 0) {
+		fprintf(stderr, "cursor: cannot map dumb buffer: %m\n");
+		return -errno;
+	}
+
+	void* map = mmap(NULL, creq.size, PROT_READ | PROT_WRITE,
+			 MAP_SHARED, fd, mreq.offset);
+	if (map == MAP_FAILED) {
+		fprintf(stderr, "cursor: mmap failed: %m\n");
+		return -errno;
+	}
+
+	memset(map, 0, creq.size);
+	dev->cursor_handle = creq.handle;
+	dev->cursor_w      = (uint32_t)cursor_width;
+	dev->cursor_h      = (uint32_t)cursor_height;
+	dev->cursor_map    = (uint8_t*)map;
+	dev->cursor_size   = creq.size;
+	dev->cursor_pitch  = creq.pitch;
+	dev->cursor_ok     = true;
+
+	/*
+	 * Register the cursor BO as a real DRM framebuffer.  Atomic cursor
+	 * plane commits require an fb_id (drmModeAddFB-derived), not a GEM
+	 * handle.  Legacy drmModeSetCursor/SetCursor2 keep taking the GEM
+	 * handle (API contract).  See app-server-fixup.md §3a.
+	 */
+	uint32_t handles[4] = { creq.handle, 0, 0, 0 };
+	uint32_t pitches[4] = { creq.pitch,  0, 0, 0 };
+	uint32_t offsets[4] = { 0, 0, 0, 0 };
+	dev->cursor_fb = 0;
+	if (drmModeAddFB2(fd, dev->cursor_w, dev->cursor_h,
+			DRM_FORMAT_ARGB8888,
+			handles, pitches, offsets, &dev->cursor_fb, 0) != 0) {
+		fprintf(stderr,
+			"cursor: drmModeAddFB2 failed (%d): %m -- atomic cursor "
+			"plane will be unavailable; legacy cursor still works\n",
+			errno);
+		dev->cursor_fb = 0;
+	}
+	return 0;
 }
 
 /*

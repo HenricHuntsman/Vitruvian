@@ -1,5 +1,6 @@
 /*
  * Copyright 2002-2009, Haiku Inc.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -19,6 +20,7 @@
 struct color_map;
 class BBitmap;
 class BApplication;
+class BString;
 class BWindow;
 
 
@@ -84,6 +86,30 @@ public:
 
 			status_t			GetBrightness(float*);
 			status_t			SetBrightness(float);
+
+			// 0..3 as B_PANEL_ORIENTATION_*, -1 auto; B_UNSUPPORTED if fixed.
+			status_t			GetRotation(int32*);
+			status_t			SetRotation(int32);
+
+			// B_PANEL_REFLECTION_*; B_UNSUPPORTED if fixed. No auto state.
+			status_t			GetReflection(int32*);
+			status_t			SetReflection(int32);
+
+			// Unconfirmed display change. Begin snapshots the live state
+			// and starts the server-side deadline; Confirm keeps it and
+			// persists, Cancel reverts at once. Changes made between
+			// Begin and Confirm join the same window.
+			status_t			BeginScreenChange();
+			status_t			ConfirmScreenChange();
+			status_t			CancelScreenChange();
+
+			// Color temperature in Kelvin; 6500 is neutral, lower is warmer.
+			// B_NOT_SUPPORTED when the output cannot do it.
+			status_t			GetTemperature(float*);
+			status_t			SetTemperature(float);
+
+			// Kernel connector name, e.g. "HDMI-A-1" or "eDP-1".
+			status_t			GetConnectorName(BString& name);
 
 			void*				BaseAddress();
 			uint32				BytesPerRow();

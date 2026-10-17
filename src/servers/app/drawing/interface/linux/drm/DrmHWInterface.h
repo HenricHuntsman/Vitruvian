@@ -10,15 +10,25 @@
 extern "C" {
 #include <libseat.h>
 }
+#include <libudev.h>
 
-#include <mutex>
-#include <condition_variable>
-#include <thread>
+#include <OS.h>
+#include <Region.h>
+#include <pthread.h>
+#include <atomic>
 
 #include "DrmBuffer.h"
 #include "HWInterface.h"
-#include "LibInputEventStream.h"
+#include "MallocBuffer.h"
 #include "TTy.h"
+
+#ifdef HAVE_GBM
+extern "C" {
+#include <gbm.h>
+}
+#endif
+
+#include <libbacklight.h>
 
 
 #if DEBUG
@@ -27,6 +37,38 @@ extern "C" {
   	#define CALLED() 			((void)0)
 #endif
 
+
+struct PlaneProps {
+	uint32_t fb_id;
+	uint32_t crtc_id;
+	uint32_t src_x, src_y, src_w, src_h;
+	uint32_t crtc_x, crtc_y, crtc_w, crtc_h;
+	uint32_t fb_damage_clips;
+	// Captured but never committed: the reference cursor plane (amdgpu)
+	// does not advertise this property. Kept for a plane class that does.
+	uint32_t rotation;
+};
+
+struct CrtcProps {
+	uint32_t active;
+	uint32_t mode_id;
+	uint32_t vrr_enabled;
+};
+
+struct ConnProps {
+	uint32_t crtc_id;
+	uint32_t dpms;
+};
+
+// Values match the kernel's "panel orientation" connector property
+// (drm_connector.h, DRM_MODE_PANEL_ORIENTATION_*) so a property read casts
+// straight into this enum.
+enum PanelOrientation {
+	PANEL_ORIENTATION_NORMAL      = 0,
+	PANEL_ORIENTATION_UPSIDE_DOWN = 1,
+	PANEL_ORIENTATION_LEFT_UP     = 2,
+	PANEL_ORIENTATION_RIGHT_UP    = 3
+};
 
 class DrmBuffer;
 
@@ -43,8 +85,16 @@ public:
 	virtual	status_t			SetMode(const display_mode& mode);
 	virtual	void				GetMode(display_mode* mode);
 	virtual	status_t			GetPreferredMode(display_mode* mode);
+			// Same mode policy, no connector probe; for the poll.
+			status_t			GetPreferredModeCurrent(display_mode* mode);
+	virtual	int32				PanelOrientation() const;
+	virtual	status_t			SetPanelOrientation(int32 orientation);
+	virtual	int32				PanelScanoutOrientation() const;
+	virtual	int32				PanelReflection() const;
+	virtual	status_t			SetPanelReflection(int32 reflection);
 
 	virtual status_t			GetDeviceInfo(accelerant_device_info* info);
+	virtual status_t			GetMonitorInfo(monitor_info* info);
 	virtual status_t			GetFrameBufferConfig(
 									frame_buffer_config& config);
 
@@ -69,40 +119,198 @@ public:
 	virtual status_t			SetBrightness(float brightness);
 	virtual status_t			GetBrightness(float* brightness);
 
+	virtual status_t			SetTemperature(float kelvin);
+	virtual status_t			GetTemperature(float* kelvin);
+	virtual status_t			GetConnectorName(BString& name);
+
 	virtual	RenderingBuffer*	FrontBuffer() const;
 	virtual	RenderingBuffer*	BackBuffer() const;
 	virtual	bool				IsDoubleBuffered() const;
 
 	virtual	status_t			CopyBackToFront(const BRect& frame);
+	virtual	status_t			CopyBackToFront(const BRegion& region);
 
-			void				EventThreadMain();
+	virtual	void				SetCursor(ServerCursor* cursor);
+	virtual	void				SetCursorVisible(bool visible);
+	virtual	void				MoveCursorTo(float x, float y);
+	virtual	void				_DrawCursor(IntRect area) const;
+
+	virtual	void				SetDragBitmap(const ServerBitmap* bitmap,
+									const BPoint& offsetFromCursor);
 
 			void				_OnSessionEnable();
 			void				_OnSessionDisable();
 
+	virtual	void				OnSeatEnabled();
+	virtual	void				OnSeatDisabled();
+
+			status_t			CreateLease(uint32_t* connectors, int connCount,
+									uint32_t* crtcs, int crtcCount,
+									int* leaseFd);
+			void				RevokeLease(int leaseFd);
+
+			status_t			InitCheck() const;
+
 private:
-			void					_RestoreDisplay();
+	static	int32				_EventThreadEntry(void* data);
+			void				_EventThreadMain();
+			void				_RestoreDisplay();
+			void				_RepaintAfterDPMS();
+			void				_HandleHotplug();
+			bool				_RescanConnectors();
+			bool				_CheckResume();
+			void				_OnResume();
+			void				_DrainPendingFlip();
+			void				_ScheduleResize();
+	static	int32				_ResizeThreadEntry(void* data);
+			void				_ApplyResize();
+			status_t			_GetPreferredMode(display_mode* mode,
+									bool probe);
+	static	void				_FillModeInfo(display_mode& mode,
+									const drmModeModeInfo& m);
 
-			static int				fFd;
+	static	void				_PageFlipHandler(int fd, unsigned int frame,
+									unsigned int sec, unsigned int usec,
+									void* data);
 
-			DrmBuffer*				fFrontBuffer;
-			DrmBuffer*				fBackBuffer;
+			void				_BlitRect(RenderingBuffer* src,
+									RenderingBuffer* dst,
+									const BRect& frame);
 
-			display_mode			fDisplayMode;
+		void				_BlendCursor(RenderingBuffer* srcBg,
+								RenderingBuffer* dst,
+								IntRect area) const;
 
-			LibInputEventStream* 	fEventStream;
+		virtual	void				_CopyToFront(uint8* src, uint32 srcBPR,
+									int32 x, int32 y,
+									int32 right, int32 bottom) const;
 
-			struct libseat*			fSeat;
-			int						fDeviceId;
-			volatile bool			fSessionActive;
-			bool					fInitialized;
-			volatile bool			fRunning;
-			uint32_t				fSessionGeneration;
+		void				_PushCursorTrackDirty(int32 oldX, int32 oldY,
+								int32 newX, int32 newY);
 
-			std::thread				fEventThread;
-			std::mutex				fSessionMutex;
-			std::condition_variable	fSessionCondition;
-			std::mutex				fSeatMutex;
+#if defined(__x86_64__) || defined(__i386__)
+	static	void				_BlitRect_AVX2(const uint8* s, uint8* d,
+									uint32 srcBpr, uint32 dstBpr,
+									int32 bytes, int32 rows);
+#endif
+
+			int					_CrtcIndex(uint32_t crtc_id);
+			void				_ProbeAtomic();
+			void				_ProbeCursor();
+			void				_DisableHardwareCursor();
+			void				_DiscoverProperties();
+			void				_DiscoverPlaneProps(uint32_t plane_id,
+									PlaneProps& props);
+			void				_DiscoverCrtcProps(uint32_t crtc_id);
+			void				_DiscoverConnProps(uint32_t conn_id);
+			void				_DiscoverPanelOrientation();
+			void				_DiscoverPanelReflection();
+			bool				_ApplyDmiOrientationQuirk(uint32_t width,
+									uint32_t height);
+			void				_ApplyOrientationSwap(uint32_t w, uint32_t h,
+									uint32_t& outW, uint32_t& outH) const;
+			// False when rotated or when we own no cursor plane.
+			// VOS_HW_CURSOR forces the legacy sprite on for testing.
+			bool				_HardwareCursorUsable() const;
+
+			status_t			_AtomicModeset(uint32_t fb_id,
+									drmModeModeInfo* mode);
+		status_t			_AtomicFlip(uint32_t fb_id,
+								const BRect* dirty_rects,
+								uint32_t nrects);
+			status_t			_AtomicSetCursor(uint32_t fb_id,
+									uint32_t crtc_id,
+									int32 x, int32 y,
+									uint32_t w, uint32_t h);
+
+			static int			fFd;
+
+			DrmBuffer*			fFrontBuffer;
+			DrmBuffer*			fBackBuffer;
+			DrmBuffer*			fWriteTarget;
+
+			display_mode		fDisplayMode;
+
+			struct libseat*		fSeat;
+			int					fDeviceId;
+			std::atomic<bool>	fSessionActive;
+
+			std::atomic<bool>	fInitialized;
+			std::atomic<bool>	fRunning;
+
+			thread_id			fEventThread;
+			thread_id			fResizeThread;
+			std::atomic<bool>	fResizeBusy;
+			std::atomic<bool>	fResizePending;
+			bigtime_t			fLastModeCheck;
+			// Written from SetMode() (app thread) and the event/resize
+			// threads; the poll reads them without the mode lock.
+			std::atomic<uint32_t>	fLastPreferredWidth;
+			std::atomic<uint32_t>	fLastPreferredHeight;
+			std::atomic<bool>	fUserSetMode;
+			sem_id				fSessionSem;
+
+			struct udev*		fUdev;
+			struct udev_monitor* fUdevMonitor;
+			int					fUdevFd;
+			bigtime_t			fLastSuspendCheck;
+
+#ifdef HAVE_GBM
+			struct gbm_device*  fGbmDevice;
+			bool				fUseGbm;
+#endif
+
+			MallocBuffer*		fRenderBuffer;
+
+			bool				fPageFlipEnabled;
+			std::atomic<bool>	fPageFlipPending;
+
+			// Dirty-rect accumulator (replaces fixed fFlipDirtyRects array).
+			// fAccumulatedDirty collects damage between flips. On flip
+			// completion the union of accumulated + previous is blitted
+			// (covering double-buffer staleness), then previous <- current
+			// and current is cleared.
+			BRegion				fAccumulatedDirty;
+			BRegion				fPreviousDirty;
+			bool				fNeedsFlip;
+			pthread_mutex_t		fDirtyMutex;
+
+			int					fWakeFd;
+
+			uint32				fDpmsState;
+
+			struct backlight*	fBacklight;
+
+			float				fTemperature;
+			// Cleared when gamma_size is 0 or drmModeCrtcSetGamma fails.
+			bool				fTemperatureSupported;
+
+			bool				fAtomicSupported;
+			uint32_t			fPrimaryPlaneId;
+			uint32_t			fCursorPlaneId;
+			// Which API armed the cursor plane; set once by _ProbeCursor().
+			bool				fCursorUsesAtomic;
+			uint32_t			fModeBlobId;
+			struct PlaneProps	fPlaneProps;
+			struct PlaneProps	fCursorPlaneProps;
+			struct CrtcProps	fCrtcProps;
+			struct ConnProps	fConnProps;
+
+			bool				fVRRSupported;
+			bool				fVRREnabled;
+
+			// Elaborated as "enum PanelOrientation": the PanelOrientation()
+			// accessor above hides the bare type name inside this class.
+			// What the scanout applies: fMountingOrientation composed with
+			// fUserOrientation. Every present path rotates by this.
+			enum PanelOrientation
+								fPanelOrientation;
+			// How the panel sits in the device (kernel property, DMI quirk,
+			// VOS_PANEL_ORIENTATION), and the user's rotation relative to it.
+			int32				fMountingOrientation;
+			int32				fUserOrientation;
+			// B_PANEL_REFLECTION_* from PanelOrientationTransform.h.
+			int32				fPanelReflection;
 };
 
 #endif

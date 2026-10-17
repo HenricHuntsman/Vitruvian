@@ -1,5 +1,6 @@
 /*
  * Copyright 2001-2020, Haiku.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -13,6 +14,7 @@
  *		Joseph Groover, looncraz@looncraz.net
  *		Tri-Edge AI
  *		Jacob Secunda, secundja@gmail.com
+ *		Dario Casalinuovo
  */
 
 
@@ -20,7 +22,9 @@
 
 
 #include "Desktop.h"
+#include "PowerManager.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <syslog.h>
@@ -30,8 +34,11 @@
 #include <DirectWindow.h>
 #include <Entry.h>
 #include <FindDirectory.h>
+#include <LinkSender.h>
 #include <Message.h>
 #include <MessageFilter.h>
+#include <Messenger.h>
+#include <MessengerPrivate.h>
 #include <Path.h>
 #include <Region.h>
 #include <Roster.h>
@@ -52,6 +59,7 @@
 #include "InputManager.h"
 #include "Screen.h"
 #include "ScreenManager.h"
+#include "ScreenRelayout.h"
 #include "ServerApp.h"
 #include "ServerConfig.h"
 #include "ServerCursor.h"
@@ -61,6 +69,10 @@
 #include "Window.h"
 #include "Workspace.h"
 #include "WorkspacesView.h"
+
+#include <LaunchDaemonDefs.h>
+#include <kernel/util/KMessage.h>
+#include <PanelOrientationTransform.h>
 
 #if TEST_MODE
 #	include "EventStream.h"
@@ -179,6 +191,15 @@ KeyboardFilter::_UpdateFocus(int32 key, uint32 modifiers, EventTarget** _target)
 }
 
 
+// Legacy Haiku keycodes (hybrid space, key <= 0x7f); not evdev codes.
+static const int32 kEscapeKey = 0x01;
+static const int32 kBacktickKey = 0x11;
+
+// Lock/unlock requests posted from AppServer onto this Desktop's looper.
+static const int32 kMsgLockScreen = 'lksS';
+static const int32 kMsgUnlockScreen = 'ulks';
+
+
 filter_result
 KeyboardFilter::Filter(BMessage* message, EventTarget** _target,
 	int32* /*_viewToken*/, BMessage* /*latestMouseMoved*/)
@@ -189,9 +210,30 @@ KeyboardFilter::Filter(BMessage* message, EventTarget** _target,
 	message->FindInt32("key", &key);
 	message->FindInt32("modifiers", &modifiers);
 
+	// Locked: only the unlock window takes keys; global chords stay dead.
+	if (fDesktop->IsScreenLocked()) {
+		Window* window = fDesktop->MouseEventWindow();
+		if (window == NULL) {
+			BPoint where;
+			int32 buttons;
+			fDesktop->GetLastMouseState(&where, &buttons);
+			window = fDesktop->WindowAt(where);
+		}
+		if (window == NULL || !fDesktop->IsUnlockWindow(window))
+			return B_SKIP_MESSAGE;
+
+		if (message->what == B_KEY_DOWN
+			|| message->what == B_MODIFIERS_CHANGED
+			|| message->what == B_UNMAPPED_KEY_DOWN
+			|| message->what == B_INPUT_METHOD_EVENT)
+			_UpdateFocus(key, modifiers, _target);
+
+		return fDesktop->KeyEvent(message->what, key, modifiers);
+	}
+
 	if ((message->what == B_KEY_DOWN || message->what == B_UNMAPPED_KEY_DOWN)) {
 		// Check for safe video mode (shift + cmd + ctrl + escape)
-		if (key == 0x01 && (modifiers & B_COMMAND_KEY) != 0
+		if (key == kEscapeKey && (modifiers & B_COMMAND_KEY) != 0
 			&& (modifiers & B_CONTROL_KEY) != 0
 			&& (modifiers & B_SHIFT_KEY) != 0) {
 			system("screenmode --fall-back &");
@@ -201,11 +243,13 @@ KeyboardFilter::Filter(BMessage* message, EventTarget** _target,
 		bool takeWindow = (modifiers & B_SHIFT_KEY) != 0
 			|| fDesktop->MouseEventWindow() != NULL;
 		if (key >= B_F1_KEY && key <= B_F12_KEY) {
-			// workspace change
-
+			// Command+Fn (upstream) and Option+Fn both accepted: Option+Fn
+			// covers VT-switch chords the keyboard add-on already swallows,
+			// so this can't double-fire.
 #if !TEST_MODE
-			if ((modifiers & (B_COMMAND_KEY | B_CONTROL_KEY | B_OPTION_KEY))
-					== B_COMMAND_KEY)
+			uint32 chord = modifiers
+				& (B_COMMAND_KEY | B_CONTROL_KEY | B_OPTION_KEY);
+			if (chord == B_OPTION_KEY || chord == B_COMMAND_KEY)
 #else
 			if ((modifiers & B_CONTROL_KEY) != 0)
 #endif
@@ -215,10 +259,13 @@ KeyboardFilter::Filter(BMessage* message, EventTarget** _target,
 				fDesktop->SetWorkspaceAsync(key - B_F1_KEY, takeWindow);
 				return B_SKIP_MESSAGE;
 			}
-		} else if (key == 0x11
-			&& (modifiers & (B_COMMAND_KEY | B_CONTROL_KEY | B_OPTION_KEY))
-					== B_COMMAND_KEY) {
-			// switch to previous workspace (command + `)
+		} else if (key == kBacktickKey
+			&& ((modifiers & (B_COMMAND_KEY | B_CONTROL_KEY | B_OPTION_KEY))
+					== B_OPTION_KEY
+				|| (modifiers & (B_COMMAND_KEY | B_CONTROL_KEY | B_OPTION_KEY))
+					== B_COMMAND_KEY)) {
+			// Previous workspace. Option+` to match the F-keys above;
+			// Command+` still works, nothing in the console claims it.
 			fDesktop->SetWorkspaceAsync(-1, takeWindow);
 			return B_SKIP_MESSAGE;
 		}
@@ -277,6 +324,14 @@ MouseFilter::Filter(BMessage* message, EventTarget** _target, int32* _viewToken,
 	Window* window = fDesktop->MouseEventWindow();
 	if (window == NULL)
 		window = fDesktop->WindowAt(where);
+
+	// Locked: drop anything that is not the unlock window.
+	if (fDesktop->IsScreenLocked()
+		&& (window == NULL || !fDesktop->IsUnlockWindow(window))) {
+		fDesktop->SetMouseEventWindow(NULL);
+		fDesktop->UnlockAllWindows();
+		return B_SKIP_MESSAGE;
+	}
 
 	if (window != NULL) {
 		// dispatch event to the window
@@ -418,6 +473,7 @@ Desktop::Desktop(uid_t userID, const char* targetScreen)
 	fUserID(userID),
 	fTargetScreen(strdup(targetScreen)),
 	fSettings(NULL),
+	fPowerManager(NULL),
 	fSharedReadOnlyArea(-1),
 	fApplicationsLock("application list"),
 	fShutdownSemaphore(-1),
@@ -430,6 +486,8 @@ Desktop::Desktop(uid_t userID, const char* targetScreen)
 	fAllWindows(kAllWindowList),
 	fSubsetWindows(kSubsetList),
 	fFocusList(kFocusList),
+	fScreenLocked(false),
+	fUnlockTeam(-1),
 	fWorkspacesViews(false),
 
 	fWorkspacesLock("workspaces list"),
@@ -444,9 +502,14 @@ Desktop::Desktop(uid_t userID, const char* targetScreen)
 
 	fFocus(NULL),
 	fFront(NULL),
-	fBack(NULL)
+	fBack(NULL),
+
+	fScreenChangeTimer(-1),
+	fScreenChangeWakeup(-1),
+	fScreenChangeStoreDeferred(false)
 {
 	memset(fLastWorkspaceFocus, 0, sizeof(fLastWorkspaceFocus));
+	memset(&fScreenChangeSnapshot, 0, sizeof(fScreenChangeSnapshot));
 
 	char name[B_OS_NAME_LENGTH];
 	Desktop::_GetLooperName(name, sizeof(name));
@@ -469,6 +532,23 @@ Desktop::Desktop(uid_t userID, const char* targetScreen)
 
 Desktop::~Desktop()
 {
+	{
+		// Resolve any pending change so waiting timer threads exit
+		// instead of reverting a display that is being torn down.
+		BAutolock _(fScreenChangeLock);
+		fScreenChangeTracker.Timeout(fScreenChangeTracker.Generation());
+	}
+
+	if (fScreenChangeWakeup >= B_OK) {
+		release_sem(fScreenChangeWakeup);
+		if (fScreenChangeTimer >= B_OK) {
+			status_t threadStatus;
+			wait_for_thread(fScreenChangeTimer, &threadStatus);
+		}
+		delete_sem(fScreenChangeWakeup);
+	}
+
+	delete fPowerManager;
 	delete_area(fSharedReadOnlyArea);
 	delete_port(fMessagePort);
 
@@ -491,6 +571,10 @@ Desktop::Init()
 	if (fMessagePort < B_OK)
 		return fMessagePort;
 
+	fScreenChangeWakeup = create_sem(0, "screen change");
+	if (fScreenChangeWakeup < B_OK)
+		return fScreenChangeWakeup;
+
 	// the system palette needs to be initialized before the
 	// desktop settings, since it is used there already
 	InitializeColorMap();
@@ -509,6 +593,37 @@ Desktop::Init()
 		_Windows(i).SetIndex(i);
 		fWorkspaces[i].RestoreConfiguration(*fSettings->WorkspacesMessage(i));
 	}
+
+	// Before the screen is acquired, so SetConfiguration() sees the rotated
+	// geometry. The stored rotation is relative to the panel mounting; an
+	// absolute one from an older version is converted once here, while the
+	// scanout still shows the bare mounting.
+	ScreenConfigurations& storedScreens
+		= fWorkspaces[0].StoredScreenConfiguration();
+	gScreenManager->Lock();
+	Screen* rotated = gScreenManager->ScreenAt(0);
+	if (rotated != NULL) {
+		::HWInterface* hw = rotated->HWInterface();
+		int32 rotation = storedScreens.Rotation(0);
+		int32 legacy = storedScreens.LegacyRotation(0);
+		if (legacy >= 0) {
+			rotation = panel_relative_orientation(legacy,
+				hw->PanelScanoutOrientation());
+			storedScreens.SetRotation(0, rotation);
+		}
+		if (rotation != B_PANEL_ORIENTATION_NORMAL)
+			hw->SetPanelOrientation(rotation);
+	}
+	gScreenManager->Unlock();
+
+	// No auto state for reflection, unlike rotation above, so apply
+	// unconditionally rather than guarding on >= 0.
+	int32 reflection = fWorkspaces[0].StoredScreenConfiguration().Reflection(0);
+	gScreenManager->Lock();
+	Screen* reflected = gScreenManager->ScreenAt(0);
+	if (reflected != NULL)
+		reflected->HWInterface()->SetPanelReflection(reflection);
+	gScreenManager->Unlock();
 
 	status_t status = fVirtualScreen.SetConfiguration(*this,
 		fWorkspaces[0].CurrentScreenConfiguration());
@@ -565,6 +680,20 @@ Desktop::Init()
 	float brightness = fWorkspaces[0].StoredScreenConfiguration().Brightness(0);
 	if (brightness > 0)
 		HWInterface()->SetBrightness(brightness);
+	else {
+		// Firmware can leave the panel dark with no stored preference;
+		// light it rather than boot into a black screen. An unread
+		// brightness counts as dark so a failed read still recovers.
+		float current = 0.0f;
+		if (HWInterface()->GetBrightness(&current) != B_OK
+				|| current <= 0.0f)
+			HWInterface()->SetBrightness(1.0f);
+	}
+
+	float temperature = fWorkspaces[0].StoredScreenConfiguration().Temperature(0);
+	// Any stored non-neutral value is re-applied; the backend clamps.
+	if (temperature > 0 && temperature != 6500.0f)
+		HWInterface()->SetTemperature(temperature);
 
 	fVirtualScreen.HWInterface()->MoveCursorTo(
 		fVirtualScreen.Frame().Width() / 2,
@@ -585,12 +714,22 @@ Desktop::Init()
 
 	fEventDispatcher.SetHWInterface(fVirtualScreen.HWInterface());
 
+	fPowerManager = new(std::nothrow) PowerManager(this);
+	if (fPowerManager != NULL)
+		fPowerManager->Start();
+
 	fEventDispatcher.SetMouseFilter(new MouseFilter(this));
 	fEventDispatcher.SetKeyboardFilter(new KeyboardFilter(this));
 
 	// draw the background
 
 	fScreenRegion = fVirtualScreen.Frame();
+
+	// _ScreenChanged() normally does this, but nothing calls it at cold
+	// boot, only on later mode changes.
+	gInputManager->UpdateScreenBounds(fVirtualScreen.Frame(),
+		HWInterface()->PanelScanoutOrientation(),
+		HWInterface()->PanelReflection());
 
 	BRegion stillAvailableOnScreen;
 	_RebuildClippingForAllWindows(stillAvailableOnScreen);
@@ -812,7 +951,7 @@ Desktop::SetScreenMode(int32 workspace, int32 id, const display_mode& mode,
 
 	fWorkspaces[workspace].CurrentScreenConfiguration().Set(id,
 		hasInfo ? &info : NULL, screen->Frame(), mode);
-	if (makeDefault) {
+	if (makeDefault && !_ScreenChangeStoreDeferred()) {
 		fWorkspaces[workspace].StoredScreenConfiguration().Set(id,
 			hasInfo ? &info : NULL, screen->Frame(), mode);
 		StoreWorkspaceConfiguration(workspace);
@@ -962,6 +1101,369 @@ Desktop::SetBrightness(int32 id, float brightness)
 
 
 status_t
+Desktop::SetRotation(int32 id, int32 rotation)
+{
+	// Not locked: HWInterface notifies listeners synchronously and
+	// Desktop::ScreenChanged() takes the window lock for writing.
+	status_t result = HWInterface()->SetPanelOrientation(rotation);
+
+	// While an unconfirmed change is pending, only the live state moves;
+	// Confirm folds it into the stored configuration, so nothing
+	// unconfirmed can reach the boot configuration.
+	if (result == B_OK && !_ScreenChangeStoreDeferred()) {
+		ScreenConfigurations& stored
+			= fWorkspaces[0].StoredScreenConfiguration();
+		if (stored.CurrentByID(id) == NULL) {
+			screen_configuration* current
+				= fWorkspaces[0].CurrentScreenConfiguration().CurrentByID(id);
+			stored.Set(id, current->has_info ? &current->info : NULL,
+				current->frame, current->mode);
+		}
+		stored.SetRotation(id, rotation < 0
+			? B_PANEL_ORIENTATION_NORMAL : rotation);
+		StoreWorkspaceConfiguration(0);
+	}
+
+	return result;
+}
+
+
+int32
+Desktop::Rotation(int32 id) const
+{
+	return HWInterface()->PanelOrientation();
+}
+
+
+status_t
+Desktop::SetReflection(int32 id, int32 reflection)
+{
+	// Not locked: HWInterface notifies listeners synchronously and
+	// Desktop::ScreenChanged() takes the window lock for writing.
+	status_t result = HWInterface()->SetPanelReflection(reflection);
+
+	// Same rule as SetRotation: pending changes touch live state only.
+	if (result == B_OK && !_ScreenChangeStoreDeferred()) {
+		ScreenConfigurations& stored
+			= fWorkspaces[0].StoredScreenConfiguration();
+		if (stored.CurrentByID(id) == NULL) {
+			screen_configuration* current
+				= fWorkspaces[0].CurrentScreenConfiguration().CurrentByID(id);
+			stored.Set(id, current->has_info ? &current->info : NULL,
+				current->frame, current->mode);
+		}
+		stored.SetReflection(id, reflection);
+		StoreWorkspaceConfiguration(0);
+	}
+
+	return result;
+}
+
+
+int32
+Desktop::Reflection(int32 id) const
+{
+	return HWInterface()->PanelReflection();
+}
+
+
+// The Screen preflet's countdown is 6 seconds; waiting a grace period
+// longer means a Keep pressed at the last dialog instant still wins
+// the race against this deadline.
+static const bigtime_t kScreenChangeDeadline = 6500000LL;
+
+
+struct screen_change_timer_args {
+	Desktop*			desktop;
+	uint32				generation;
+};
+
+
+status_t
+Desktop::BeginScreenChange(team_id owner)
+{
+	// Snapshotted without fScreenChangeLock: GetScreenMode() takes the
+	// screen lock, and setters take fScreenChangeLock under it.
+	screen_change_snapshot snapshot;
+	_TakeScreenChangeSnapshot(snapshot);
+
+	{
+		BAutolock _(fScreenChangeLock);
+		if (!fScreenChangeTracker.IsPending())
+			fScreenChangeSnapshot = snapshot;
+
+		fScreenChangeTracker.Begin(owner);
+		fScreenChangeStoreDeferred = true;
+	}
+
+	_StartScreenChangeTimer();
+	return B_OK;
+}
+
+
+status_t
+Desktop::ConfirmScreenChange(team_id owner)
+{
+	{
+		BAutolock _(fScreenChangeLock);
+		if (!fScreenChangeTracker.Confirm(owner))
+			return B_ERROR;
+
+		fScreenChangeStoreDeferred = false;
+	}
+
+	_StopScreenChangeTimer();
+	_StoreScreenChange();
+	return B_OK;
+}
+
+
+status_t
+Desktop::CancelScreenChange(team_id owner)
+{
+	{
+		BAutolock _(fScreenChangeLock);
+		if (!fScreenChangeTracker.Cancel(owner))
+			return B_ERROR;
+
+		// Stays deferred for the restore below: the old values belong
+		// in memory only, disk still holds them.
+		fScreenChangeStoreDeferred = true;
+	}
+
+	_StopScreenChangeTimer();
+	_RestoreScreenChange();
+	_FinishScreenChangeRestore();
+	return B_OK;
+}
+
+
+void
+Desktop::ScreenChangeOwnerDied(team_id owner)
+{
+	{
+		BAutolock _(fScreenChangeLock);
+		if (!fScreenChangeTracker.OwnerDied(owner))
+			return;
+
+		fScreenChangeStoreDeferred = true;
+	}
+
+	_StopScreenChangeTimer();
+	_RestoreScreenChange();
+	_FinishScreenChangeRestore();
+}
+
+
+bool
+Desktop::_ScreenChangeStoreDeferred()
+{
+	BAutolock _(fScreenChangeLock);
+	return fScreenChangeStoreDeferred;
+}
+
+
+void
+Desktop::_FinishScreenChangeRestore()
+{
+	BAutolock _(fScreenChangeLock);
+	if (!fScreenChangeTracker.IsPending())
+		fScreenChangeStoreDeferred = false;
+}
+
+
+void
+Desktop::_TakeScreenChangeSnapshot(screen_change_snapshot& snapshot)
+{
+	memset(&snapshot, 0, sizeof(snapshot));
+	snapshot.modeCount = 0;
+
+	if (HWInterface() != NULL) {
+		snapshot.rotation = HWInterface()->PanelOrientation();
+		snapshot.reflection = HWInterface()->PanelReflection();
+	}
+
+	snapshot.columns = fSettings->WorkspacesColumns();
+	snapshot.rows = fSettings->WorkspacesRows();
+
+	int32 workspaces = fSettings->WorkspacesCount();
+	if (workspaces > kMaxWorkspaces)
+		workspaces = kMaxWorkspaces;
+
+	for (int32 workspace = 0; workspace < workspaces; workspace++) {
+		display_mode mode;
+		if (GetScreenMode(workspace, 0, mode) == B_OK) {
+			snapshot.modes[workspace] = mode;
+			snapshot.hasModes[workspace] = true;
+		}
+		snapshot.modeCount = workspace + 1;
+	}
+}
+
+
+void
+Desktop::_RestoreScreenChange()
+{
+	screen_change_snapshot snapshot;
+	{
+		BAutolock _(fScreenChangeLock);
+		snapshot = fScreenChangeSnapshot;
+	}
+
+	for (int32 workspace = 0; workspace < snapshot.modeCount; workspace++) {
+		if (snapshot.hasModes[workspace])
+			SetScreenMode(workspace, 0, snapshot.modes[workspace], true);
+	}
+
+	if (HWInterface() != NULL) {
+		SetRotation(0, snapshot.rotation);
+		SetReflection(0, snapshot.reflection);
+	}
+
+	if (snapshot.columns != fSettings->WorkspacesColumns()
+		|| snapshot.rows != fSettings->WorkspacesRows()) {
+		SetWorkspacesLayout(snapshot.columns, snapshot.rows);
+	}
+}
+
+
+void
+Desktop::_StoreScreenChange()
+{
+	// The live state is the confirmed one now: fold it into the stored
+	// configurations, then write them out.
+	Screen* screen = fVirtualScreen.ScreenAt(0);
+	if (screen == NULL || HWInterface() == NULL)
+		return;
+
+	int32 id = screen->ID();
+
+	monitor_info info;
+	bool hasInfo = screen->GetMonitorInfo(info) == B_OK;
+
+	int32 workspaces = fSettings->WorkspacesCount();
+	if (workspaces > kMaxWorkspaces)
+		workspaces = kMaxWorkspaces;
+
+	for (int32 workspace = 0; workspace < workspaces; workspace++) {
+		display_mode mode;
+		if (GetScreenMode(workspace, id, mode) != B_OK)
+			continue;
+
+		ScreenConfigurations& stored
+			= fWorkspaces[workspace].StoredScreenConfiguration();
+		stored.Set(id, hasInfo ? &info : NULL, screen->Frame(), mode);
+		stored.SetRotation(id, HWInterface()->PanelOrientation());
+		stored.SetReflection(id, HWInterface()->PanelReflection());
+
+		StoreWorkspaceConfiguration(workspace);
+	}
+}
+
+
+int32
+Desktop::_ScreenChangeTimerEntry(void* data)
+{
+	screen_change_timer_args* args = (screen_change_timer_args*)data;
+	Desktop* desktop = args->desktop;
+	uint32 generation = args->generation;
+	delete args;
+
+	acquire_sem_etc(desktop->fScreenChangeWakeup, 1, B_RELATIVE_TIMEOUT,
+		kScreenChangeDeadline);
+
+	desktop->_ScreenChangeTimer(generation);
+	return 0;
+}
+
+
+void
+Desktop::_StartScreenChangeTimer()
+{
+	screen_change_timer_args* args = new screen_change_timer_args;
+	if (args == NULL)
+		return;
+
+	args->desktop = this;
+	{
+		BAutolock _(fScreenChangeLock);
+		args->generation = fScreenChangeTracker.Generation();
+	}
+
+	// Drain any permit left by an early stop so the new wait is full
+	// length; this also wakes an older timer, whose generation is stale.
+	while (acquire_sem_etc(fScreenChangeWakeup, 1, B_RELATIVE_TIMEOUT, 0)
+			== B_OK) {
+	}
+
+	// Older timers carry an older generation and exit without reverting.
+	thread_id thread = spawn_thread(_ScreenChangeTimerEntry,
+		"screen change deadline", B_DISPLAY_PRIORITY, args);
+	if (thread < B_OK) {
+		delete args;
+		return;
+	}
+
+	fScreenChangeTimer = thread;
+	resume_thread(thread);
+}
+
+
+void
+Desktop::_StopScreenChangeTimer()
+{
+	// Wakes the deadline wait early; the thread finds the window
+	// resolved and exits.
+	release_sem(fScreenChangeWakeup);
+}
+
+
+void
+Desktop::_ScreenChangeTimer(uint32 generation)
+{
+	{
+		BAutolock _(fScreenChangeLock);
+		if (!fScreenChangeTracker.Timeout(generation))
+			return;
+	}
+
+	_RestoreScreenChange();
+	_FinishScreenChangeRestore();
+}
+
+
+status_t
+Desktop::SetTemperature(int32 id, float kelvin)
+{
+	status_t result = HWInterface()->SetTemperature(kelvin);
+
+	if (result == B_OK) {
+		ScreenConfigurations& stored
+			= fWorkspaces[0].StoredScreenConfiguration();
+		if (stored.CurrentByID(id) == NULL) {
+			screen_configuration* current
+				= fWorkspaces[0].CurrentScreenConfiguration().CurrentByID(id);
+			stored.Set(id, current->has_info ? &current->info : NULL,
+				current->frame, current->mode);
+		}
+		stored.SetTemperature(id, kelvin);
+		StoreWorkspaceConfiguration(0);
+	}
+
+	return result;
+}
+
+
+float
+Desktop::Temperature(int32 id) const
+{
+	float temp = 6500.0f;
+	HWInterface()->GetTemperature(&temp);
+	return temp;
+}
+
+
+status_t
 Desktop::LockDirectScreen(team_id team)
 {
 	// TODO: BWindowScreens should use the same mechanism as BDirectWindow,
@@ -1033,10 +1535,12 @@ Desktop::SetWorkspacesLayout(int32 newColumns, int32 newRows)
 	if (newCount < 1 || newCount > kMaxWorkspaces)
 		return B_BAD_VALUE;
 
+	bool deferStore = _ScreenChangeStoreDeferred();
+
 	if (!LockAllWindows())
 		return B_ERROR;
 
-	fSettings->SetWorkspacesLayout(newColumns, newRows);
+	fSettings->SetWorkspacesLayout(newColumns, newRows, !deferStore);
 
 	// either update the workspaces window, or switch to
 	// the last available workspace - which will update
@@ -1346,6 +1850,13 @@ Desktop::SendWindowBehind(Window* window, Window* behindOf, bool sendStack)
 void
 Desktop::ShowWindow(Window* window)
 {
+	if (window == NULL)
+		return;
+
+	// Locked: only unlock (password-feel) windows may appear.
+	if (fScreenLocked && !IsUnlockWindow(window))
+		return;
+
 	if (!window->IsHidden())
 		return;
 
@@ -1729,7 +2240,12 @@ Desktop::AddWindow(Window *window)
 void
 Desktop::RemoveWindow(Window *window)
 {
+	bool wasUnlock = fScreenLocked && IsUnlockWindow(window);
+
 	LockAllWindows();
+
+	// Drop our hold now: UnlockScreen() must not show a reused address.
+	fLockHiddenWindows.RemoveItem(window);
 
 	if (!window->IsHidden())
 		HideWindow(window);
@@ -1741,6 +2257,25 @@ Desktop::RemoveWindow(Window *window)
 	_ChangeWindowWorkspaces(window, window->Workspaces(), 0);
 
 	NotifyWindowRemoved(window);
+
+	// Locked and the unlock window is gone: ask janus for a new locker.
+	if (wasUnlock) {
+		bool anyUnlockLeft = false;
+		for (Window* w = fAllWindows.FirstWindow(); w != NULL;
+				w = w->NextWindow(kAllWindowList)) {
+			if (IsUnlockWindow(w) && !w->IsHidden()) {
+				anyUnlockLeft = true;
+				break;
+			}
+		}
+		if (!anyUnlockLeft) {
+			port_id janus = find_port(B_LAUNCH_DAEMON_PORT_NAME);
+			if (janus >= 0) {
+				BPrivate::KMessage req(BPrivate::B_JANUS_LOCKER_DIED);
+				req.SendTo(janus, -1);
+			}
+		}
+	}
 
 	UnlockAllWindows();
 
@@ -1969,11 +2504,125 @@ Desktop::WindowAt(BPoint where)
 {
 	for (Window* window = CurrentWindows().LastWindow(); window;
 			window = window->PreviousWindow(fCurrentWorkspace)) {
-		if (window->IsVisible() && window->VisibleRegion().Contains(where))
-			return window->StackedWindowAt(where);
+		if (!window->IsVisible()
+			|| !window->VisibleRegion().Contains(where))
+			continue;
+		// Locked: only unlock windows are clickable.
+		if (fScreenLocked && !IsUnlockWindow(window))
+			continue;
+		return window->StackedWindowAt(where);
 	}
 
 	return NULL;
+}
+
+
+bool
+Desktop::IsUnlockWindow(const Window* window) const
+{
+	if (window == NULL || fUnlockTeam < 0)
+		return false;
+	::ServerWindow* serverWindow = window->ServerWindow();
+	return serverWindow != NULL && serverWindow->ClientTeam() == fUnlockTeam;
+}
+
+
+status_t
+Desktop::RequestLockScreen(team_id unlockTeam, BMessenger completion)
+{
+	BPrivate::LinkSender link(MessagePort());
+	link.StartMessage(kMsgLockScreen);
+	link.Attach<int32>(unlockTeam);
+	link.Attach<team_id>(completion.Team());
+	// Port() is private on BMessenger; Private is the sanctioned way.
+	link.Attach<port_id>(BMessenger::Private(completion).Port());
+	return link.Flush(2000000LL);
+}
+
+
+status_t
+Desktop::RequestUnlockScreen(BMessenger completion)
+{
+	BPrivate::LinkSender link(MessagePort());
+	link.StartMessage(kMsgUnlockScreen);
+	link.Attach<team_id>(completion.Team());
+	link.Attach<port_id>(BMessenger::Private(completion).Port());
+	return link.Flush(2000000LL);
+}
+
+
+/*!	Hides every window that is not the unlock team's and enters the
+	locked state. The window lock must not be held. Windows hidden by
+	this call are remembered so UnlockScreen() can restore them.
+*/
+status_t
+Desktop::LockScreen()
+{
+	if (fScreenLocked)
+		return B_OK;
+
+	if (!LockAllWindows())
+		return B_ERROR;
+
+	// Collect first: HideWindow() nests the write lock, which MultiLocker
+	// allows, but iterating while mutating is clearer this way.
+	BList toHide;
+	for (Window* window = fAllWindows.FirstWindow(); window != NULL;
+			window = window->NextWindow(kAllWindowList)) {
+		if (IsUnlockWindow(window) || window->IsHidden()
+			|| window->IsOffscreenWindow())
+			continue;
+		toHide.AddItem(window);
+	}
+
+	fLockHiddenWindows.MakeEmpty();
+	fScreenLocked = true;
+
+	for (int32 i = 0; i < toHide.CountItems(); i++) {
+		Window* window = (Window*)toHide.ItemAt(i);
+		fLockHiddenWindows.AddItem(window);
+		HideWindow(window);
+	}
+
+	// Focus an unlock window if one is already up.
+	for (Window* window = fAllWindows.FirstWindow(); window != NULL;
+			window = window->NextWindow(kAllWindowList)) {
+		if (IsUnlockWindow(window) && !window->IsHidden()) {
+			ActivateWindow(window);
+			break;
+		}
+	}
+
+	UnlockAllWindows();
+	return B_OK;
+}
+
+
+/*!	Leaves the locked state and restores windows hidden by LockScreen().
+	Entries are dropped in RemoveWindow(), so every pointer here is live.
+*/
+status_t
+Desktop::UnlockScreen()
+{
+	if (!fScreenLocked)
+		return B_OK;
+
+	if (!LockAllWindows())
+		return B_ERROR;
+
+	fScreenLocked = false;
+	fUnlockTeam = -1;
+
+	// Restore in reverse hide order so stacking roughly survives.
+	for (int32 i = fLockHiddenWindows.CountItems() - 1; i >= 0; i--) {
+		Window* window = (Window*)fLockHiddenWindows.ItemAt(i);
+		if (window != NULL)
+			ShowWindow(window);
+	}
+	fLockHiddenWindows.MakeEmpty();
+
+	UnlockAllWindows();
+	return B_OK;
 }
 
 
@@ -2016,10 +2665,20 @@ Desktop::KeyboardEventTarget()
 		window = window->PreviousWindow(fCurrentWorkspace);
 	}
 
+	// Locked: only unlock windows may take the keyboard.
+	if (fScreenLocked) {
+		while (window != NULL && !IsUnlockWindow(window)) {
+			window = window->PreviousWindow(fCurrentWorkspace);
+			while (window != NULL && window->IsHidden())
+				window = window->PreviousWindow(fCurrentWorkspace);
+		}
+	}
+
 	if (window != NULL && (window->Flags() & kAcceptKeyboardFocusFlag) != 0)
 		return &window->EventTarget();
 
-	if (FocusWindow() != NULL)
+	if (FocusWindow() != NULL && (!fScreenLocked
+			|| IsUnlockWindow(FocusWindow())))
 		return &FocusWindow()->EventTarget();
 
 	return NULL;
@@ -2621,6 +3280,37 @@ void
 Desktop::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 {
 	switch (code) {
+		case kMsgLockScreen:
+		case kMsgUnlockScreen:
+		{
+			// Apply on the Desktop thread and report to the completion target.
+			team_id unlockTeam = -1;
+			team_id completionTeam = -1;
+			port_id completionPort = -1;
+			if (code == kMsgLockScreen)
+				link.Read<int32>(&unlockTeam);
+			link.Read<team_id>(&completionTeam);
+			link.Read<port_id>(&completionPort);
+
+			status_t result;
+			if (code == kMsgLockScreen) {
+				fUnlockTeam = unlockTeam;
+				result = LockScreen();
+			} else {
+				result = UnlockScreen();
+			}
+
+			if (completionTeam >= 0 && completionPort >= 0) {
+				BMessenger completion;
+				BMessenger::Private(completion).SetTo(completionTeam,
+					completionPort, B_PREFERRED_TOKEN);
+				BMessage done(kMsgDesktopLockDone);
+				done.AddInt32("result", result);
+				completion.SendMessage(&done);
+			}
+			break;
+		}
+
 		case AS_CREATE_APP:
 		{
 			// Create the ServerApp to node monitor a new BApplication
@@ -3609,17 +4299,84 @@ Desktop::ScreenChanged(Screen* screen)
 
 
 void
+Desktop::_RelayoutWindowsForScreen(Screen* screen, const BRect& oldFrame,
+	const BRect& newFrame)
+{
+	ASSERT_MULTI_WRITE_LOCKED(fWindowLock);
+
+	if (oldFrame == newFrame)
+		return;
+
+	for (Window* window = fAllWindows.FirstWindow(); window != NULL;
+			window = window->NextWindow(kAllWindowList)) {
+		if (window->Screen() != screen)
+			continue;
+
+		const char* signature = NULL;
+		if (window->ServerWindow() != NULL
+				&& window->ServerWindow()->App() != NULL)
+			signature = window->ServerWindow()->App()->Signature();
+
+		if (!RelayoutShouldMove(window->IsNormal(),
+				(int32)window->Feel(), window->Flags(), signature))
+			continue;
+
+		const BRect frame = window->Frame();
+		if (RelayoutFillsScreen(frame, oldFrame))
+			continue;
+
+		// Live frame on the current workspace. Move through the stack's top
+		// window so the decorator and stacked siblings move once, with it.
+		const BPoint origin = RelayoutOrigin(frame, oldFrame, newFrame);
+		const BPoint delta = origin - frame.LeftTop();
+		Window* topWindow = window->TopLayerStackWindow();
+		if (delta != BPoint(0, 0) && (topWindow == NULL || topWindow == window))
+			window->MoveBy((int32)delta.x, (int32)delta.y);
+
+		// Other workspaces keep anchors; rewrite them so a shrink can't strand
+		// windows. The current workspace already moved its live frame.
+		for (int32 i = 0; i < kListCount; i++) {
+			if (i == window->CurrentWorkspace())
+				continue;
+
+			window_anchor& anchor = window->Anchor(i);
+			if (anchor.position == kInvalidWindowPosition)
+				continue;
+
+			BRect anchorFrame(anchor.position.x, anchor.position.y,
+				anchor.position.x + frame.Width() - 1,
+				anchor.position.y + frame.Height() - 1);
+			anchor.position = RelayoutOrigin(anchorFrame, oldFrame,
+				newFrame);
+		}
+	}
+}
+
+
+void
 Desktop::_ScreenChanged(Screen* screen)
 {
 	ASSERT_MULTI_WRITE_LOCKED(fWindowLock);
 
+	// item->frame is still the old size; Screen::Frame() is already the new.
+	const int32 screenIndex = fVirtualScreen.ScreenIndex(screen);
+	const BRect newFrame = screen->Frame();
+
+	if (screenIndex >= 0) {
+		const BRect oldFrame = fVirtualScreen.ScreenFrameAt(screenIndex);
+		_RelayoutWindowsForScreen(screen, oldFrame, newFrame);
+		fVirtualScreen.SetScreenFrame(screenIndex, newFrame);
+	}
+
 	// the entire screen is dirty, because we're actually
 	// operating on an all new buffer in memory
-	BRegion dirty(screen->Frame());
+	BRegion dirty(newFrame);
 
 	// update our cached screen region
-	fScreenRegion.Set(screen->Frame());
-	gInputManager->UpdateScreenBounds(screen->Frame());
+	fScreenRegion.Set(newFrame);
+	gInputManager->UpdateScreenBounds(newFrame,
+		screen->HWInterface()->PanelScanoutOrientation(),
+		screen->HWInterface()->PanelReflection());
 
 	BRegion background;
 	_RebuildClippingForAllWindows(background);
@@ -3635,7 +4392,7 @@ Desktop::_ScreenChanged(Screen* screen)
 	// send B_SCREEN_CHANGED to windows on that screen
 	BMessage update(B_SCREEN_CHANGED);
 	update.AddInt64("when", real_time_clock_usecs());
-	update.AddRect("frame", screen->Frame());
+	update.AddRect("frame", newFrame);
 	update.AddInt32("mode", screen->ColorSpace());
 
 	fVirtualScreen.UpdateFrame();

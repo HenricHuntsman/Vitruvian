@@ -97,6 +97,18 @@ HWInterface::GetDriverPath(BString &path)
 }
 
 
+void
+HWInterface::OnSeatEnabled()
+{
+}
+
+
+void
+HWInterface::OnSeatDisabled()
+{
+}
+
+
 status_t
 HWInterface::GetPreferredMode(display_mode* mode)
 {
@@ -349,6 +361,16 @@ HWInterface::CopyBackToFront(const BRect& frame)
 		return B_OK;
 	}
 	return B_BAD_VALUE;
+}
+
+
+status_t
+HWInterface::CopyBackToFront(const BRegion& region)
+{
+	int32 count = region.CountRects();
+	for (int32 i = 0; i < count; i++)
+		CopyBackToFront(region.RectAt(i));
+	return B_OK;
 }
 
 

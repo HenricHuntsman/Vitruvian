@@ -12,11 +12,14 @@
 #include <blkid/blkid.h>
 #include <libudev.h>
 #include <mntent.h>
+#include <pthread.h>
 #include <stdlib.h>
+#include <time.h>
 #include <sys/mount.h>
 #include <sys/statvfs.h>
 
 #include "Team.h"
+#include "../../kernel/nexus/nexus/fs_caps.h"
 
 
 namespace BKernelPrivate {
@@ -107,11 +110,6 @@ static const FsNameMapping kLinuxToHaikuFs[] = {
 };
 
 
-static const char* const kReadOnlyFilesystems[] = {
-	"squashfs", "iso9660", "udf", "erofs", NULL
-};
-
-
 static inline bool
 file_exists(const char* path)
 {
@@ -153,14 +151,16 @@ is_linux_filesystem(const char* name)
 static inline bool
 is_readonly_filesystem(const char* fsType)
 {
-	if (fsType == NULL)
-		return false;
+	return ::BPrivate::FsCaps::is_readonly(fsType);
+}
 
-	for (int i = 0; kReadOnlyFilesystems[i] != NULL; i++) {
-		if (strcasecmp(fsType, kReadOnlyFilesystems[i]) == 0)
-			return true;
-	}
-	return false;
+
+// vfat/exfat/ntfs are NOT idmap-capable; they use uid=/gid= instead (see
+// build_mount_options).
+static inline bool
+is_idmap_capable_filesystem(const char* fsType)
+{
+	return ::BPrivate::FsCaps::is_idmap_capable(fsType);
 }
 
 
@@ -216,11 +216,15 @@ get_mount_info_by_device(const char* devPath,
 	bool found = false;
 
 	while ((entry = getmntent(mounts)) != NULL) {
-		char realMntDev[PATH_MAX];
-		if (!realpath(entry->mnt_fsname, realMntDev))
-			strlcpy(realMntDev, entry->mnt_fsname, sizeof(realMntDev));
+		bool match = strcmp(devPath, entry->mnt_fsname) == 0
+			|| strcmp(realDev, entry->mnt_fsname) == 0;
+		if (!match) {
+			char realMntDev[PATH_MAX];
+			if (realpath(entry->mnt_fsname, realMntDev))
+				match = strcmp(realDev, realMntDev) == 0;
+		}
 
-		if (strcmp(realDev, realMntDev) == 0) {
+		if (match) {
 			if (mountPoint && mpSize > 0)
 				strlcpy(mountPoint, entry->mnt_dir, mpSize);
 			if (fsType && fsSize > 0)
@@ -255,9 +259,11 @@ is_mount_point(const char* path)
 
 
 static inline bool
-detect_filesystem(const char* devPath, char* fsType, size_t fsSize)
+detect_filesystem(const char* devPath, char* fsType, size_t fsSize,
+	bool skipMountCheck = false)
 {
-	if (get_mount_info_by_device(devPath, NULL, 0, fsType, fsSize))
+	if (!skipMountCheck
+		&& get_mount_info_by_device(devPath, NULL, 0, fsType, fsSize))
 		return true;
 
 	int fd = open(devPath, O_RDONLY | O_CLOEXEC);
@@ -331,9 +337,22 @@ get_volume_label(const char* devPath, char* label, size_t labelSize)
 }
 
 
+static inline bool get_udev_property(const char* devName,
+	const char* propertyName, char* out, size_t outSize);
+
+
 static inline bool
 get_partition_table_type(const char* devPath, char* ptType, size_t ptSize)
 {
+	// udev first: raw probes need the disk group; this works unprivileged.
+	const char* devName = strrchr(devPath, '/');
+	devName = devName ? devName + 1 : devPath;
+	if (get_udev_property(devName, "ID_PART_TABLE_TYPE", ptType, ptSize)
+			&& ptType[0]) {
+		return true;
+	}
+
+	// Fall back: udev misses loop/file-backed devices; root can raw-probe.
 	int fd = open(devPath, O_RDONLY | O_CLOEXEC);
 	if (fd < 0)
 		return false;
@@ -368,25 +387,53 @@ get_partition_table_type(const char* devPath, char* ptType, size_t ptSize)
 }
 
 
+struct udev_device_flags_cache {
+	pthread_mutex_t lock;
+	char name[64];
+	bool removable;
+	bool readonly;
+	struct timespec stamp;
+	bool valid;
+};
+
+static const long kUdevCacheNs = 5L * 1000L * 1000L * 1000L;
+
 static inline bool
-is_removable_device(const char* devName)
+_udev_lookup(const char* devName, bool* removableOut, bool* readonlyOut)
 {
-	struct udev* udev = udev_new();
+	static udev_device_flags_cache sCache = {
+		PTHREAD_MUTEX_INITIALIZER, {0}, false, false, {0,0}, false
+	};
+
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	pthread_mutex_lock(&sCache.lock);
+	if (sCache.valid && strcmp(sCache.name, devName) == 0) {
+		long age = (now.tv_sec - sCache.stamp.tv_sec) * 1000000000L
+			+ (now.tv_nsec - sCache.stamp.tv_nsec);
+		if (age < kUdevCacheNs) {
+			*removableOut = sCache.removable;
+			*readonlyOut = sCache.readonly;
+			pthread_mutex_unlock(&sCache.lock);
+			return true;
+		}
+	}
+	pthread_mutex_unlock(&sCache.lock);
+
+	struct udev* udev = BKernelPrivate::Team::GetUDev();
 	if (!udev)
 		return false;
 
 	struct udev_device* dev = udev_device_new_from_subsystem_sysname(
 		udev, "block", devName);
-	if (!dev) {
-		udev_unref(udev);
+	if (!dev)
 		return false;
-	}
 
 	bool removable = false;
-	const char* val = udev_device_get_sysattr_value(dev, "removable");
-	if (val && val[0] == '1')
+	const char* rmv = udev_device_get_sysattr_value(dev, "removable");
+	if (rmv && rmv[0] == '1')
 		removable = true;
-
 	if (!removable) {
 		struct udev_device* parent = udev_device_get_parent_with_subsystem_devtype(
 			dev, "usb", "usb_device");
@@ -394,8 +441,32 @@ is_removable_device(const char* devName)
 			removable = true;
 	}
 
+	bool readonly = false;
+	const char* ro = udev_device_get_sysattr_value(dev, "ro");
+	if (ro && ro[0] == '1')
+		readonly = true;
+
 	udev_device_unref(dev);
-	udev_unref(udev);
+
+	pthread_mutex_lock(&sCache.lock);
+	strlcpy(sCache.name, devName, sizeof(sCache.name));
+	sCache.removable = removable;
+	sCache.readonly = readonly;
+	sCache.stamp = now;
+	sCache.valid = true;
+	pthread_mutex_unlock(&sCache.lock);
+
+	*removableOut = removable;
+	*readonlyOut = readonly;
+	return true;
+}
+
+
+static inline bool
+is_removable_device(const char* devName)
+{
+	bool removable = false, readonly = false;
+	_udev_lookup(devName, &removable, &readonly);
 	return removable;
 }
 
@@ -403,47 +474,77 @@ is_removable_device(const char* devName)
 static inline bool
 is_readonly_device(const char* devName)
 {
-	struct udev* udev = udev_new();
+	bool removable = false, readonly = false;
+	_udev_lookup(devName, &removable, &readonly);
+	return readonly;
+}
+
+
+// Reads a udev block-device property; needs no open() of the device node,
+// unlike a raw blkid probe.
+static inline bool
+get_udev_property(const char* devName, const char* propertyName,
+	char* out, size_t outSize)
+{
+	struct udev* udev = BKernelPrivate::Team::GetUDev();
 	if (!udev)
 		return false;
 
 	struct udev_device* dev = udev_device_new_from_subsystem_sysname(
 		udev, "block", devName);
-	if (!dev) {
-		udev_unref(udev);
+	if (!dev)
 		return false;
+
+	bool found = false;
+	const char* value = udev_device_get_property_value(dev, propertyName);
+	if (value && value[0]) {
+		strlcpy(out, value, outSize);
+		found = true;
 	}
 
-	bool readonly = false;
-	const char* val = udev_device_get_sysattr_value(dev, "ro");
-	if (val && val[0] == '1')
-		readonly = true;
-
 	udev_device_unref(dev);
-	udev_unref(udev);
-	return readonly;
+	return found;
+}
+
+
+static inline bool
+get_udev_fs_type(const char* devName, char* typeOut, size_t typeSize)
+{
+	return get_udev_property(devName, "ID_FS_TYPE", typeOut, typeSize);
+}
+
+
+// The GPT type GUID or MBR type id; the value BPartition::Type() must expose.
+static inline bool
+get_udev_part_type(const char* devName, char* typeOut, size_t typeSize)
+{
+	return get_udev_property(devName, "ID_PART_ENTRY_TYPE", typeOut, typeSize);
+}
+
+
+static inline bool
+get_udev_fs_label(const char* devName, char* labelOut, size_t labelSize)
+{
+	return get_udev_property(devName, "ID_FS_LABEL", labelOut, labelSize);
 }
 
 
 static inline bool
 is_whole_disk(const char* devName)
 {
-	struct udev* udev = udev_new();
+	struct udev* udev = BKernelPrivate::Team::GetUDev();
 	if (!udev)
 		return false;
 
 	struct udev_device* dev = udev_device_new_from_subsystem_sysname(
 		udev, "block", devName);
-	if (!dev) {
-		udev_unref(udev);
+	if (!dev)
 		return false;
-	}
 
 	const char* partnum = udev_device_get_sysattr_value(dev, "partition");
 	bool isDisk = (partnum == NULL);
 
 	udev_device_unref(dev);
-	udev_unref(udev);
 	return isDisk;
 }
 
@@ -451,16 +552,14 @@ is_whole_disk(const char* devName)
 static inline off_t
 get_device_size(const char* devName)
 {
-	struct udev* udev = udev_new();
+	struct udev* udev = BKernelPrivate::Team::GetUDev();
 	if (!udev)
 		return 0;
 
 	struct udev_device* dev = udev_device_new_from_subsystem_sysname(
 		udev, "block", devName);
-	if (!dev) {
-		udev_unref(udev);
+	if (!dev)
 		return 0;
-	}
 
 	off_t size = 0;
 	const char* val = udev_device_get_sysattr_value(dev, "size");
@@ -468,7 +567,6 @@ get_device_size(const char* devName)
 		size = strtoull(val, NULL, 10) * 512;
 
 	udev_device_unref(dev);
-	udev_unref(udev);
 	return size;
 }
 
@@ -476,23 +574,18 @@ get_device_size(const char* devName)
 static inline int
 count_partitions(const char* devName)
 {
-	struct udev* udev = udev_new();
+	struct udev* udev = BKernelPrivate::Team::GetUDev();
 	if (!udev)
 		return 0;
 
 	struct udev_device* parent_dev = udev_device_new_from_subsystem_sysname(
 		udev, "block", devName);
-	if (!parent_dev) {
-		udev_unref(udev);
-		fprintf(stderr, "[count_partitions] devName='%s' - parent_dev NULL\n", devName);
+	if (!parent_dev)
 		return 0;
-	}
 
 	struct udev_enumerate* en = udev_enumerate_new(udev);
 	if (!en) {
 		udev_device_unref(parent_dev);
-		udev_unref(udev);
-		fprintf(stderr, "[count_partitions] devName='%s' - enumerate NULL\n", devName);
 		return 0;
 	}
 	udev_enumerate_add_match_subsystem(en, "block");
@@ -516,11 +609,8 @@ count_partitions(const char* devName)
 		udev_device_unref(dev);
 	}
 
-	fprintf(stderr, "[count_partitions] devName='%s' count=%d\n", devName, count);
-
 	udev_device_unref(parent_dev);
 	udev_enumerate_unref(en);
-	udev_unref(udev);
 	return count;
 }
 
@@ -528,16 +618,14 @@ count_partitions(const char* devName)
 static inline bool
 get_partition_name(const char* devName, int index, char* partName, size_t partNameSize)
 {
-	struct udev* udev = udev_new();
+	struct udev* udev = BKernelPrivate::Team::GetUDev();
 	if (!udev)
 		return false;
 
 	struct udev_device* parent = udev_device_new_from_subsystem_sysname(
 		udev, "block", devName);
-	if (!parent) {
-		udev_unref(udev);
+	if (!parent)
 		return false;
-	}
 
 	struct udev_enumerate* en = udev_enumerate_new(udev);
 	udev_enumerate_add_match_subsystem(en, "block");
@@ -573,13 +661,13 @@ get_partition_name(const char* devName, int index, char* partName, size_t partNa
 
 	udev_enumerate_unref(en);
 	udev_device_unref(parent);
-	udev_unref(udev);
 	return found;
 }
 
 
 static inline void
 build_mount_options(const char* fsType, const char* userOptions,
+	uid_t owner, gid_t ownerGroup,
 	char* options, size_t optionsSize)
 {
 	options[0] = '\0';
@@ -589,12 +677,16 @@ build_mount_options(const char* fsType, const char* userOptions,
 
 	if (strcmp(fsType, "ntfs3") == 0 || strcmp(fsType, "ntfs") == 0 ||
 		strcmp(fsType, "vfat") == 0 || strcmp(fsType, "exfat") == 0) {
+		// FAT-family fs carry no on-disk ownership; mount all files as the
+		// requesting user, not the (possibly root) calling process.
+		uid_t u = (owner != (uid_t)-1) ? owner : getuid();
+		gid_t g = (ownerGroup != (gid_t)-1) ? ownerGroup : getgid();
 		if (options[0] != '\0')
 			strlcat(options, ",", optionsSize);
 
 		char uidgid[64];
-		snprintf(uidgid, sizeof(uidgid), "uid=%d,gid=%d,dmask=022,fmask=133",
-			getuid(), getgid());
+		snprintf(uidgid, sizeof(uidgid), "uid=%u,gid=%u,dmask=022,fmask=133",
+			(unsigned)u, (unsigned)g);
 		strlcat(options, uidgid, optionsSize);
 	}
 }

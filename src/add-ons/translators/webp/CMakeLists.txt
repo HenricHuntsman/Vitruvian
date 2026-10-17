@@ -1,5 +1,6 @@
-Application(
-	WEBPTranslator
+
+TranslatorAddOn(
+	WEBPTranslator SHARED
 
 	SOURCES
 	ConfigView.cpp
@@ -13,3 +14,4 @@ Application(
 
 	RDEF WebPTranslator.rdef
 )
+DoCatalogs("x-vnd.Haiku-WebPTranslator" add-ons/translators/webp)

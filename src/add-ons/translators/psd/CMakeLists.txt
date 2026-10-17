@@ -1,6 +1,6 @@
 
-Application(
-	PSDTranslator
+TranslatorAddOn(
+	PSDTranslator SHARED
 
 	SOURCES
 	ConfigView.cpp	
@@ -17,3 +17,4 @@ Application(
 
 	RDEF PSDTranslator.rdef
 )
+DoCatalogs("x-vnd.Haiku-PSDTranslator" add-ons/translators/psd)

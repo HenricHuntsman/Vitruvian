@@ -1,4 +1,4 @@
-Application(
+RunnableAddOn(
 	Clock
 
 	SOURCES
@@ -8,3 +8,4 @@ Application(
 	LIBS textencoding localestub
 	RDEF Clock.rdef
 )
+DoCatalogs("x-vnd.Haiku-Clock" apps/clock)

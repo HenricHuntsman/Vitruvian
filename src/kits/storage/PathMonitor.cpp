@@ -1,11 +1,13 @@
 /*
  * Copyright 2007-2013, Haiku, Inc. All Rights Reserved.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
  *		Axel Dörfler, axeld@pinc-software.de
  *		Stephan Aßmus, superstippi@gmx.de
  *		Ingo Weinhold, ingo_weinhold@gmx.de
+ *		Dario Casalinuovo
  */
 
 
@@ -136,7 +138,7 @@ public:
 
 	bool Exists() const
 	{
-		return fNodeRef.dev() != B_INVALID_DEV;
+		return fNodeRef.vdevice() != B_INVALID_DEV;
 	}
 
 	const NotOwningEntryRef& EntryRef() const
@@ -167,7 +169,10 @@ public:
 		if (error != B_OK)
 			return error;
 
-		fEntryRef = entry_ref(entryRef.dev(), entryRef.dir(), fEntryRef.name);
+		// SetTo(), not assignment: fEntryRef.name is a borrowed pointer into
+		// fPath, and operator= would free it before strdup'ing its own copy.
+		fEntryRef.SetTo(entryRef.vdevice(), entryRef.vdirectory(),
+			fEntryRef.name);
 
 		// init node ref
 		struct stat st;
@@ -175,7 +180,12 @@ public:
 		if (error != B_OK)
 			return error == B_ENTRY_NOT_FOUND ? B_OK : error;
 
-		fNodeRef = node_ref(entryRef.dev(), entryRef.dir());
+		// entryRef.vdirectory() is this entry's parent; ask the entry for
+		// its own node ref instead, or this watches the parent.
+		error = entry.GetNodeRef(&fNodeRef);
+		if (error != B_OK)
+			return error == B_ENTRY_NOT_FOUND ? B_OK : error;
+
 		fIsDirectory = S_ISDIR(st.st_mode);
 
 		// start watching
@@ -236,8 +246,7 @@ struct AncestorHashDefinition {
 
 	size_t HashKey(const node_ref& key) const
 	{
-		const node_ref real = key.dereference();
-		return size_t(real.dev() ^ real.ino());
+		return size_t(key.device() ^ key.node());
 	}
 
 	size_t Hash(Ancestor* value) const
@@ -420,8 +429,7 @@ struct NodeHashDefinition {
 
 	size_t HashKey(const node_ref& key) const
 	{
-		const node_ref real = key.dereference();
-		return size_t(real.dev() ^ real.ino());
+		return size_t(key.device() ^ key.node());
 	}
 
 	size_t Hash(Node* value) const
@@ -1071,17 +1079,17 @@ PathHandler::_EntryCreated(BMessage* message)
 		return;
 
 	TRACE("%p->PathHandler::_EntryCreated(): entry: %" B_PRIdDEV ":%" B_PRIdINO
-		":\"%s\", node: %" B_PRIdDEV ":%" B_PRIdINO "\n", this, entryRef.dev(),
-		entryRef.dir(), entryRef.name, nodeRef.dev(), nodeRef.ino());
+		":\"%s\", node: %" B_PRIdDEV ":%" B_PRIdINO "\n", this, entryRef.vdevice(),
+		entryRef.vdirectory(), entryRef.name, nodeRef.vdevice(), nodeRef.vnode());
 
 	BEntry entry;
 	node_ref entryNode;
 	struct stat st;
 	if (entry.SetTo(&entryRef) != B_OK || entry.GetNodeRef(&entryNode) != B_OK
-			|| nodeRef != entryNode) {
- 		return;
+			|| entry.GetStat(&st) != B_OK || nodeRef != entryNode) {
+		return;
 	}
- 
+
 	_EntryCreated(entryRef, nodeRef, S_ISDIR(st.st_mode), false, true, NULL);
 }
 
@@ -1101,8 +1109,8 @@ PathHandler::_EntryRemoved(BMessage* message)
 		return;
 
 	TRACE("%p->PathHandler::_EntryRemoved(): entry: %" B_PRIdDEV ":%" B_PRIdINO
-		":\"%s\", node: %" B_PRIdDEV ":%" B_PRIdINO "\n", this, entryRef.device,
-		entryRef.directory, entryRef.name, nodeRef.device, nodeRef.node);
+		":\"%s\", node: %" B_PRIdDEV ":%" B_PRIdINO "\n", this, entryRef.vdevice(),
+		entryRef.vdirectory(), entryRef.name, nodeRef.vdevice(), nodeRef.vnode());
 
 	_EntryRemoved(entryRef, nodeRef, false, true, NULL);
 }
@@ -1131,9 +1139,9 @@ PathHandler::_EntryMoved(BMessage* message)
 
 	TRACE("%p->PathHandler::_EntryMoved(): entry: %" B_PRIdDEV ":%" B_PRIdINO
 		":\"%s\" -> %" B_PRIdDEV ":%" B_PRIdINO ":\"%s\", node: %" B_PRIdDEV
-		":%" B_PRIdINO "\n", this, fromEntryRef.dev(), fromEntryRef.dir(),
-		fromEntryRef.name, toEntryRef.dev(), toEntryRef.dir(),
-		toEntryRef.name, nodeRef.dev(), nodeRef.ino());
+		":%" B_PRIdINO "\n", this, fromEntryRef.vdevice(), fromEntryRef.vdirectory(),
+		fromEntryRef.name, toEntryRef.vdevice(), toEntryRef.vdirectory(),
+		toEntryRef.name, nodeRef.vdevice(), nodeRef.vnode());
 
 	BEntry entry;
 	struct stat st;
@@ -1338,7 +1346,7 @@ PathHandler::_NodeChanged(BMessage* message)
 		return;
 
 	TRACE("%p->PathHandler::_NodeChanged(): node: %" B_PRIdDEV ":%" B_PRIdINO
-		", %s%s\n", this, nodeRef.dev(), nodeRef.ino(),
+		", %s%s\n", this, nodeRef.vdevice(), nodeRef.vnode(),
 			message->GetInt32("opcode", B_STAT_CHANGED) == B_ATTR_CHANGED
 				? "attribute: " : "stat",
 			message->GetInt32("opcode", B_STAT_CHANGED) == B_ATTR_CHANGED
@@ -1639,7 +1647,7 @@ PathHandler::_AddNode(const node_ref& nodeRef, bool isDirectory, bool notify,
 	Entry* entry, Node** _node)
 {
 	TRACE("%p->PathHandler::_AddNode(%" B_PRIdDEV ":%" B_PRIdINO
-		", isDirectory: %d, notify: %d)\n", this, nodeRef.device, nodeRef.node,
+		", isDirectory: %d, notify: %d)\n", this, nodeRef.vdevice(), nodeRef.vnode(),
 		isDirectory, notify);
 
 	// If hard links are supported, we may already know the node.
@@ -1700,16 +1708,22 @@ PathHandler::_AddNode(const node_ref& nodeRef, bool isDirectory, bool notify,
 	entry_ref entryRef;
 	while (directory.GetNextRef(&entryRef) == B_OK) {
 		struct stat st;
-		if (BEntry(&entryRef).GetStat(&st) != B_OK)
+		BEntry childEntry(&entryRef);
+		node_ref childRef;
+		// The child's ref must come from GetNodeRef(), not from stat: a
+		// node_ref built from st_dev/st_ino carries no virtual identity, and
+		// WatchNode() rejects it.
+		if (childEntry.GetStat(&st) != B_OK
+			|| childEntry.GetNodeRef(&childRef) != B_OK)
 			continue;
 
 		bool isDirectory = S_ISDIR(st.st_mode);
 		status_t error = _AddEntryIfNeeded(directoryNode, entryRef.name,
-			node_ref(st.st_dev, st.st_ino), isDirectory, notify);
+			childRef, isDirectory, notify);
 		if (error != B_OK) {
 			TRACE("%p->PathHandler::_AddNode(%" B_PRIdDEV ":%" B_PRIdINO
 				", isDirectory: %d, notify: %d): failed to add directory "
-				"entry: \"%s\"\n", this, nodeRef.device, nodeRef.node,
+				"entry: \"%s\"\n", this, nodeRef.vdevice(), nodeRef.vnode(),
 				isDirectory, notify, entryRef.name);
 			continue;
 		}
@@ -1753,8 +1767,8 @@ PathHandler::_AddEntryIfNeeded(Directory* directory, const char* name,
 {
 	TRACE("%p->PathHandler::_AddEntryIfNeeded(%" B_PRIdDEV ":%" B_PRIdINO
 		":\"%s\", %" B_PRIdDEV ":%" B_PRIdINO
-		", isDirectory: %d, notify: %d)\n", this, directory->NodeRef().device,
-		directory->NodeRef().node, name, nodeRef.device, nodeRef.node,
+		", isDirectory: %d, notify: %d)\n", this, directory->NodeRef().vdevice(),
+		directory->NodeRef().vnode(), name, nodeRef.vdevice(), nodeRef.vnode(),
 		isDirectory, notify);
 
 	if (!isDirectory && _WatchDirectoriesOnly()) {
@@ -1841,8 +1855,8 @@ PathHandler::_NotifyEntryCreatedOrRemoved(const entry_ref& entryRef,
 	TRACE("%p->PathHandler::_NotifyEntryCreatedOrRemoved(): entry %s: %"
 		B_PRIdDEV ":%" B_PRIdINO ":\"%s\", node: %" B_PRIdDEV ":%" B_PRIdINO
 		"\n", this, opcode == B_ENTRY_CREATED ? "created" : "removed",
-		entryRef.dev(), entryRef.dir(), entryRef.name, nodeRef.dev(),
-		nodeRef.ino());
+		entryRef.vdevice(), entryRef.vdirectory(), entryRef.name, nodeRef.vdevice(),
+		nodeRef.vnode());
 
  	BMessage message(B_PATH_MONITOR);
  	message.AddInt32("opcode", opcode);
@@ -1854,7 +1868,10 @@ PathHandler::_NotifyEntryCreatedOrRemoved(const entry_ref& entryRef,
 	// In our case, however, this can very well be the case, e.g. when the
 	// the notification is triggered in response to a directory tree having
 	// been moved into/out of our path.
-	message.AddNodeRef("virual:node", &nodeRef);
+	message.AddNodeRef("virtual:node", &nodeRef);
+	message.AddString("name", entryRef.name);
+
+	_NotifyTarget(message, path);
 }
 
 
@@ -1870,9 +1887,9 @@ PathHandler::_NotifyEntryMoved(const entry_ref& fromEntryRef,
 
  	TRACE("%p->PathHandler::_NotifyEntryMoved(): entry: %" B_PRIdDEV ":%"
  		B_PRIdINO ":\"%s\" -> %" B_PRIdDEV ":%" B_PRIdINO ":\"%s\", node: %"
-		B_PRIdDEV ":%" B_PRIdINO "\n", this, fromEntryRef.device,
-		fromEntryRef.directory, fromEntryRef.name, toEntryRef.device,
-		toEntryRef.directory, toEntryRef.name, nodeRef.device, nodeRef.node);
+		B_PRIdDEV ":%" B_PRIdINO "\n", this, fromEntryRef.vdevice(),
+		fromEntryRef.vdirectory(), fromEntryRef.name, toEntryRef.vdevice(),
+		toEntryRef.vdirectory(), toEntryRef.name, nodeRef.vdevice(), nodeRef.vnode());
 
  	BMessage message(B_PATH_MONITOR);
  	message.AddInt32("opcode", B_ENTRY_MOVED);
@@ -1880,6 +1897,10 @@ PathHandler::_NotifyEntryMoved(const entry_ref& fromEntryRef,
 	message.AddRef("virtual:from directory", &fromEntryRef);
 	message.AddRef("virtual:to directory", &toEntryRef);
 	message.AddNodeRef("virtual:node", &nodeRef);
+	// Consumers read the name as a plain string field, not out of the
+	// entry_ref.
+	message.AddString("from name", fromEntryRef.name);
+	message.AddString("name", toEntryRef.name);
 
 	if (wasAdded)
 		message.AddBool("added", true);

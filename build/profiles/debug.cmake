@@ -28,6 +28,11 @@ set(TEST_VOS_BINARIES
 	test_area
 	testvref
 	teststopwatch
+	testinput
+	testinject
+	testwatch
+	testsuspend
+	testxkbfuzz
 	#test_node_monitor
 	#test_node_monitor2
 	writer
@@ -59,6 +64,31 @@ set(TEST_LIBROOT_BINARIES
 	system_watching_test
 )
 
+# Interface kit manual tests. LookTest and ControlLookTest are widget
+# galleries, the rest are drawing, input and timer checks that happen to
+# live alongside them.
+set(TEST_GUI_BINARIES
+	LookTest
+	ControlLookTest
+	ChannelSliderTest
+	ListViewTest
+	MenuBeginningTest
+	ScrollViewTest
+	SimpleAlertTest
+	SliderTest
+	StatusBarTest
+	TextViewTestManual
+	ToolTipTest
+	WindowStackTest
+	ClippingPlusRedraw
+	DrawBitmapTest
+	GetMouseTest
+	PulseTest
+	ScreenTest
+	SetDiskModeTest
+	TruncateString
+)
+
 set(TEST_ADDONS
 	supporttest
 	storagetest
@@ -69,6 +99,7 @@ set(TEST_ADDONS
 )
 
 ImageInclude("/system/tests" ${TEST_BINARIES} ${TEST_VOS_BINARIES} ${TEST_KERNEL_BINARIES} ${TEST_LIBROOT_BINARIES} cppunit)
+ImageInclude("/system/tests/interface" ${TEST_GUI_BINARIES})
 ImageInclude("/system/tests/lib" ${TEST_ADDONS})
 ImageIncludeFile("src/tests/runsuite.sh" "/system/tests")
 ImageIncludeDir("src/tests/kits/storage/resources" "/system/tests")

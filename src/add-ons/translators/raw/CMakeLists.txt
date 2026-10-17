@@ -1,5 +1,6 @@
-Application(
-	RAWTranslator
+
+TranslatorAddOn(
+	RAWTranslator SHARED
 
 	SOURCES
 	main.cpp
@@ -14,3 +15,4 @@ Application(
 
 	RDEF RAWTranslator.rdef
 )
+DoCatalogs("x-vnd.Haiku-RAWTranslator" add-ons/translators/raw)

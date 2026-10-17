@@ -8,7 +8,6 @@
 
 #include "HWInterface.h"
 
-#include "LibInputEventStream.h"
 #include "TTy.h"
 
 #include <linux/fb.h>
@@ -23,6 +22,7 @@ public:
 
 	virtual	status_t			Initialize();
 	virtual	status_t			Shutdown();
+	virtual status_t			InitCheck() const;
 
 	virtual	EventStream*		CreateEventStream();
 
@@ -43,6 +43,8 @@ public:
 									const display_mode* low,
 									const display_mode* high);
 
+	virtual status_t			GetPreferredMode(display_mode* mode);
+
 	virtual sem_id				RetraceSemaphore();
 	virtual status_t			WaitForRetrace(
 									bigtime_t timeout = B_INFINITE_TIMEOUT);
@@ -58,20 +60,22 @@ public:
 	virtual	RenderingBuffer*	BackBuffer() const;
 	virtual	bool				IsDoubleBuffered() const;
 
-	virtual	status_t			CopyBackToFront(const BRect& frame);
-
 private:
-			LibInputEventStream* fEventStream;
+			void				_EnterGraphicsMode();
+			void				_LeaveGraphicsMode();
 
-			FBDevBuffer*		fBackBuffer;
 			FBDevBuffer*		fFrontBuffer;
+			RenderingBuffer*	fMemBackBuffer;
 
 			display_mode		fDisplayMode;
 
 			int					fFrameBuffer;
+			int					fTTY;
 
 			struct fb_fix_screeninfo	fInfo;
 			struct fb_var_screeninfo	fVInfo;
+
+			EventStream*		fEventStream;
 };
 
 #endif // VIEW_GRAPHICS_CARD_H

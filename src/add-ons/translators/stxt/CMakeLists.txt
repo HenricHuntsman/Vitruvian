@@ -1,5 +1,6 @@
-Application(
-	STXTTranslator
+
+TranslatorAddOn(
+	STXTTranslator SHARED
 
 	SOURCES
 	STXTMain.cpp
@@ -15,3 +16,4 @@ Application(
 )
 
 UsePrivateHeaders(STXTTranslator textencoding)
+DoCatalogs("x-vnd.Haiku-STXTTranslator" add-ons/translators/stxt)

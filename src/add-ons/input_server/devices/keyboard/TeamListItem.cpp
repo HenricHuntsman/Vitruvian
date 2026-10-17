@@ -1,23 +1,27 @@
 /*
  * Copyright 2004-2008, Haiku.
+ * Copyright 2026, The Vitruvian Project
  * Distributed under the terms of the MIT License.
  *
  * Authors:
  *		Jérôme Duval
+ *		Dario Casalinuovo
  */
 
 #include "TeamListItem.h"
 
 #include <string.h>
+#include <unistd.h>
 
+#include <AppFileInfo.h>
+#include <ControlLook.h>
+#include <File.h>
 #include <FindDirectory.h>
 #include <LocaleRoster.h>
+#include <Mime.h>
 #include <NodeInfo.h>
 #include <Path.h>
 #include <View.h>
-
-
-static const int32 kItemMargin = 2;
 
 
 bool gLocalizedNamePreferred;
@@ -27,25 +31,63 @@ TeamListItem::TeamListItem(team_info &teamInfo)
 	:
 	fTeamInfo(teamInfo),
 	fAppInfo(),
-	fMiniIcon(BRect(0, 0, 15, 15), B_RGBA32),
-	fLargeIcon(BRect(0, 0, 31, 31), B_RGBA32),
+	fMiniIcon(BRect(BPoint(0, 0), be_control_look->ComposeIconSize(B_MINI_ICON)), B_RGBA32),
+	fLargeIcon(BRect(BPoint(0, 0), be_control_look->ComposeIconSize(B_LARGE_ICON)), B_RGBA32),
 	fFound(false),
-	fRefusingToQuit(false)
+	fRefusingToQuit(false),
+	fIsParent(false)
 {
 	int32 cookie = 0;
-	image_info info;
-	if (get_next_image_info(teamInfo.team, &cookie, &info) == B_OK) {
-		fPath = BPath(info.name);
-		BNode node(info.name);
-		BNodeInfo nodeInfo(&node);
-		nodeInfo.GetTrackerIcon(&fMiniIcon, B_MINI_ICON);
-		nodeInfo.GetTrackerIcon(&fLargeIcon, B_LARGE_ICON);
+	image_info imageInfo;
+	if (get_next_image_info(teamInfo.team, &cookie, &imageInfo) == B_OK) {
+		fPath = BPath(imageInfo.name);
+	} else {
+		// get_next_image_info only works for the current process on VOS,
+		// so fall back to /proc/<pid>/exe and then to the cmdline / comm
+		// name for teams without a readable exe symlink.
+		char procExe[64];
+		char exePath[B_PATH_NAME_LENGTH];
+		snprintf(procExe, sizeof(procExe), "/proc/%d/exe",
+			(int)teamInfo.team);
+
+		ssize_t length = readlink(procExe, exePath, sizeof(exePath) - 1);
+		if (length > 0) {
+			exePath[length] = '\0';
+			fPath = BPath(exePath);
+		} else if (teamInfo.args[0] != '\0') {
+			char args[sizeof(teamInfo.args)];
+			strlcpy(args, teamInfo.args, sizeof(args));
+			char* space = strchr(args, ' ');
+			if (space != NULL)
+				*space = '\0';
+			fPath = BPath(args);
+		} else if (teamInfo.name[0] != '\0')
+			fPath = BPath(teamInfo.name);
 	}
 
-	if (be_roster->GetRunningAppInfo(fTeamInfo.team, &fAppInfo) != B_OK)
-		fAppInfo.signature[0] = '\0';
+	fIsApplication = be_roster->GetRunningAppInfo(fTeamInfo.team, &fAppInfo) == B_OK;
 
+	_FetchIcons();
 	CacheLocalizedName();
+}
+
+
+void
+TeamListItem::_FetchIcons()
+{
+	if (fPath.Path() != NULL && fPath.Path()[0] == '/') {
+		BNode node(fPath.Path());
+		if (node.InitCheck() == B_OK) {
+			BNodeInfo nodeInfo(&node);
+			if (nodeInfo.GetTrackerIcon(&fMiniIcon, B_MINI_ICON) == B_OK
+				&& nodeInfo.GetTrackerIcon(&fLargeIcon, B_LARGE_ICON) == B_OK)
+				return;
+		}
+	}
+
+	BMimeType genericApp(B_APP_MIME_TYPE);
+	genericApp.GetIcon(&fMiniIcon, B_MINI_ICON);
+	genericApp.GetIcon(&fLargeIcon, B_LARGE_ICON);
 }
 
 
@@ -66,48 +108,50 @@ TeamListItem::CacheLocalizedName()
 void
 TeamListItem::DrawItem(BView* owner, BRect frame, bool complete)
 {
-	rgb_color kHighlight = { 140, 140, 140, 0 };
-	rgb_color kBlack = { 0, 0, 0, 0 };
-	rgb_color kBlue = { 0, 0, 255, 0 };
-	rgb_color kRed = { 255, 0, 0, 0 };
+	rgb_color kHighlight = ui_color(B_LIST_SELECTED_BACKGROUND_COLOR);
+	rgb_color kHighlightText = ui_color(B_LIST_SELECTED_ITEM_TEXT_COLOR);
+	rgb_color kText = ui_color(B_LIST_ITEM_TEXT_COLOR);
+
+	rgb_color kIdealRed = { 255, 0, 0, 0 };
+	rgb_color kIdealBlue = { 0, 0, 255, 0 };
+	rgb_color kRed = mix_color(kIdealRed, kText, 191);
+	rgb_color kBlue = mix_color(kIdealBlue, kText, 191);
+	rgb_color kHighlightRed = mix_color(kIdealRed, kHighlightText, 191);
+	rgb_color kHighlightBlue = mix_color(kIdealBlue, kHighlightText, 191);
 
 	BRect r(frame);
 
 	if (IsSelected() || complete) {
-		rgb_color color;
-		if (IsSelected())
-			color = kHighlight;
-		else
-			color = owner->ViewColor();
-
-		owner->SetHighColor(color);
-		owner->SetLowColor(color);
+		owner->SetHighColor(kHighlight);
+		owner->SetLowColor(kHighlight);
 		owner->FillRect(r);
-		owner->SetHighColor(kBlack);
-	} else {
-		owner->SetLowColor(owner->ViewColor());
 	}
 
 	frame.left += 4;
 	BRect iconFrame(frame);
-	iconFrame.Set(iconFrame.left, iconFrame.top + 1, iconFrame.left + 15,
-		iconFrame.top + 16);
+	iconFrame.Set(iconFrame.left, iconFrame.top + 1,
+		iconFrame.left + fMiniIcon.Bounds().Width(),
+		iconFrame.top + fMiniIcon.Bounds().Height() + 1);
 	owner->SetDrawingMode(B_OP_ALPHA);
 	owner->SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
 	owner->DrawBitmap(&fMiniIcon, iconFrame);
 	owner->SetDrawingMode(B_OP_COPY);
 
-	frame.left += 16;
+	frame.left += fMiniIcon.Bounds().Width();
 	if (fRefusingToQuit)
-		owner->SetHighColor(kRed);
-	else
-		owner->SetHighColor(IsSystemServer() ? kBlue : kBlack);
-
+		owner->SetHighColor(IsSelected() ? kHighlightRed : kRed);
+	else {
+		if (IsSystemServer())
+			owner->SetHighColor(IsSelected() ? kHighlightBlue : kBlue);
+		else
+			owner->SetHighColor(IsSelected() ? kHighlightText : kText);
+	}
 	BFont font = be_plain_font;
 	font_height	finfo;
 	font.GetHeight(&finfo);
 	owner->SetFont(&font);
-	owner->MovePenTo(frame.left + 8, frame.top + ((frame.Height()
+	owner->MovePenTo(frame.left + (fMiniIcon.Bounds().Width() / 2),
+		frame.top + ((frame.Height()
 			- (finfo.ascent + finfo.descent + finfo.leading)) / 2)
 		+ finfo.ascent);
 
@@ -118,10 +162,11 @@ TeamListItem::DrawItem(BView* owner, BRect frame, bool complete)
 }
 
 
-/*static*/ int32
+int32
 TeamListItem::MinimalHeight()
 {
-	return 16 + kItemMargin;
+	return fMiniIcon.Bounds().IntegerHeight() +
+		(int32)(be_control_look->DefaultLabelSpacing() / 3.0f);
 }
 
 
@@ -131,6 +176,7 @@ TeamListItem::Update(BView* owner, const BFont* font)
 	// we need to override the update method so we can make sure
 	// the list item size doesn't change
 	BListItem::Update(owner, font);
+
 	if (Height() < MinimalHeight())
 		SetHeight(MinimalHeight());
 }
@@ -150,19 +196,19 @@ TeamListItem::IsSystemServer()
 	static BPath systemServersPath;
 	static BPath trackerPath;
 	static BPath deskbarPath;
-	
+
 	if (firstCall) {
 		find_directory(B_SYSTEM_SERVERS_DIRECTORY, &systemServersPath);
 
 		find_directory(B_SYSTEM_DIRECTORY, &trackerPath);
 		trackerPath.Append("Tracker");
-		
+
 		find_directory(B_SYSTEM_DIRECTORY, &deskbarPath);
 		deskbarPath.Append("Deskbar");
-		
+
 		firstCall = false;
 	}
-	
+
 	if (strncmp(systemServersPath.Path(), fTeamInfo.args,
 			strlen(systemServersPath.Path())) == 0)
 		return true;
@@ -174,15 +220,8 @@ TeamListItem::IsSystemServer()
 	if (strncmp(deskbarPath.Path(), fTeamInfo.args,
 			strlen(deskbarPath.Path())) == 0)
 		return true;
-	
-	return false;		
-}
 
-
-bool
-TeamListItem::IsApplication() const
-{
-	return fAppInfo.signature[0] != '\0';
+	return false;
 }
 
 

@@ -1,4 +1,4 @@
-Application(
+RunnableAddOn(
 	AboutSystem
 
 	SOURCES
@@ -6,10 +6,11 @@ Application(
 	HyperTextActions.cpp
 	HyperTextView.cpp
 	Utilities.cpp
-	LIBS be shared translation translatorutils textencoding localestub
+	LIBS shared translation translatorutils textencoding localestub
 	RDEF AboutSystem.rdef
 )
 
 UsePrivateHeaders(AboutSystem interface app shared libroot)
 
 target_compile_definitions(AboutSystem PRIVATE VOS_VERSION="${PROJECT_VERSION}")
+DoCatalogs("x-vnd.Haiku-About" apps/aboutsystem)

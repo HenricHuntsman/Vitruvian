@@ -1,0 +1,79 @@
+name: Native amd64 build test
+
+# master runs this as the first step of the Factory amd64 build.
+on:
+  push:
+    branches-ignore: [master]
+
+# A newer push supersedes this run; there is no value in finishing a
+# build of code that is no longer the head. Keyed per ref so branches
+# do not cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-build:
+    name: Native amd64 build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bison build-essential cmake debootstrap debhelper \
+            dh-dkms dkms elfutils flex git \
+            grub-efi-amd64-bin grub-pc-bin \
+            libcairo2-dev libcups2-dev libdrm-dev libelf-dev libfl-dev libfreetype6-dev \
+            libgif-dev libicns-dev libicu-dev libinput-dev \
+            libjpeg-dev libncurses-dev libopenexr-dev libpng-dev \
+            libtiff-dev libudev-dev libwebp-dev libseat-dev \
+            libpam0g-dev libsystemd-dev libevdev-dev \
+            libblkid-dev libxkbcommon-dev libgl1-mesa-dev libgbm-dev \
+            libglu1-mesa-dev \
+             libpipewire-0.3-dev libspa-0.2-dev \
+             libbluetooth-dev libnm-dev libglib2.0-dev \
+             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libegl-dev libgl-dev linux-headers-$(uname -r) \
+            mtools ninja-build squashfs-tools sudo xorriso zlib1g-dev \
+            libapt-pkg-dev fakeroot devscripts lintian wget attr
+
+      - name: Configure git safe.directory
+        run: git config --global --add safe.directory $GITHUB_WORKSPACE
+
+      - name: Init submodules
+        run: git submodule update --init --recursive
+
+      - name: Build buildtools
+        run: |
+          mkdir -p buildtools
+          cd buildtools
+          cmake -DBUILDTOOLS_MODE=1 .. -GNinja
+          ninja
+
+      - name: Create build directory
+        run: mkdir -p generated.x86
+
+      - name: Setup environment
+        run: cd generated.x86 && ../build/scripts/setupenv.sh --arch=amd64
+
+      - name: Configure
+        run: cd generated.x86 && ../configure --arch=amd64 --build-type=Release --buildtools=../buildtools
+
+      - name: Build
+        run: cd generated.x86 && ninja
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-build-log
+          path: |
+            generated.x86/CMakeFiles/CMakeOutput.log
+            generated.x86/src/servers/app/app_server

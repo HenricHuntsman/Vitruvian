@@ -1,5 +1,6 @@
-Application(
-	HVIFTranslator
+
+TranslatorAddOn(
+	HVIFTranslator SHARED
 
 	SOURCES
 	HVIFMain.cpp
@@ -13,3 +14,4 @@ Application(
 
 	RDEF HVIFTranslator.rdef
 )
+DoCatalogs("x-vnd.Haiku-HVIFTranslator" add-ons/translators/hvif)

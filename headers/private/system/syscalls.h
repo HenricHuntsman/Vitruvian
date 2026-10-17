@@ -14,7 +14,17 @@
 #include <OS.h>
 
 #include <signal.h>
+#include <stdint.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+
+struct linux_dirent64 {
+	uint64_t	d_ino;
+	int64_t		d_off;
+	uint16_t	d_reclen;
+	uint8_t		d_type;
+	char		d_name[];
+};
 
 
 #ifdef __cplusplus
@@ -67,6 +77,7 @@ extern int			_kern_getrlimit(int resource, struct rlimit * rlp);
 extern int			_kern_setrlimit(int resource, const struct rlimit * rlp);
 
 extern status_t		_kern_shutdown(bool reboot);
+extern status_t		_kern_suspend(void);
 extern status_t		_kern_get_safemode_option(const char *parameter,
 						char *buffer, size_t *_bufferSize);
 
@@ -303,9 +314,12 @@ extern ssize_t		_kern_writev(int fd, off_t pos, const struct iovec *vecs,
 extern status_t		_kern_ioctl(int fd, uint32 cmd, void *data, size_t length);
 extern ssize_t		_kern_read_dir(int fd, struct dirent *buffer,
 						size_t bufferSize, uint32 maxCount);
+extern ssize_t		_kern_read_dents(int fd, void *buffer, size_t bufferSize);
 extern status_t		_kern_rewind_dir(int fd);
 extern status_t		_kern_read_stat(int fd, const char *path, bool traverseLink,
 						struct stat *stat, size_t statSize);
+extern status_t		_kern_read_statx(int fd, const char *path, bool traverseLink,
+						unsigned int mask, struct statx *stx);
 extern status_t		_kern_write_stat(int fd, const char *path,
 						bool traverseLink, const struct stat *stat,
 						size_t statSize, int statMask);
@@ -452,7 +466,6 @@ extern status_t		_kern_get_port_message_info_etc(port_id port,
 
 // debug support functions
 extern status_t		_kern_kernel_debugger(const char *message);
-extern void			_kern_register_syslog_daemon(port_id port);
 extern void			_kern_debugger(const char *message);
 extern int			_kern_disable_debugger(int state);
 
@@ -527,6 +540,11 @@ extern void			_kern_clear_caches(void *address, size_t length,
 extern bool			_kern_cpu_enabled(int32 cpu);
 extern status_t		_kern_set_cpu_enabled(int32 cpu, bool enabled);
 
+// Kernel's own memory footprint (Slab + KernelStack + PageTables, in
+// bytes), not otherwise exposed via system_info. Linux-only accessor,
+// implemented by parsing /proc/meminfo; see libroot2/system_info.c.
+extern status_t		_kern_get_kernel_memory_footprint(uint64* _bytes);
+
 #if defined(__i386__) || defined(__x86_64__)
 // our only x86 only syscall
 extern status_t		_kern_get_cpuid(cpuid_info *info, uint32 eax, uint32 cpu);
@@ -554,6 +572,10 @@ extern status_t		_kern_unregister_file_device(partition_id deviceID,
 	// is -1/NULL. If both is given only filename is ignored.
 extern status_t		_kern_get_file_disk_device_path(partition_id id,
 						char* buffer, size_t bufferSize);
+
+// V\OS: implemented in src/system/libroot2/fs/disk_device.cpp
+extern status_t		_kern_get_partition_path(partition_id id, char* buffer,
+						size_t bufferSize);
 
 // disk systems
 extern status_t		_kern_get_disk_system_info(disk_system_id id,
@@ -614,7 +636,7 @@ extern status_t		_kern_stop_watching_disks(port_id port, int32 token);
 // V\OS
 
 extern status_t		_kern_entry_ref_to_path_by_fd(int fd, team_id team,
-						char* name, char* buffer, size_t bufferSize);
+						const char* name, char* buffer, size_t bufferSize);
 extern status_t		_kern_fd_to_path(int fd, team_id team, char* buffer,
 						size_t bufferSize);
 extern int			_kern_open_entry_ref(dev_t device, ino_t inode,

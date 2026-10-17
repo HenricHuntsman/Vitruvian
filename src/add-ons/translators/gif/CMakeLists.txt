@@ -1,6 +1,6 @@
 
-Application(
-	GIFTranslator
+TranslatorAddOn(
+	GIFTranslator SHARED
 
 	SOURCES
 	GIFLoad.cpp	
@@ -18,3 +18,4 @@ Application(
 
 	RDEF GIFTranslator.rdef
 )
+DoCatalogs("x-vnd.Haiku-GIFTranslator" add-ons/translators/gif)

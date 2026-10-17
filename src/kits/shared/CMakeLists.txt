@@ -7,7 +7,7 @@ AddOn(
 	AttributeUtilities.cpp
 	# TODO: this should be a separate lib
 	#ExpressionParser.cpp
-	#BarberPole.cpp
+	BarberPole.cpp
 	BitmapButton.cpp
 	CalendarView.cpp
 	ColorItem.cpp
@@ -21,8 +21,8 @@ AddOn(
 	#Geolocation.cpp
 	HashString.cpp
 	HSL.cpp
-	#IconButton.cpp
-	#IconView.cpp
+	IconButton.cpp
+	IconView.cpp
 	JsonWriter.cpp
 	JsonEventListener.cpp
 	JsonMessageWriter.cpp
@@ -30,6 +30,7 @@ AddOn(
 	JsonEvent.cpp
 	Json.cpp
 	Keymap.cpp
+	KeymapXkb.cpp
 	LongAndDragTrackingFilter.cpp
 	MemoryRingIO.cpp
 	MessageBuilder.cpp
@@ -52,6 +53,10 @@ AddOn(
 	Variant.cpp
 	WeakReferenceable.cpp
 	md5.cpp
+
+	INCLUDES
+	"${PROJECT_SOURCE_DIR}/src/add-ons/input_server/devices/keyboard"
 )
 
 UsePrivateHeaders(shared shared locale interface kernel libroot system)
+target_link_libraries(shared PRIVATE xkbcommon)

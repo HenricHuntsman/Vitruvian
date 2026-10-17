@@ -1,5 +1,6 @@
-Application(
-	TGATranslator
+
+TranslatorAddOn(
+	TGATranslator SHARED
 
 	SOURCES
 	TGAMain.cpp
@@ -13,3 +14,4 @@ Application(
 
 	RDEF TGATranslator.rdef
 )
+DoCatalogs("x-vnd.Haiku-TGATranslator" add-ons/translators/tga)

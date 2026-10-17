@@ -1,195 +1,101 @@
 /*
- * Copyright 2006-2013, Haiku, Inc. All rights reserved.
+ * Copyright 2006-2013, Haiku, Inc.
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Distributed under the terms of the MIT License.
- *
- * Authors:
- *		Dario Casalinuovo
- *		Axel Dörfler, axeld@pinc-software.de
- *		Rene Gollent, rene@gollent.com
- *		Hugo Santos, hugosantos@gmail.com
  */
 
-
 #include "NetworkStatusView.h"
-
-#include <algorithm>
-#include <set>
-#include <vector>
-
-#include <arpa/inet.h>
-#include <net/if.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <strings.h>
-#include <sys/socket.h>
-#include <sys/sockio.h>
-#include <unistd.h>
-
-#include <AboutWindow.h>
-#include <Alert.h>
-#include <Application.h>
-#include <Catalog.h>
-#include <ControlLook.h>
-#include <Bitmap.h>
-#include <Deskbar.h>
-#include <Dragger.h>
-#include <Drivers.h>
-#include <IconUtils.h>
-#include <Locale.h>
-#include <MenuItem.h>
-#include <MessageRunner.h>
-#include <NetworkInterface.h>
-#include <NetworkRoster.h>
-#include <PopUpMenu.h>
-#include <Resources.h>
-#include <Roster.h>
-#include <String.h>
-#include <TextView.h>
-
+#include "NMBackend.h"
 #include "NetworkStatus.h"
 #include "NetworkStatusIcons.h"
 #include "RadioView.h"
 #include "WirelessNetworkMenuItem.h"
+#include "ConnectionInfoWindow.h"
+#include "SecretDialogWindow.h"
+
+#include <Menu.h>
+#include <StringItem.h>
+
+#include <new>
+#include <string.h>
+
+#include <AboutWindow.h>
+#include <Application.h>
+#include <Alert.h>
+#include <Bitmap.h>
+#include <Catalog.h>
+#include <Deskbar.h>
+#include <Dragger.h>
+#include <IconUtils.h>
+#include <Resources.h>
+#include <Roster.h>
 
 
 #undef B_TRANSLATION_CONTEXT
-#define B_TRANSLATION_CONTEXT "NetworkStatusView"
+#define B_TRANSLATION_CONTEXT "NetworkStatus"
 
 
-static const char *kStatusDescriptions[] = {
-	B_TRANSLATE("Unknown"),
-	B_TRANSLATE("No link"),
-	B_TRANSLATE("No stateful configuration"),
-	B_TRANSLATE("Configuring"),
-	B_TRANSLATE("Connected")
-};
-
-extern "C" _EXPORT BView *instantiate_deskbar_item(float maxWidth, float maxHeight);
+static const float kDeskbarHeight = 20.0f;
+static const float kIconWidth = 16.0f;
+static const float kIconHeight = 16.0f;
 
 
-const uint32 kMsgShowConfiguration = 'shcf';
-const uint32 kMsgOpenNetworkPreferences = 'onwp';
-const uint32 kMsgJoinNetwork = 'join';
-
-const uint32 kMinIconWidth = 16;
-const uint32 kMinIconHeight = 16;
+extern "C" BView* instantiate_deskbar_item(float maxWidth, float maxHeight);
 
 
-//	#pragma mark - NetworkStatusView
-
-
-NetworkStatusView::NetworkStatusView(BRect frame, int32 resizingMode,
-		bool inDeskbar)
-	: BView(frame, kDeskbarItemName, resizingMode,
+NetworkStatusView::NetworkStatusView(BRect frame, int32 resizingMode, bool inDeskbar)
+	:
+	BView(frame, kDeskbarItemName, resizingMode,
 		B_WILL_DRAW | B_TRANSPARENT_BACKGROUND | B_FRAME_EVENTS),
+	fDeviceIndex(-1),
+	fConnected(false),
+	fHasDevice(false),
+	fVPNActive(false),
+	fSignalStrength(-1),
 	fInDeskbar(inDeskbar)
 {
-	_Init();
+	memset(fIcons, 0, sizeof(fIcons));
+
+	SetViewColor(B_TRANSPARENT_COLOR);
+	SetLowColor(ViewColor());
 
 	if (!inDeskbar) {
-		// we were obviously added to a standard window - let's add a dragger
 		frame.OffsetTo(B_ORIGIN);
 		frame.top = frame.bottom - 7;
 		frame.left = frame.right - 7;
 		BDragger* dragger = new BDragger(frame, this,
 			B_FOLLOW_RIGHT | B_FOLLOW_BOTTOM);
 		AddChild(dragger);
-	} else
-		_Update();
+	}
 }
 
 
 NetworkStatusView::NetworkStatusView(BMessage* archive)
-	: BView(archive),
+	:
+	BView(archive),
+	fDeviceIndex(-1),
+	fConnected(false),
+	fHasDevice(false),
+	fVPNActive(false),
+	fSignalStrength(-1),
 	fInDeskbar(false)
 {
+	memset(fIcons, 0, sizeof(fIcons));
+
 	app_info info;
 	if (be_app->GetAppInfo(&info) == B_OK
 		&& !strcasecmp(info.signature, "application/x-vnd.Be-TSKB"))
 		fInDeskbar = true;
 
-	_Init();
+	SetViewColor(B_TRANSPARENT_COLOR);
+	SetLowColor(ViewColor());
 }
 
 
 NetworkStatusView::~NetworkStatusView()
 {
-}
-
-
-void
-NetworkStatusView::_Init()
-{
-	for (int i = 0; i < kStatusCount; i++) {
-		fTrayIcons[i] = NULL;
-		fNotifyIcons[i] = NULL;
-	}
-
-	_UpdateBitmaps();
-}
-
-
-void
-NetworkStatusView::_UpdateBitmaps()
-{
-	for (int i = 0; i < kStatusCount; i++) {
-		delete fTrayIcons[i];
-		delete fNotifyIcons[i];
-		fTrayIcons[i] = NULL;
-		fNotifyIcons[i] = NULL;
-	}
-
-	image_info info;
-	if (our_image(info) != B_OK)
-		return;
-
-	BFile file(info.name, B_READ_ONLY);
-	if (file.InitCheck() < B_OK)
-		return;
-
-	BResources resources(&file);
-#ifdef HAIKU_TARGET_PLATFORM_HAIKU
-	if (resources.InitCheck() < B_OK)
-		return;
-#endif
-
-	for (int i = 0; i < kStatusCount; i++) {
-		const void* data = NULL;
-		size_t size;
-		data = resources.LoadResource(B_VECTOR_ICON_TYPE,
-			kNetworkStatusNoDevice + i, &size);
-		if (data != NULL) {
-			// Scale main tray icon
-			BBitmap* trayIcon = new BBitmap(Bounds(), B_RGBA32);
-			if (trayIcon->InitCheck() == B_OK
-				&& BIconUtils::GetVectorIcon((const uint8 *)data,
-					size, trayIcon) == B_OK) {
-				fTrayIcons[i] = trayIcon;
-			} else
-				delete trayIcon;
-
-			// Scale notification icon
-			BBitmap* notifyIcon
-				= new BBitmap(BRect(B_ORIGIN, be_control_look->ComposeIconSize(32)), B_RGBA32);
-			if (notifyIcon->InitCheck() == B_OK
-				&& BIconUtils::GetVectorIcon((const uint8 *)data,
-					size, notifyIcon) == B_OK) {
-				fNotifyIcons[i] = notifyIcon;
-			} else
-				delete notifyIcon;
-		}
-	}
-}
-
-
-void
-NetworkStatusView::_Quit()
-{
-	if (fInDeskbar) {
-		BDeskbar deskbar;
-		deskbar.RemoveItem(kDeskbarItemName);
-	} else
-		be_app->PostMessage(B_QUIT_REQUESTED);
+	for (size_t i = 0; i < sizeof(fIcons) / sizeof(fIcons[0]); i++)
+		delete fIcons[i];
 }
 
 
@@ -221,19 +127,42 @@ NetworkStatusView::AttachedToWindow()
 {
 	BView::AttachedToWindow();
 
-	SetViewColor(B_TRANSPARENT_COLOR);
+	NMBackend* backend = NMBackend::Instance();
+	if (backend != NULL) {
+		backend->StartWatching(BMessenger(this),
+			NMBackend::NOTIFICATION_DEVICE_ADDED |
+			NMBackend::NOTIFICATION_DEVICE_REMOVED |
+			NMBackend::NOTIFICATION_DEVICE_STATE_CHANGED |
+			NMBackend::NOTIFICATION_CONNECTION_STATUS_CHANGED |
+			NMBackend::NOTIFICATION_WIFI_NETWORK_FOUND |
+			NMBackend::NOTIFICATION_SIGNAL_STRENGTH_CHANGED);
 
-	start_watching_network(
-		B_WATCH_NETWORK_INTERFACE_CHANGES | B_WATCH_NETWORK_LINK_CHANGES, this);
+		backend->RegisterSecretAgentAsync(BMessenger(this), BMessenger(this),
+			kMsgAgentRegistered);
+	}
 
-	_Update();
+	_RequestStatusUpdate();
 }
 
 
 void
 NetworkStatusView::DetachedFromWindow()
 {
-	stop_watching_network(this);
+	NMBackend* backend = NMBackend::Instance();
+	if (backend != NULL) {
+		backend->StopWatching(BMessenger(this));
+		backend->UnregisterSecretAgentAsync(BMessenger(), 0);
+	}
+
+	BView::DetachedFromWindow();
+}
+
+
+void
+NetworkStatusView::FrameResized(float width, float height)
+{
+	BView::FrameResized(width, height);
+	Invalidate();
 }
 
 
@@ -241,41 +170,193 @@ void
 NetworkStatusView::MessageReceived(BMessage* message)
 {
 	switch (message->what) {
-		case B_NETWORK_MONITOR:
-			_Update();
+		case kMsgUpdateStatus:
+			_RequestStatusUpdate();
 			break;
 
-		case kMsgShowConfiguration:
-			_ShowConfiguration(message);
+		case kMsgStatusReady:
+			_ApplyStatusUpdate(message);
 			break;
 
-		case kMsgOpenNetworkPreferences:
-			_OpenNetworksPreferences();
-			break;
-
-		case kMsgJoinNetwork:
-		{
-			const char* deviceName;
-			const char* name;
-			BNetworkAddress address;
-			if (message->FindString("device", &deviceName) == B_OK
-				&& message->FindString("name", &name) == B_OK
-				&& message->FindFlat("address", &address) == B_OK) {
-				BNetworkDevice device(deviceName);
-				status_t status = device.JoinNetwork(address);
-				if (status != B_OK) {
-					BString text
-						= B_TRANSLATE("Could not join wireless network:\n");
-					text << strerror(status);
-					BAlert* alert = new BAlert(name, text.String(),
-						B_TRANSLATE("OK"), NULL, NULL, B_WIDTH_AS_USUAL,
-						B_STOP_ALERT);
-					alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
-					alert->Go(NULL);
+		case kMsgConnectDevice:
+			{
+				const char* devicePath;
+				if (message->FindString("device_path", &devicePath) == B_OK) {
+					NMBackend* backend = NMBackend::Instance();
+					if (backend != NULL && backend->ConnectDevice(devicePath) != B_OK) {
+						_ShowOperationFailedAlert(B_TRANSLATE(
+							"Could not start connecting: no such device."));
+					}
 				}
 			}
 			break;
+
+		case kMsgDisconnectDevice:
+			{
+				const char* devicePath;
+				if (message->FindString("device_path", &devicePath) == B_OK) {
+					NMBackend* backend = NMBackend::Instance();
+					if (backend != NULL && backend->DisconnectDevice(devicePath) != B_OK) {
+						_ShowOperationFailedAlert(B_TRANSLATE(
+							"Could not start disconnecting: no such device."));
+					}
+				}
+			}
+			break;
+			
+		case kMsgScanWiFi:
+			{
+				const char* devicePath;
+				if (message->FindString("device_path", &devicePath) == B_OK) {
+					_ScanWiFiNetworks(devicePath);
+				}
+			}
+			break;
+			
+		case kMsgConnectWiFi:
+			{
+				const char* devicePath;
+				const char* ssid;
+				if (message->FindString("device_path", &devicePath) == B_OK &&
+					message->FindString("ssid", &ssid) == B_OK) {
+					const char* password = NULL;
+					message->FindString("password", &password);
+
+					NMBackend* backend = NMBackend::Instance();
+					if (backend != NULL) {
+						backend->ConnectToWiFiAsync(devicePath, ssid, password,
+							NULL, true, BMessenger(this),
+							kMsgConnectWiFiResult);
+					}
+				}
+			}
+			break;
+
+		case kMsgConnectVPN:
+			{
+				const char* connectionPath;
+				if (message->FindString("connection_path", &connectionPath)
+						== B_OK) {
+					NMBackend* backend = NMBackend::Instance();
+					if (backend != NULL)
+						backend->ConnectVPN(connectionPath);
+				}
+			}
+			break;
+
+		case kMsgDisconnectVPN:
+			{
+				const char* connectionPath;
+				if (message->FindString("connection_path", &connectionPath)
+						== B_OK) {
+					NMBackend* backend = NMBackend::Instance();
+					if (backend != NULL)
+						backend->DisconnectVPN(connectionPath);
+				}
+			}
+			break;
+
+		case kMsgConnectWiFiResult:
+			{
+				int32 status = B_ERROR;
+				message->FindInt32("status", &status);
+				if (status != B_OK) {
+					BString reason;
+					message->FindString("reason", &reason);
+					BString text(B_TRANSLATE("Could not join the Wi-Fi "
+						"network."));
+					if (!reason.IsEmpty()) {
+						text << "\n" << reason;
+					}
+					_ShowOperationFailedAlert(text.String());
+				}
+			}
+			break;
+
+		case NMBackend::NOTIFICATION_CONNECTION_STATUS_CHANGED:
+			{
+				BString reason;
+				if (message->FindString("reason", &reason) == B_OK
+						&& !reason.IsEmpty()) {
+					BString text(B_TRANSLATE("Network operation failed."));
+					text << "\n" << reason;
+					_ShowOperationFailedAlert(text.String());
+				}
+			}
+			_RequestStatusUpdate();
+			break;
+
+		case NMBackend::NOTIFICATION_DEVICE_ADDED:
+		case NMBackend::NOTIFICATION_DEVICE_REMOVED:
+		case NMBackend::NOTIFICATION_DEVICE_STATE_CHANGED:
+		case NMBackend::NOTIFICATION_WIFI_NETWORK_FOUND:
+		case NMBackend::NOTIFICATION_SIGNAL_STRENGTH_CHANGED:
+			_RequestStatusUpdate();
+			break;
+
+		case kMsgOpenNetworkPreferences:
+			be_roster->Launch("application/x-vnd.Haiku-Network");
+			break;
+
+		case kMsgToggleNetworking:
+			{
+				NMBackend* backend = NMBackend::Instance();
+				if (backend != NULL)
+					backend->SetNetworkingEnabled(!backend->IsNetworkingEnabled());
+			}
+			break;
+
+		case kMsgToggleWireless:
+			{
+				NMBackend* backend = NMBackend::Instance();
+				if (backend != NULL)
+					backend->SetWirelessEnabled(!backend->IsWirelessEnabled());
+			}
+			break;
+
+		case kMsgConnectionInfo:
+			_ConnectionInfoRequested();
+			break;
+
+		case kMsgSecretResult:
+			_HandleSecretResult(message);
+			break;
+
+		case kMsgAgentRequest:
+		{
+			int32 kind;
+			if (message->FindInt32("kind", &kind) == B_OK)
+				_OpenSecretDialog((secret_dialog_kind)kind, *message);
+			break;
 		}
+
+		case kMsgAgentCancel:
+			if (fSecretDialogTarget.IsValid())
+				fSecretDialogTarget.SendMessage(B_QUIT_REQUESTED);
+			break;
+
+		case kMsgAgentRegistered:
+			break;
+
+#ifdef VITRUVIAN_DIALOG_SHELL_DEBUG
+		case kMsgDebugOpenSecretDialog:
+		{
+			int32 kind;
+			if (message->FindInt32("kind", &kind) == B_OK) {
+				bool requestNew = false;
+				message->FindBool("request_new", &requestNew);
+
+				BMessage request;
+				request.AddString("ssid", "Sample Network");
+				request.AddString("method", "PEAP");
+				request.AddString("missing_file", "/boot/home/config/settings/"
+					"ssl/client.pem");
+				request.AddBool("request_new", requestNew);
+				_OpenSecretDialog((secret_dialog_kind)kind, request);
+			}
+			break;
+		}
+#endif
 
 		case B_ABOUT_REQUESTED:
 			_AboutRequested();
@@ -285,6 +366,7 @@ NetworkStatusView::MessageReceived(BMessage* message)
 			_Quit();
 			break;
 
+
 		default:
 			BView::MessageReceived(message);
 			break;
@@ -293,306 +375,683 @@ NetworkStatusView::MessageReceived(BMessage* message)
 
 
 void
-NetworkStatusView::FrameResized(float width, float height)
+NetworkStatusView::Draw(BRect updateRect)
 {
-	_UpdateBitmaps();
+	BRect bounds = Bounds();
+
+	// RadioView tints arcs from LowColor and tint_color keeps alpha; ours is
+	// B_TRANSPARENT_COLOR, so arcs would paint fully transparent over the tray.
+	rgb_color lowColor = ViewColor();
+	if (lowColor.alpha == 0) {
+		BView* parent = Parent();
+		lowColor = parent != NULL
+			? parent->ViewColor()
+			: ui_color(B_PANEL_BACKGROUND_COLOR);
+	}
+	SetLowColor(lowColor);
+
+	drawing_mode oldMode = DrawingMode();
+	SetDrawingMode(B_OP_ALPHA);
+
+	_DrawNetworkIcon(bounds);
+
+	SetDrawingMode(oldMode);
+}
+
+
+BBitmap*
+NetworkStatusView::_GetIcon(int32 iconID)
+{
+	int32 index = iconID - kNetworkStatusNoDevice;
+	if (index < 0 || (size_t)index >= sizeof(fIcons) / sizeof(fIcons[0]))
+		return NULL;
+
+	if (fIcons[index] != NULL)
+		return fIcons[index];
+
+	BResources resources;
+	if (resources.SetToImage((void*)&instantiate_deskbar_item) != B_OK)
+		return NULL;
+
+	size_t size = 0;
+	const void* data = resources.LoadResource(B_VECTOR_ICON_TYPE, iconID,
+		&size);
+	if (data == NULL)
+		return NULL;
+
+	BBitmap* icon = new(std::nothrow) BBitmap(BRect(0, 0, kIconWidth - 1,
+		kIconHeight - 1), B_RGBA32);
+	if (icon == NULL || icon->InitCheck() != B_OK
+		|| BIconUtils::GetVectorIcon((const uint8*)data, size, icon) != B_OK) {
+		delete icon;
+		return NULL;
+	}
+
+	fIcons[index] = icon;
+	return icon;
+}
+
+
+void
+NetworkStatusView::_DrawNetworkIcon(BRect bounds)
+{
+	if (fConnected && fDeviceType == "wifi" && fSignalStrength >= 0) {
+		RadioView::Draw(this, bounds, fSignalStrength,
+			RadioView::DefaultMax());
+		_DrawVPNLock(bounds);
+		return;
+	}
+
+	int32 iconID;
+	if (!fHasDevice)
+		iconID = kNetworkStatusNoDevice;
+	else if (fConnected)
+		iconID = kNetworkStatusReady;
+	else
+		iconID = kNetworkStatusNoConnection;
+
+	BBitmap* icon = _GetIcon(iconID);
+	if (icon != NULL)
+		DrawBitmap(icon, bounds);
+	_DrawVPNLock(bounds);
+}
+
+
+// Drawn, since NetworkStatusIcons.rdef has no lock art yet.
+void
+NetworkStatusView::_DrawVPNLock(BRect bounds)
+{
+	if (!fVPNActive)
+		return;
+
+	const float lockSize = 7.0f;
+	BPoint origin(bounds.right - lockSize - 1.0f,
+		bounds.bottom - lockSize - 1.0f);
+
+	rgb_color fill = ui_color(B_PANEL_BACKGROUND_COLOR);
+	rgb_color outline = ui_color(B_LIST_ITEM_TEXT_COLOR);
+
+	// Shackle first so the body covers its lower ends.
+	SetHighColor(outline);
+	StrokeEllipse(BRect(origin.x + 1.5f, origin.y,
+		origin.x + lockSize - 1.5f, origin.y + lockSize * 0.55f));
+
+	BRect body(origin.x, origin.y + lockSize * 0.4f,
+		origin.x + lockSize, origin.y + lockSize);
+	SetHighColor(fill);
+	FillRect(body);
+	SetHighColor(outline);
+	StrokeRect(body);
+
+	FillRect(BRect(origin.x + lockSize * 0.42f, origin.y + lockSize * 0.55f,
+		origin.x + lockSize * 0.58f, origin.y + lockSize * 0.8f));
+}
+
+
+void
+NetworkStatusView::_RequestStatusUpdate()
+{
+	NMBackend* backend = NMBackend::Instance();
+	if (backend != NULL)
+		backend->GetDevicesAsync(BMessenger(this), kMsgStatusReady);
+}
+
+
+void
+NetworkStatusView::_ApplyStatusUpdate(BMessage* devices)
+{
+	fDevices = *devices;
+
+	int32 deviceCount = 0;
+	if (devices->FindInt32(kNMFieldDeviceCount, &deviceCount) != B_OK)
+		deviceCount = 0;
+
+	fHasDevice = deviceCount > 0;
+
+	for (int32 i = 0; i < deviceCount; i++) {
+		char deviceName[32];
+		snprintf(deviceName, sizeof(deviceName), "device_%" B_PRId32, i);
+
+		BMessage deviceInfo;
+		if (devices->FindMessage(deviceName, &deviceInfo) != B_OK)
+			continue;
+
+		const char* devicePath;
+		if (deviceInfo.FindString(kNMFieldPath, &devicePath) != B_OK)
+			continue;
+
+		uint32 deviceState;
+		if (deviceInfo.FindUInt32(kNMFieldState, &deviceState) != B_OK)
+			continue;
+
+		if (deviceState == kNMDeviceStateActivated) {
+			fConnected = true;
+			fDevicePath = devicePath;
+
+			const char* deviceType;
+			if (deviceInfo.FindString(kNMFieldType, &deviceType) == B_OK)
+				fDeviceType = deviceType;
+			else
+				fDeviceType = "";
+
+			fSignalStrength = -1;
+			if (fDeviceType == "wifi") {
+				uint32 signalStrength = 0;
+				// Missing field means unknown; -1 keeps the Ready bitmap
+				// instead of taking the arc path with a bogus level.
+				if (deviceInfo.FindUInt32(kNMFieldDeviceSignalStrength,
+						&signalStrength) == B_OK)
+					fSignalStrength = (int)signalStrength;
+			}
+
+			fVPNActive = _HasActiveVPN();
+			Invalidate();
+			return;
+		}
+	}
+
+	fConnected = false;
+	fDevicePath = "";
+	fDeviceType = "";
+	fSignalStrength = -1;
+	fVPNActive = _HasActiveVPN();
 	Invalidate();
 }
 
 
-void
-NetworkStatusView::Draw(BRect updateRect)
+bool
+NetworkStatusView::_HasActiveVPN()
 {
-	int32 status = kStatusUnknown;
-	for (std::map<BString, int32>::const_iterator it
-		= fInterfaceStatuses.begin(); it != fInterfaceStatuses.end(); ++it) {
-		if (it->second > status)
-			status = it->second;
+	NMBackend* backend = NMBackend::Instance();
+	if (backend == NULL)
+		return false;
+
+	BMessage vpns;
+	if (backend->GetVPNConnections(&vpns) != B_OK)
+		return false;
+
+	int32 count = 0;
+	vpns.FindInt32(kNMFieldVPNCount, &count);
+	for (int32 i = 0; i < count; i++) {
+		char vpnName[32];
+		snprintf(vpnName, sizeof(vpnName), "vpn_%" B_PRId32, i);
+		BMessage vpnInfo;
+		if (vpns.FindMessage(vpnName, &vpnInfo) != B_OK)
+			continue;
+		bool connected = false;
+		vpnInfo.FindBool(kNMFieldVPNConnected, &connected);
+		if (connected)
+			return true;
 	}
-
-	if (fTrayIcons[status] == NULL)
-		return;
-
-	SetDrawingMode(B_OP_ALPHA);
-	DrawBitmap(fTrayIcons[status]);
-	SetDrawingMode(B_OP_COPY);
+	return false;
 }
 
 
 void
-NetworkStatusView::_ShowConfiguration(BMessage* message)
+NetworkStatusView::_ScanWiFiNetworks(const char* devicePath)
 {
-	const char* name;
-	if (message->FindString("interface", &name) != B_OK)
+	NMBackend* backend = NMBackend::Instance();
+	if (backend == NULL)
 		return;
-
-	BNetworkInterface networkInterface(name);
-	if (!networkInterface.Exists())
+	
+	BMessage networks;
+	if (backend->ScanWiFiNetworks(devicePath, &networks) != B_OK)
 		return;
+	
+	// TODO: Show WiFi networks in popup menu
+}
 
-	BString text(B_TRANSLATE("%ifaceName information:\n"));
-	text.ReplaceFirst("%ifaceName", name);
 
-	size_t boldLength = text.Length();
+void
+NetworkStatusView::MouseDown(BPoint where)
+{
+	// Upstream NetworkStatusView (haiku-latest) builds exactly one menu per
+	// click regardless of button, appending Quit only when hosted in the
+	// tray -- it does not branch into two independently-constructed popups
+	// the way this file previously did. That branch is not just a style
+	// difference: with two different BPopUpMenu instances possible from the
+	// same MouseDown, Deskbar's own TExpandoMenuBar was observed tracking
+	// concurrently with ours (two menu-tracking threads snoozing at once,
+	// fighting for the mouse grab -- the desktop looked frozen with nothing
+	// actually deadlocked). Matching upstream's single-menu shape removes
+	// the divergence.
+	_ShowMenu(where);
+}
 
-	int32 numAddrs = networkInterface.CountAddresses();
-	for (int32 i = 0; i < numAddrs; i++) {
-		BNetworkInterfaceAddress address;
-		networkInterface.GetAddressAt(i, address);
-		switch (address.Address().Family()) {
-			case AF_INET:
-				text << "\n" << B_TRANSLATE("IPv4 address:") << " "
-					<< address.Address().ToString()
-					<< "\n" << B_TRANSLATE("Broadcast:") << " "
-					<< address.Broadcast().ToString()
-					<< "\n" << B_TRANSLATE("Netmask:") << " "
-					<< address.Mask().ToString()
-					<< "\n";
-				break;
-			case AF_INET6:
-				text << "\n" << B_TRANSLATE("IPv6 address:") << " "
-					<< address.Address().ToString()
-					<< "/" << address.Mask().PrefixLength()
-					<< "\n";
-				break;
-			default:
-				break;
-		}
-	}
 
-	BAlert* alert = new BAlert(name, text.String(), B_TRANSLATE("OK"));
-	alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
-	BTextView* view = alert->TextView();
-	BFont font;
-
-	view->SetStylable(true);
-	view->GetFont(&font);
-	font.SetFace(B_BOLD_FACE);
-	view->SetFontAndColor(0, boldLength, &font);
-
+void
+NetworkStatusView::_ShowOperationFailedAlert(const char* message)
+{
+	// Heap-allocated, async Go(): a synchronous BAlert::Go() blocks the
+	// calling thread until dismissed, which in the tray is Deskbar's window
+	// thread. An operation failing must never blank the device list or the
+	// menu that triggered it -- this is a transient notice only.
+	BAlert* alert = new BAlert(B_TRANSLATE("Not supported"), message,
+		B_TRANSLATE("OK"));
 	alert->Go(NULL);
 }
 
 
 void
-NetworkStatusView::MouseDown(BPoint point)
+NetworkStatusView::_ShowMenu(BPoint where)
 {
 	BPopUpMenu* menu = new BPopUpMenu(B_EMPTY_STRING, false, false);
 	menu->SetAsyncAutoDestruct(true);
 	menu->SetFont(be_plain_font);
-	BString wifiInterface;
-	BNetworkDevice device;
 
-	if (!fInterfaceStatuses.empty()) {
-		for (std::map<BString, int32>::const_iterator it
-				= fInterfaceStatuses.begin(); it != fInterfaceStatuses.end();
-				++it) {
-			const BString& name = it->first;
-
-			// we only show network of the first wireless device we find
-			if (wifiInterface.IsEmpty()) {
-				device.SetTo(name);
-				if (device.IsWireless())
-					wifiInterface = name;
-			}
-		}
-	}
-
-	// Add wireless networks, if any, first so that we can sort the menu
-
-	if (!wifiInterface.IsEmpty()) {
-		std::set<BNetworkAddress> associated;
-		BNetworkAddress address;
-		uint32 cookie = 0;
-		while (device.GetNextAssociatedNetwork(cookie, address) == B_OK)
-			associated.insert(address);
-
-		uint32 networksCount = 0;
-		wireless_network* networks = NULL;
-		device.GetNetworks(networks, networksCount);
-		for (uint32 i = 0; i < networksCount; i++) {
-			const wireless_network& network = networks[i];
-			BMessage* message = new BMessage(kMsgJoinNetwork);
-			message->AddString("device", wifiInterface);
-			message->AddString("name", network.name);
-			message->AddFlat("address", &network.address);
-
-			BMenuItem* item = new WirelessNetworkMenuItem(network, message);
-			menu->AddItem(item);
-			if (associated.find(network.address) != associated.end())
-				item->SetMarked(true);
-		}
-		delete[] networks;
-
-		if (networksCount == 0) {
-			BMenuItem* item = new BMenuItem(
-				B_TRANSLATE("<no wireless networks found>"), NULL);
-			item->SetEnabled(false);
-			menu->AddItem(item);
-		} else
-			menu->SortItems(WirelessNetworkMenuItem::CompareSignalStrength);
-
+	// Built from the snapshot last delivered by GetDevicesAsync(), not a
+	// fresh synchronous query -- this runs on the host window thread, which
+	// in the tray is Deskbar's, and must never block on the backend.
+	bool nmAvailable = true;
+	fDevices.FindBool(kNMFieldNMAvailable, &nmAvailable);
+	if (!nmAvailable) {
+		BMenuItem* unavailable = new BMenuItem(
+			B_TRANSLATE("NetworkManager is not running"), NULL);
+		unavailable->SetEnabled(false);
+		menu->AddItem(unavailable);
 		menu->AddSeparatorItem();
 	}
 
-	// add action menu items
+	int32 deviceCount = 0;
+	if (nmAvailable && fDevices.FindInt32(kNMFieldDeviceCount, &deviceCount) == B_OK) {
+		for (int32 i = 0; i < deviceCount; i++) {
+			char deviceName[32];
+			snprintf(deviceName, sizeof(deviceName), "device_%" B_PRId32, i);
 
-	menu->AddItem(new BMenuItem(B_TRANSLATE(
-		"Open network preferences" B_UTF8_ELLIPSIS),
+			BMessage deviceInfo;
+			if (fDevices.FindMessage(deviceName, &deviceInfo) != B_OK)
+				continue;
+
+			const char* devicePath;
+			const char* interfaceName;
+			uint32 deviceState;
+
+			if (deviceInfo.FindString(kNMFieldPath, &devicePath) != B_OK ||
+				deviceInfo.FindString(kNMFieldInterface, &interfaceName) != B_OK ||
+				deviceInfo.FindUInt32(kNMFieldState, &deviceState) != B_OK)
+				continue;
+
+			// A status line per device -- plain text, not a target.
+			BString statusLine = interfaceName;
+			statusLine << ": ";
+			statusLine << (deviceState == kNMDeviceStateActivated
+				? "Connected" : "Not connected");
+			BMenuItem* statusItem = new BMenuItem(statusLine.String(), NULL);
+			statusItem->SetEnabled(false);
+			menu->AddItem(statusItem);
+
+			const char* deviceType;
+			if (deviceInfo.FindString(kNMFieldType, &deviceType) != B_OK)
+				deviceType = "unknown";
+
+			if (strcmp(deviceType, "wifi") == 0) {
+				_BuildWiFiSection(menu, devicePath);
+			} else if (deviceState != kNMDeviceStateActivated) {
+				BMessage* msg = new BMessage(kMsgConnectDevice);
+				msg->AddString("device_path", devicePath);
+				menu->AddItem(new BMenuItem("Connect", msg));
+			} else {
+				BMessage* msg = new BMessage(kMsgDisconnectDevice);
+				msg->AddString("device_path", devicePath);
+				menu->AddItem(new BMenuItem("Disconnect", msg));
+			}
+
+			menu->AddSeparatorItem();
+		}
+	}
+
+	_BuildVPNSection(menu);
+
+	NMBackend* backend = NMBackend::Instance();
+
+	BMenuItem* networkingItem = new BMenuItem("Enable Networking",
+		new BMessage(kMsgToggleNetworking));
+	networkingItem->SetMarked(backend != NULL
+		&& backend->IsNetworkingEnabled());
+	menu->AddItem(networkingItem);
+
+	BMenuItem* wirelessItem = new BMenuItem("Enable Wi-Fi",
+		new BMessage(kMsgToggleWireless));
+	wirelessItem->SetMarked(backend != NULL && backend->IsWirelessEnabled());
+	menu->AddItem(wirelessItem);
+
+	menu->AddSeparatorItem();
+	BMenuItem* infoItem = new BMenuItem(
+		"Connection Information" B_UTF8_ELLIPSIS,
+		new BMessage(kMsgConnectionInfo));
+	infoItem->SetEnabled(fHasDevice && fConnected);
+	menu->AddItem(infoItem);
+
+	menu->AddItem(new BMenuItem("Open Network Preferences" B_UTF8_ELLIPSIS,
 		new BMessage(kMsgOpenNetworkPreferences)));
 
+#ifdef VITRUVIAN_DIALOG_SHELL_DEBUG
+	menu->AddSeparatorItem();
+	_BuildDebugDialogMenu(menu);
+#endif
+
+	menu->AddSeparatorItem();
+	menu->AddItem(new BMenuItem("About NetworkStatus" B_UTF8_ELLIPSIS,
+		new BMessage(B_ABOUT_REQUESTED)));
+
 	if (fInDeskbar) {
-		menu->AddItem(new BMenuItem(B_TRANSLATE("Quit"),
-			new BMessage(B_QUIT_REQUESTED)));
+		menu->AddItem(new BMenuItem("Quit", new BMessage(B_QUIT_REQUESTED)));
 	}
 
-	// Add wired interfaces to top of menu
-	if (!fInterfaceStatuses.empty()) {
-		int32 wiredCount = 0;
-		for (std::map<BString, int32>::const_iterator it
-				= fInterfaceStatuses.begin(); it != fInterfaceStatuses.end();
-				++it) {
-			const BString& name = it->first;
-
-			BString label = name;
-			label += ": ";
-			label += kStatusDescriptions[
-				_DetermineInterfaceStatus(name.String())];
-
-			BMessage* info = new BMessage(kMsgShowConfiguration);
-			info->AddString("interface", name.String());
-			menu->AddItem(new BMenuItem(label.String(), info), wiredCount);
-			wiredCount++;
-		}
-
-		// add separator item between wired and wireless networks
-		// (or between wired networks and actions if no wireless found)
-		if (wiredCount > 0)
-			menu->AddItem(new BSeparatorItem(), wiredCount);
-	}
-
+	// Without this the items invoke against the window -- which in the tray is
+	// Deskbar, so the messages would never reach MessageReceived() below.
 	menu->SetTargetForItems(this);
 
-	ConvertToScreen(&point);
-	menu->Go(point, true, true, true);
+	ConvertToScreen(&where);
+	// Async + heap + auto-destruct, as upstream does. A synchronous Go()
+	// blocks the calling thread until the menu closes -- in the tray that is
+	// Deskbar's window thread, so the whole desktop freezes while it is up.
+	menu->Go(where, true, true, true);
 }
+
+
+void
+NetworkStatusView::_BuildWiFiSection(BMenu* menu, const char* devicePath)
+{
+	NMBackend* backend = NMBackend::Instance();
+	BMessage networks;
+	int32 count = 0;
+	if (backend != NULL)
+		backend->ScanWiFiNetworks(devicePath, &networks);
+	networks.FindInt32(kNMFieldAPCount, &count);
+
+	if (count == 0) {
+		BMenuItem* empty = new BMenuItem(
+			B_TRANSLATE("No networks in range"), NULL);
+		empty->SetEnabled(false);
+		menu->AddItem(empty);
+		return;
+	}
+
+	// A dedicated submenu, not rows spliced into the parent: SortItems()
+	// below reorders whatever menu it is called on, and the parent already
+	// has the device status line and Connect/Disconnect items ahead of this
+	// section that must not move.
+	BMenu* wifiMenu = new BMenu(B_TRANSLATE("Wi-Fi networks"));
+	wifiMenu->SetFont(be_plain_font);
+
+	for (int32 i = 0; i < count; i++) {
+		char apName[32];
+		snprintf(apName, sizeof(apName), "ap_%" B_PRId32, i);
+		BMessage apInfo;
+		if (networks.FindMessage(apName, &apInfo) != B_OK)
+			continue;
+
+		const char* ssid;
+		int32 strength = 0;
+		bool secured = false;
+		bool connected = false;
+		if (apInfo.FindString(kNMFieldAPSSID, &ssid) != B_OK)
+			continue;
+		apInfo.FindInt32(kNMFieldAPStrength, &strength);
+		apInfo.FindBool(kNMFieldAPSecured, &secured);
+		apInfo.FindBool(kNMFieldAPConnected, &connected);
+
+		BMessage* msg = new BMessage(kMsgConnectWiFi);
+		msg->AddString("device_path", devicePath);
+		msg->AddString("ssid", ssid);
+
+		WirelessNetworkMenuItem* item = new WirelessNetworkMenuItem(ssid,
+			strength, secured ? B_TRANSLATE("Secured") : "", connected, msg);
+		wifiMenu->AddItem(item);
+	}
+
+	wifiMenu->SortItems(WirelessNetworkMenuItem::CompareSignalStrength);
+	// SetTargetForItems() on the parent below does not recurse into
+	// submenus -- without this, the WirelessNetworkMenuItems invoke against
+	// their window (Deskbar in the tray), the exact "unrooted items" bug
+	// already hit once with About/Quit.
+	wifiMenu->SetTargetForItems(this);
+	menu->AddItem(wifiMenu);
+}
+
+
+void
+NetworkStatusView::_BuildVPNSection(BMenu* menu)
+{
+	NMBackend* backend = NMBackend::Instance();
+	BMessage vpns;
+	int32 count = 0;
+	if (backend != NULL)
+		backend->GetVPNConnections(&vpns);
+	vpns.FindInt32(kNMFieldVPNCount, &count);
+
+	if (count == 0) {
+		BMenuItem* empty = new BMenuItem(
+			B_TRANSLATE("No VPN connections configured"), NULL);
+		empty->SetEnabled(false);
+		menu->AddItem(empty);
+		menu->AddSeparatorItem();
+		return;
+	}
+
+	for (int32 i = 0; i < count; i++) {
+		char vpnName[32];
+		snprintf(vpnName, sizeof(vpnName), "vpn_%" B_PRId32, i);
+		BMessage vpnInfo;
+		if (vpns.FindMessage(vpnName, &vpnInfo) != B_OK)
+			continue;
+
+		const char* name;
+		const char* path;
+		bool connected = false;
+		if (vpnInfo.FindString(kNMFieldVPNName, &name) != B_OK
+				|| vpnInfo.FindString(kNMFieldVPNPath, &path) != B_OK)
+			continue;
+		vpnInfo.FindBool(kNMFieldVPNConnected, &connected);
+
+		BMessage* msg = new BMessage(connected
+			? kMsgDisconnectVPN : kMsgConnectVPN);
+		msg->AddString("connection_path", path);
+
+		BString label = name;
+		label << (connected ? B_TRANSLATE(" (connected)") : "");
+		BMenuItem* item = new BMenuItem(label.String(), msg);
+		item->SetMarked(connected);
+		menu->AddItem(item);
+	}
+
+	menu->AddSeparatorItem();
+}
+
+
+void
+NetworkStatusView::_ConnectionInfoRequested()
+{
+	if (!fHasDevice || fDevicePath.Length() == 0)
+		return;
+
+	NMBackend* backend = NMBackend::Instance();
+	if (backend == NULL)
+		return;
+
+	// Heap-allocated: BWindow runs on its own thread and deletes itself.
+	// Opens immediately with a Loading placeholder; GetDeviceInfoAsync()'s
+	// reply populates it later. Never call the synchronous GetDeviceInfo()
+	// from here -- this runs on Deskbar's window thread.
+	ConnectionInfoWindow* window
+		= new ConnectionInfoWindow(fDevicePath.String());
+	window->Show();
+
+	backend->GetDeviceInfoAsync(fDevicePath.String(), BMessenger(window),
+		ConnectionInfoWindow::kMsgDeviceInfoReply);
+}
+
+
+void
+NetworkStatusView::_OpenSecretDialog(secret_dialog_kind kind,
+	const BMessage& request)
+{
+	// One live secret dialog at a time: cancel whatever is open first.
+	// The old window's own QuitRequested() sends its cancel result before it
+	// closes -- a normal cancel from the entry point's perspective.
+	if (fSecretDialogTarget.IsValid())
+		fSecretDialogTarget.SendMessage(B_QUIT_REQUESTED);
+
+	SecretDialogWindow* window = new SecretDialogWindow(kind, request,
+		BMessenger(this), kMsgSecretResult);
+	fSecretDialogTarget = BMessenger(window);
+	window->Show();
+}
+
+
+void
+NetworkStatusView::_HandleSecretResult(BMessage* message)
+{
+	// The single entry point the real SecretAgent.GetSecrets reply wires
+	// into.
+	fSecretDialogTarget = BMessenger();
+
+	uint32 requestId = 0;
+	if (message->FindUInt32("request_id", &requestId) == B_OK
+			&& requestId != 0) {
+		bool connect = false;
+		bool remember = false;
+		BString password, identity;
+		message->FindBool("connect", &connect);
+		message->FindBool("remember", &remember);
+		message->FindString("password", &password);
+		message->FindString("identity", &identity);
+
+		// VPN dialogs answer with secret_key/secret_value pairs.
+		BMessage secrets;
+		BString key;
+		BString value;
+		for (int32 i = 0;
+				message->FindString("secret_key", i, &key) == B_OK; i++) {
+			if (message->FindString("secret_value", i, &value) == B_OK) {
+				secrets.AddString("secret_key", key);
+				secrets.AddString("secret_value", value);
+			}
+		}
+
+		NMBackend* backend = NMBackend::Instance();
+		if (backend != NULL) {
+			backend->CompleteSecretRequest(requestId, connect, password,
+				identity, remember, secrets.IsEmpty() ? NULL : &secrets);
+		}
+	}
+
+#ifdef VITRUVIAN_DIALOG_SHELL_DEBUG
+	int32 kind = -1;
+	bool connect = false;
+	bool remember = false;
+	BString password, identity;
+	message->FindInt32("kind", &kind);
+	message->FindBool("connect", &connect);
+	message->FindBool("remember", &remember);
+	message->FindString("password", &password);
+	message->FindString("identity", &identity);
+	fprintf(stderr, "NetworkStatus: secret dialog kind=%d connect=%d "
+		"remember=%d identity=\"%s\"\n", (int)kind, connect, remember,
+		identity.String());
+#endif
+}
+
+
+#ifdef VITRUVIAN_DIALOG_SHELL_DEBUG
+void
+NetworkStatusView::_BuildDebugDialogMenu(BMenu* parent)
+{
+	// Test trigger only: opens each secret dialog with sample content so all
+	// five can be reviewed side-by-side against GNOME/XFCE/Haiku. Guarded by
+	// a CMake option that defaults off, not a runtime switch, so it cannot
+	// ship enabled by accident.
+	static const struct {
+		const char* label;
+		secret_dialog_kind kind;
+		bool requestNew;
+	} kItems[] = {
+		{ "WPA/WPA2/WPA3 PSK" B_UTF8_ELLIPSIS, kSecretWPAPSK, false },
+		{ "WPA/WPA2/WPA3 PSK (rejected key)" B_UTF8_ELLIPSIS, kSecretWPAPSK, true },
+		{ "WEP" B_UTF8_ELLIPSIS, kSecretWEP, false },
+		{ "WPA-Enterprise" B_UTF8_ELLIPSIS, kSecretEnterprise, false },
+		{ "Wired 802.1x" B_UTF8_ELLIPSIS, kSecretWired8021x, false },
+		{ "Missing certificate" B_UTF8_ELLIPSIS, kSecretMissingCertificate, false },
+	};
+
+	BMenu* menu = new BMenu("Test secret dialogs (debug)");
+	for (size_t i = 0; i < sizeof(kItems) / sizeof(kItems[0]); i++) {
+		BMessage* msg = new BMessage(kMsgDebugOpenSecretDialog);
+		msg->AddInt32("kind", (int32)kItems[i].kind);
+		msg->AddBool("request_new", kItems[i].requestNew);
+		menu->AddItem(new BMenuItem(kItems[i].label, msg));
+	}
+	menu->SetTargetForItems(this);
+	parent->AddItem(menu);
+}
+#endif
 
 
 void
 NetworkStatusView::_AboutRequested()
 {
+	// Heap-allocated on purpose: a BWindow runs on its own thread and deletes
+	// itself when it quits. A stack instance would be destroyed here, on the
+	// host looper's thread, without holding its lock.
 	BAboutWindow* window = new BAboutWindow(
 		B_TRANSLATE_SYSTEM_NAME("NetworkStatus"), kSignature);
 
-	const char* authors[] = {
-		"Axel Dörfler",
-		"Hugo Santos",
-		NULL
-	};
-
-	window->AddCopyright(2007, "Haiku, Inc.");
-	window->AddAuthors(authors);
+	window->AddCopyright(2026, "Dario Casalinuovo");
+	window->AddDescription(B_TRANSLATE("Network status indicator"));
 
 	window->Show();
 }
 
 
 int32
-NetworkStatusView::_DetermineInterfaceStatus(
-	const BNetworkInterface& interface)
+NetworkStatusView::_RemoveFromDeskbarThread(void*)
 {
-	uint32 flags = interface.Flags();
-
-	if ((flags & IFF_LINK) == 0)
-		return kStatusNoLink;
-	if ((flags & (IFF_UP | IFF_LINK | IFF_CONFIGURING)) == IFF_LINK)
-		return kStatusLinkNoConfig;
-	if ((flags & IFF_CONFIGURING) == IFF_CONFIGURING)
-		return kStatusConnecting;
-	if ((flags & (IFF_UP | IFF_LINK)) == (IFF_UP | IFF_LINK))
-		return kStatusReady;
-
-	return kStatusUnknown;
+	BDeskbar deskbar;
+	deskbar.RemoveItem(kDeskbarItemName);
+	return 0;
 }
 
 
 void
-NetworkStatusView::_Update(bool force)
+NetworkStatusView::_Quit()
 {
-	BNetworkRoster& roster = BNetworkRoster::Default();
-	BNetworkInterface interface;
-	uint32 cookie = 0;
-	std::set<BString> currentInterfaces;
-
-	while (roster.GetNextInterface(&cookie, interface) == B_OK) {
-		if ((interface.Flags() & IFF_LOOPBACK) == 0) {
-			currentInterfaces.insert((BString)interface.Name());
-			int32 oldStatus = kStatusUnknown;
-			if (fInterfaceStatuses.find(interface.Name())
-				!= fInterfaceStatuses.end()) {
-				oldStatus = fInterfaceStatuses[interface.Name()];
-			}
-			int32 status = _DetermineInterfaceStatus(interface);
-			if (oldStatus != status) {
-				BNotification notification(B_INFORMATION_NOTIFICATION);
-				notification.SetGroup(B_TRANSLATE("Network Status"));
-				notification.SetTitle(interface.Name());
-				notification.SetMessageID(interface.Name());
-				notification.SetIcon(fNotifyIcons[status]);
-				if (status == kStatusConnecting
-					|| (status == kStatusReady
-						&& oldStatus == kStatusConnecting)
-					|| (status == kStatusNoLink
-						&& oldStatus == kStatusReady)
-					|| (status == kStatusNoLink
-						&& oldStatus == kStatusConnecting)) {
-					// A significant state change, raise notification.
-					notification.SetContent(kStatusDescriptions[status]);
-					notification.Send();
-				}
-				Invalidate();
-			}
-			fInterfaceStatuses[interface.Name()] = status;
-		}
-	}
-
-	// Check every element in fInterfaceStatuses against our current interface
-	// list. If it's not there, then the interface is not present anymore and
-	// should be removed from fInterfaceStatuses.
-	std::map<BString, int32>::iterator it = fInterfaceStatuses.begin();
-	while (it != fInterfaceStatuses.end()) {
-		std::map<BString, int32>::iterator backupIt = it;
-		if (currentInterfaces.find(it->first) == currentInterfaces.end())
-			fInterfaceStatuses.erase(it);
-		it = ++backupIt;
-	}
+	// In the tray "Quit" means remove the replicant -- posting
+	// B_QUIT_REQUESTED on to our looper would ask Deskbar itself to quit.
+	if (fInDeskbar) {
+		// BDeskbar::RemoveItem's untimed SendMessage targets Deskbar's own
+		// team, which this replicant runs inside. Calling it inline here
+		// would block this window thread, mid-dispatch, on a port nobody is
+		// left to drain -- an actual deadlock reproduced on a real VM, not a
+		// theoretical one. Hand it to a detached thread instead so this
+		// handler returns immediately.
+		thread_id thread = spawn_thread(_RemoveFromDeskbarThread,
+			"remove_networkstatus_item", B_NORMAL_PRIORITY, NULL);
+		if (thread >= B_OK)
+			resume_thread(thread);
+	} else
+		be_app->PostMessage(B_QUIT_REQUESTED);
 }
 
 
-void
-NetworkStatusView::_OpenNetworksPreferences()
-{
-	status_t status = be_roster->Launch("application/x-vnd.Haiku-Network");
-	if (status != B_OK && status != B_ALREADY_RUNNING) {
-		BString errorMessage(B_TRANSLATE("Launching the network preflet "
-			"failed.\n\nError: "));
-		errorMessage << strerror(status);
-		BAlert* alert = new BAlert("launch error", errorMessage.String(),
-			B_TRANSLATE("OK"));
-		alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
-
-		// asynchronous alert in order to not block replicant host application
-		alert->Go(NULL);
-	}
-}
+// NetworkStatus replicant instantiation
 
 
-//	#pragma mark -
-
-
-extern "C" _EXPORT BView *
+extern "C" _EXPORT BView*
 instantiate_deskbar_item(float maxWidth, float maxHeight)
 {
+	// Square, driven by height: maxWidth is the whole tray width, and a
+	// replicant wider than one row makes TReplicantTray::LocationForReplicant()
+	// loop forever looking for a row it fits in.
 	return new NetworkStatusView(BRect(0, 0, maxHeight - 1, maxHeight - 1),
 		B_FOLLOW_LEFT | B_FOLLOW_TOP, true);
+}
+
+
+extern "C" _EXPORT status_t
+instantiate_deskbar_item_for_width(float* width, float* height)
+{
+	*width = kIconWidth;
+	*height = kIconHeight;
+	return B_OK;
 }

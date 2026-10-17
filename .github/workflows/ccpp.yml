@@ -1,6 +1,18 @@
 name: Build Vitruvian ISO
 
-on: [push]
+# master is built by factory-release.yml, which allocates a rev and
+# archives the result. Building it here too would run the same build
+# twice per push.
+on:
+  push:
+    branches-ignore: [master]
+
+# A newer push supersedes this run; there is no value in finishing a
+# build of code that is no longer the head. Keyed per ref so branches
+# do not cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   iso-build:
@@ -21,17 +33,25 @@ jobs:
             libgif-dev libicns-dev libicu-dev libinput-dev \
             libjpeg-dev libncurses-dev libopenexr-dev libpng-dev \
             libtiff-dev libudev-dev libwebp-dev libseat-dev \
-            libblkid-dev libudev-dev libdrm-dev \
+            libpam0g-dev libsystemd-dev libevdev-dev \
+            libblkid-dev libxkbcommon-dev \
+            libpipewire-0.3-dev libspa-0.2-dev \
+            libbluetooth-dev libnm-dev libglib2.0-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             linux-headers-$(uname -r) \
             mtools ninja-build squashfs-tools sudo xorriso zlib1g-dev \
-            fakeroot devscripts lintian wget
+            libapt-pkg-dev fakeroot devscripts lintian wget qemu-utils ovmf \
+            rsync parted zstd dosfstools attr
 
       - name: Configure git safe.directory
         run: git config --global --add safe.directory $GITHUB_WORKSPACE
 
+      - name: Init submodules
+        run: git submodule update --init --recursive
+
       - name: Build buildtools
         run: |
-          mkdir buildtools
+          mkdir -p buildtools
           cd buildtools
           cmake -DBUILDTOOLS_MODE=1 .. -GNinja
           ninja
@@ -39,57 +59,61 @@ jobs:
       - name: Create build directory
         run: mkdir -p generated.x86
 
-      - name: Init submodules
-        run: git submodule update --init --recursive
+      - name: Configure (also creates chroot)
+        run: cd generated.x86 && ../configure --arch=amd64 --build-type=Release --chroot-build --buildtools=../buildtools
 
-      - name: Setup environment
-        run: cd generated.x86 && export TERM=xterm-256color && ../build/scripts/setupenv.sh
+      - name: Build ISO + RAW images
+        run: cd generated.x86 && ../bake build --image-type=iso,raw
 
-      - name: Configure
-        run: cd generated.x86 && ../configure --build-type=Workflow --chroot-build
-
-      - name: Ninja build
-        run: cd generated.x86 && ninja
-
-      - name: Generate deb packages
-        run: cd generated.x86 && cpack
-
-      - name: Make mkiso script executable
-        run: chmod +x ./build/scripts/mkiso.sh
-
-      - name: Run mkiso script
-        run: cd generated.x86 && ../build/scripts/mkiso.sh
-
-      # Generate checksums for ISO
-      - name: Generate ISO checksum
+      - name: Compress RAW images
         run: |
-          cd generated.x86/image_tree
-          for iso in *.iso; do
-            sha256sum "$iso" > "$iso.sha256"
+          shopt -s nullglob
+          cd generated.x86/output
+          for f in *.raw; do
+            zstd -T0 --long=27 -19 --rm "$f"
           done
 
-      # Upload ISO and checksum
+      - name: Generate image checksums
+        run: |
+          shopt -s nullglob
+          cd generated.x86/output
+          for f in *.iso *.raw.zst; do
+            sha256sum "$f" > "$f.sha256"
+          done
+
       - name: Upload Vitruvian ISO
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: Vitruvian-ISO
           path: |
-            generated.x86/image_tree/*.iso
-            generated.x86/image_tree/*.sha256
+            generated.x86/output/*.iso
+            generated.x86/output/*.iso.sha256
+          if-no-files-found: error
 
-      # Generate checksums for DEB packages
+      - name: Upload Vitruvian RAW
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vitruvian-RAW
+          path: |
+            generated.x86/output/*.raw.zst
+            generated.x86/output/*.raw.zst.sha256
+          if-no-files-found: error
+
       - name: Generate DEB checksums
         run: |
+          shopt -s nullglob
           cd generated.x86
           for deb in *.deb; do
             sha256sum "$deb" > "$deb.sha256"
           done
 
-      # Upload DEB packages and checksums
       - name: Upload Vitruvian DEB packages
         uses: actions/upload-artifact@v4
         with:
           name: Vitruvian-DEB
           path: |
             generated.x86/*.deb
-            generated.x86/*.sha256
+            generated.x86/*.deb.sha256
+          if-no-files-found: error

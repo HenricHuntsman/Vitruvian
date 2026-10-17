@@ -512,6 +512,16 @@ BApplication::_InitData(const char* signature, bool initGUI, status_t* _error)
 #endif	// ifndef RUN_WITHOUT_REGISTRAR
 
 	if (fInitError == B_OK) {
+		const char* readyFdEnv = getenv("JANUS_READY_FD");
+		if (readyFdEnv != NULL && readyFdEnv[0] != '\0') {
+			int readyFd = atoi(readyFdEnv);
+			if (readyFd >= 0) {
+				write(readyFd, &fMsgPort, sizeof(port_id));
+				close(readyFd);
+				unsetenv("JANUS_READY_FD");
+			}
+		}
+
 		// TODO: Not completely sure about the order, but this should be close.
 
 		// init be_app and be_app_messenger
@@ -548,11 +558,7 @@ DBG(OUT("BApplication::InitData() done\n"));
 port_id
 BApplication::_GetPort(const char* signature)
 {
-	#ifndef __VOS__
 	return BLaunchRoster().GetPort(signature, NULL);
-	#endif
-	UNIMPLEMENTED();
-	return -1;
 }
 
 
@@ -1054,14 +1060,24 @@ BApplication::DispatchMessage(BMessage* message, BHandler* handler)
 				if (entry.IsDirectory())
 					BRoster().AddToRecentFolders(&ref);
 				else {
-					// filter out applications, we only want to have documents
-					// in the recent files list
-					BNode node(&entry);
-					BNodeInfo info(&node);
+					// Recent files: filter out apps (their BEOS:TYPE is
+					// the app's own signature, not B_APP_MIME_TYPE).
+					BFile file(&entry, B_READ_ONLY);
+					BAppFileInfo appInfo(&file);
+					char sig[B_MIME_TYPE_LENGTH];
+					bool isApp = appInfo.InitCheck() == B_OK
+						&& appInfo.GetSignature(sig) == B_OK;
 
-					char mimeType[B_MIME_TYPE_LENGTH];
-					if (info.GetType(mimeType) != B_OK
-						|| strcasecmp(mimeType, B_APP_MIME_TYPE))
+					if (!isApp) {
+						BNode node(&entry);
+						BNodeInfo info(&node);
+						char mimeType[B_MIME_TYPE_LENGTH];
+						if (info.GetType(mimeType) == B_OK
+							&& strcasecmp(mimeType, B_APP_MIME_TYPE) == 0)
+							isApp = true;
+					}
+
+					if (!isApp)
 						BRoster().AddToRecentDocuments(&ref);
 				}
 			}

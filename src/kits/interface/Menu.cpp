@@ -59,7 +59,7 @@ using BPrivate::gSystemCatalog;
 
 #undef B_TRANSLATE
 #define B_TRANSLATE(str) \
-	gSystemCatalog.GetString(B_TRANSLATE_MARK(str), "Menu")
+	gSystemCatalog->GetString(B_TRANSLATE_MARK(str), "Menu")
 
 
 using std::nothrow;
@@ -2677,20 +2677,20 @@ BMenu::_ComputeColumnLayout(int32 index, bool bestFit, bool moveItems,
 
 	// Compute the extra space needed for shortcuts and submenus
 	if (command) {
-		frame.right
-			+= BPrivate::MenuPrivate::MenuItemCommand()->Bounds().Width() + 1;
+		frame.right += BPrivate::MenuPrivate::KeyCapWidth(this,
+			BPrivate::MenuPrivate::MenuItemCommand()) + 1;
 	}
 	if (control) {
-		frame.right
-			+= BPrivate::MenuPrivate::MenuItemControl()->Bounds().Width() + 1;
+		frame.right += BPrivate::MenuPrivate::KeyCapWidth(this,
+			BPrivate::MenuPrivate::MenuItemControl()) + 1;
 	}
 	if (option) {
-		frame.right
-			+= BPrivate::MenuPrivate::MenuItemOption()->Bounds().Width() + 1;
+		frame.right += BPrivate::MenuPrivate::KeyCapWidth(this,
+			BPrivate::MenuPrivate::MenuItemOption()) + 1;
 	}
 	if (shift) {
-		frame.right
-			+= BPrivate::MenuPrivate::MenuItemShift()->Bounds().Width() + 1;
+		frame.right += BPrivate::MenuPrivate::KeyCapWidth(this,
+			BPrivate::MenuPrivate::MenuItemShift()) + 1;
 	}
 	if (submenu) {
 		frame.right += ItemAt(0)->Frame().Height() / 2;
@@ -2987,8 +2987,11 @@ void
 BMenu::_DeleteMenuWindow()
 {
 	if (fCachedMenuWindow != NULL) {
-		fCachedMenuWindow->Lock();
-		fCachedMenuWindow->Quit();
+		// Lock() can return false if the window was already destroyed (e.g.
+		// by an app-shutdown quit racing with _TrackTask). Skip Quit() in
+		// that case — the window is already gone.
+		if (fCachedMenuWindow->Lock())
+			fCachedMenuWindow->Quit();
 		fCachedMenuWindow = NULL;
 	}
 }

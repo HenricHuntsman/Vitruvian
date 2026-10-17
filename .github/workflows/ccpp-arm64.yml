@@ -1,0 +1,119 @@
+name: Build Vitruvian ISO (arm64)
+
+# master is built by factory-release.yml, which allocates a rev and
+# archives the result. Building it here too would run the same build
+# twice per push.
+on:
+  push:
+    branches-ignore: [master]
+
+# A newer push supersedes this run; there is no value in finishing a
+# build of code that is no longer the head. Keyed per ref so branches
+# do not cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  iso-build:
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bison build-essential cmake debootstrap debhelper \
+            dh-dkms dkms elfutils flex git \
+            grub-efi-arm64-bin \
+            libdrm-dev libelf-dev libfl-dev libfreetype6-dev \
+            libgif-dev libicns-dev libicu-dev libinput-dev \
+            libjpeg-dev libncurses-dev libopenexr-dev libpng-dev \
+            libtiff-dev libudev-dev libwebp-dev libseat-dev \
+            libpam0g-dev libsystemd-dev libevdev-dev \
+            libblkid-dev libxkbcommon-dev \
+            libpipewire-0.3-dev libspa-0.2-dev \
+            libbluetooth-dev libnm-dev libglib2.0-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            linux-headers-$(uname -r) \
+            mtools ninja-build squashfs-tools sudo xorriso zlib1g-dev \
+            libapt-pkg-dev fakeroot devscripts lintian wget qemu-utils qemu-efi-aarch64 \
+            rsync parted zstd dosfstools attr
+
+      - name: Configure git safe.directory
+        run: git config --global --add safe.directory $GITHUB_WORKSPACE
+
+      - name: Init submodules
+        run: git submodule update --init --recursive
+
+      - name: Build buildtools
+        run: |
+          mkdir -p buildtools
+          cd buildtools
+          cmake -DBUILDTOOLS_MODE=1 .. -GNinja
+          ninja
+
+      - name: Create build directory
+        run: mkdir -p generated.arm64
+
+      - name: Configure (also creates chroot)
+        run: cd generated.arm64 && ../configure --arch=arm64 --build-type=Release --chroot-build --buildtools=../buildtools
+
+      - name: Build ISO + RAW images
+        run: cd generated.arm64 && ../bake build --image-type=iso,raw
+
+      - name: Compress RAW images
+        run: |
+          shopt -s nullglob
+          cd generated.arm64/output
+          for f in *.raw; do
+            zstd -T0 --long=27 -19 --rm "$f"
+          done
+
+      - name: Generate image checksums
+        run: |
+          shopt -s nullglob
+          cd generated.arm64/output
+          for f in *.iso *.raw.zst; do
+            sha256sum "$f" > "$f.sha256"
+          done
+
+      - name: Upload Vitruvian ISO
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vitruvian-ISO-arm64
+          path: |
+            generated.arm64/output/*.iso
+            generated.arm64/output/*.iso.sha256
+          if-no-files-found: error
+
+      - name: Upload Vitruvian RAW
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vitruvian-RAW-arm64
+          path: |
+            generated.arm64/output/*.raw.zst
+            generated.arm64/output/*.raw.zst.sha256
+          if-no-files-found: error
+
+      - name: Generate DEB checksums
+        run: |
+          shopt -s nullglob
+          cd generated.arm64
+          for deb in *.deb; do
+            sha256sum "$deb" > "$deb.sha256"
+          done
+
+      - name: Upload Vitruvian DEB packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vitruvian-DEB-arm64
+          path: |
+            generated.arm64/*.deb
+            generated.arm64/*.deb.sha256
+          if-no-files-found: error

@@ -605,7 +605,7 @@ IconCache::GetVolumeIcon(AutoLock<SimpleIconCache>*nodeCacheLocker,
 	// try getting using the BVolume::GetIcon call; if miss,
 	// go for the default mime based icon
 	if (entry == NULL || !entry->HaveIconBitmap(NORMAL_ICON_ONLY, size)) {
-		BVolume volume(model->NodeRef()->dereference().dev());
+		BVolume volume(model->NodeRef()->device());
 
 		if (volume.IsShared()) {
 			// check if it's a network share and give it a special icon
@@ -1630,6 +1630,8 @@ SharedCacheEntry::operator==(const TypeAndSignature& typeAndSignature) const
 NodeCacheEntry::NodeCacheEntry(bool permanent)
 	:
 	fNext(NULL),
+	fHashDev(-1),
+	fHashNode(-1),
 	fPermanent(permanent)
 {
 }
@@ -1641,6 +1643,9 @@ NodeCacheEntry::NodeCacheEntry(const node_ref* node, bool permanent)
 	fRef(*node),
 	fPermanent(permanent)
 {
+	// Snapshot physical identity: hash table requires stable keys.
+	fHashDev = node->device();
+	fHashNode = node->node();
 }
 
 
@@ -1696,15 +1701,17 @@ NodeCacheEntry::Node() const
 size_t
 NodeCacheEntry::Hash() const
 {
-	return Hash(&fRef);
+	ino_t ino = fHashNode;
+	return (size_t)fHashDev ^ ((uint32*)&ino)[0]
+		^ ((uint32*)&ino)[1];
 }
 
 
 /* static */ size_t
 NodeCacheEntry::Hash(const node_ref* node)
 {
-	ino_t ino = node->ino();
-	return node->dev() ^ ((uint32*)&ino)[0]
+	ino_t ino = node->node();
+	return (size_t)node->device() ^ ((uint32*)&ino)[0]
 		^ ((uint32*)&ino)[1];
 }
 
@@ -1712,7 +1719,7 @@ NodeCacheEntry::Hash(const node_ref* node)
 bool
 NodeCacheEntry::operator==(const node_ref* node) const
 {
-	return fRef == *node;
+	return fHashDev == node->device() && fHashNode == node->node();
 }
 
 

@@ -12,13 +12,15 @@
 
 ---
 
+<img width="1284" height="804" alt="0 4 1-thumbnail" src="https://github.com/user-attachments/assets/3eb7a173-ef91-440a-9d0d-de194283fd89" />
+
 ### Overview
 
 Vitruvian is an operating system based on Linux, heavily inspired by BeOS, bringing the elegance and simplicity of a classic operating system to modern hardware. It leverages Linux's hardware support while maintaining the responsive, user-friendly nature of BeOS.
 
 Custom-built kernel modules and real-time patches deliver a low-latency desktop experience. Vitruvian supports the BeOS/Haiku API on Linux with minimal to no changes required to application source code.
 
-The reference boot filesystems are XFS and SquashFS, both with full extended attribute support. XFS is the reference for standard desktop installs; SquashFS is used for live images and embedded targets. Ext4 and most other Linux filesystems with extended attribute support are also supported. The default kernel ships with PREEMPT_RT real-time patches; non-RT kernels are also supported. Filesystem indexing and live queries are planned for a future release.
+The default boot filesystem is ext4, with SquashFS for live images. Both support Linux extended attributes, which Vitruvian uses to carry BFS-style metadata. Full support for XFS and Btrfs is in the roadmap, tied to the DriveSetup rewrite. The default kernel ships with PREEMPT_RT real-time patches; non-RT kernels are also supported. Filesystem indexing and live queries are planned for a future release.
 
 ### Nexus
 
@@ -37,7 +39,7 @@ https://www.freelists.org/list/vitruvian
 
 ### Installation
 
-V\OS testing images will be made available for download. The project is currently in an experimental stage — check back soon, or build from source in the meantime.
+See https://v-os.dev/download/ and https://wiki.v-os.dev/docs/getting-started/how-to-install/
 
 ### Getting Started
 
@@ -56,6 +58,6 @@ If you'd like to support the project, see the [Donate](https://wiki.v-os.dev/doc
 
 VitruvianOS is released under a hybrid [GPL](https://www.gnu.org/licenses/gpl-3.0.html) / [MIT](https://opensource.org/licenses/MIT) license scheme.
 
-## Folder organisation and recovery
+## Fork recovery
 
-See the [fork revival review](docs/revival/README.md) for preserved material, verified limits and the next milestone.
+[Review notes and qualification limits](docs/revival/README.md).

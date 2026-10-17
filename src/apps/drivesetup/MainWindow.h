@@ -44,6 +44,7 @@ public:
 	// BWindow interface
 	virtual	bool				QuitRequested();
 	virtual	void				MessageReceived(BMessage* message);
+	virtual	void				MenusBeginning();
 
 	// MainWindow
 			status_t			StoreSettings(BMessage* archive) const;
@@ -73,7 +74,8 @@ private:
 
 			void				_DisplayPartitionError(BString message,
 									const BPartition* partition = NULL,
-									status_t error = B_OK) const;
+									status_t error = B_OK,
+									const BMessage* result = NULL) const;
 
 			void				_Mount(BDiskDevice* disk,
 									partition_id selectedPartition);
@@ -90,6 +92,23 @@ private:
 									partition_id selectedPartition);
 			void				_ChangeParameters(BDiskDevice* disk,
 									partition_id selectedPartition);
+			void				_SetFlags(BDiskDevice* disk,
+									partition_id selectedPartition);
+			void				_ResizeMove(BDiskDevice* disk,
+									partition_id selectedPartition);
+			void				_CheckFilesystem(BDiskDevice* disk,
+									partition_id selectedPartition);
+			void				_Erase(BDiskDevice* disk,
+									partition_id selectedPartition);
+			void				_Wipe(BDiskDevice* disk,
+									partition_id selectedPartition);
+			void				_Rename(BDiskDevice* disk,
+									partition_id selectedPartition);
+			void				_RenameGpt(BDiskDevice* disk,
+									partition_id selectedPartition);
+			void				_ShowFeatures();
+			void				_CheckMoveRecovery();
+			void				_MoveRecoveryAction(const char* action);
 			float				_ColumnListViewHeight(BColumnListView* list,
 									BRow* currentRow);
 			void				_UpdateWindowZoomLimits();
@@ -110,6 +129,7 @@ private:
 			BMenu*				fPartitionMenu;
 			BMenu*				fFormatMenu;
 			BMenu*				fDiskImageMenu;
+			BMenu*				fToolsMenu;
 
 			BMenuBar* 			fMenuBar;
 
@@ -120,11 +140,19 @@ private:
 
 			BMenuItem*			fCreateMenuItem;
 			BMenuItem*			fChangeMenuItem;
+			BMenuItem*			fResizeMenuItem;
+			BMenuItem*			fFlagsMenuItem;
+			BMenuItem*			fCheckMenuItem;
+			BMenuItem*			fEraseMenuItem;
+			BMenuItem*			fRenameMenuItem;
+			BMenuItem*			fRenameGptMenuItem;
 			BMenuItem*			fDeleteMenuItem;
 			BMenuItem*			fMountMenuItem;
 			BMenuItem*			fUnmountMenuItem;
 			BMenuItem*			fMountAllMenuItem;
 			BMenuItem*			fOpenDiskProbeMenuItem;
+			BMenuItem*			fFeaturesMenuItem;
+			BMenuItem*			fMoveRecoveryMenuItem;
 
 			BMenu*				fFormatContextMenuItem;
 			BMenuItem*			fCreateContextMenuItem;

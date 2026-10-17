@@ -1,600 +1,610 @@
 /*
- * Copyright 2020-2023, Panagiotis "Ivory" Vasilopoulos <git@n0toose.net>
- * Copyright 2009-2010, Stephan Aßmus <superstippi@gmx.de>
- * Copyright 2005-2008, Jérôme DUVAL
+ * Copyright 2009-2011, Stephan Aßmus <superstippi@gmx.de>
+ * Copyright 2005, Jérôme DUVAL
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * All rights reserved. Distributed under the terms of the MIT License.
  */
 
-
 #include "InstallerWindow.h"
 
+#include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <strings.h>
+#include <sys/random.h>
+#include <sys/statvfs.h>
+#include <unistd.h>
 
 #include <Alert.h>
 #include <Application.h>
-#include <Autolock.h>
 #include <Box.h>
 #include <Button.h>
 #include <Catalog.h>
-#include <ColorConversion.h>
-#include <ControlLook.h>
-#include <Directory.h>
+#include <CheckBox.h>
+#include <DiskDevice.h>
+#include <DiskDeviceRoster.h>
+#include <DiskDeviceVisitor.h>
+#include <Entry.h>
+#include <File.h>
 #include <FindDirectory.h>
+#include <InterfaceDefs.h>
 #include <LayoutBuilder.h>
-#include <LayoutUtils.h>
 #include <Locale.h>
+#include <Menu.h>
 #include <MenuBar.h>
 #include <MenuField.h>
+#include <MenuItem.h>
+#include <Partition.h>
 #include <Path.h>
 #include <PopUpMenu.h>
 #include <Roster.h>
 #include <Screen.h>
-#include <ScrollView.h>
-#include <SeparatorView.h>
-#include <SpaceLayoutItem.h>
 #include <StatusBar.h>
-#include <String.h>
+#include <StringView.h>
+#include <TextControl.h>
 #include <TextView.h>
-#include <TranslationUtils.h>
-#include <TranslatorFormats.h>
 
-#include "tracker_private.h"
+#include <Keymap.h>
 
-#include "DialogPane.h"
 #include "InstallerDefs.h"
-#include "PackageViews.h"
 #include "PartitionMenuItem.h"
+#include "TargetSetupWindow.h"
 #include "WorkerThread.h"
 
 
-#undef B_TRANSLATION_CONTEXT
 #define B_TRANSLATION_CONTEXT "InstallerWindow"
 
 
 static const char* kDriveSetupSignature = "application/x-vnd.Haiku-DriveSetup";
-static const char* kBootManagerSignature = "application/x-vnd.Haiku-BootManager";
 
-const uint32 BEGIN_MESSAGE = 'iBGN';
-const uint32 SHOW_BOTTOM_MESSAGE = 'iSBT';
-const uint32 LAUNCH_DRIVE_SETUP = 'iSEP';
-const uint32 LAUNCH_BOOTMAN = 'iWBM';
-const uint32 START_SCAN = 'iSSC';
-const uint32 PACKAGE_CHECKBOX = 'iPCB';
-const uint32 ENCOURAGE_DRIVESETUP = 'iENC';
+static const uint32 kMsgBegin           = 'iBGN';
+static const uint32 kMsgInit            = 'iINI';
+static const uint32 kMsgQuit            = 'iQTA';
+static const uint32 kMsgAdvancedToggled = 'iADV';
+static const uint32 kMsgPasswordChanged = 'iPWC';
+static const uint32 kMsgInPlaceSelected = 'iINP';
+static const uint32 kMsgBootChoice      = 'iBCH';
+
+// Real partition IDs are >= 0; -2 tags the in-place pseudo-item.
+static const int32 kInPlacePartitionId = -2;
 
 
-class LogoView : public BView {
+// Collects ESPs for the bootloader destination menu.
+class BootloaderEspVisitor : public BDiskDeviceVisitor {
 public:
-								LogoView(const BRect& frame);
-								LogoView();
-	virtual						~LogoView();
+	BootloaderEspVisitor(BMenu* menu)
+		:
+		fMenu(menu)
+	{
+	}
 
-	virtual	void				Draw(BRect update);
+	virtual bool Visit(BDiskDevice* /*device*/)
+	{
+		return false;
+	}
 
-	virtual	void				GetPreferredSize(float* _width,
-									float* _height);
+	virtual bool Visit(BPartition* partition, int32 /*level*/)
+	{
+		if (partition == NULL || partition->ContentSize() <= 0)
+			return false;
+		const char* type = partition->Type();
+		if (type == NULL)
+			return false;
+		if (strcmp(type, "c12a7328-f81f-11d2-ba4b-00a0c93ec93b") != 0
+			&& strcasecmp(type, "EFI") != 0) {
+			return false;
+		}
+		BPath path;
+		if (partition->GetPath(&path) != B_OK)
+			return false;
+		BString contentName = partition->ContentName();
+		BString label;
+		if (!contentName.IsEmpty())
+			label.SetToFormat("%s (%s)", contentName.String(), path.Path());
+		else
+			label.SetToFormat(B_TRANSLATE("ESP (%s)"), path.Path());
+		BMessage* message = new BMessage(kMsgBootChoice);
+		message->AddString("choice", BString() << "esp:" << path.Path());
+		fMenu->AddItem(new BMenuItem(label.String(), message));
+		return false;
+	}
 
 private:
-			void				_Init();
-
-			BBitmap*			fLogo;
+	BMenu* fMenu;
 };
 
 
-LogoView::LogoView(const BRect& frame)
-	:
-	BView(frame, "logoview", B_FOLLOW_LEFT | B_FOLLOW_TOP,
-		B_WILL_DRAW | B_FULL_UPDATE_ON_RESIZE)
+// Live ISO's / is read-only squashfs; statvfs ST_RDONLY excludes it.
+static bool
+_in_place_available()
 {
-	_Init();
+	if (access("/etc/vos/live", F_OK) != 0)
+		return false;
+	struct statvfs vfs;
+	if (statvfs("/", &vfs) != 0)
+		return false;
+	if ((vfs.f_flag & ST_RDONLY) != 0)
+		return false;
+	return true;
 }
 
 
-LogoView::LogoView()
-	:
-	BView("logoview", B_WILL_DRAW | B_FULL_UPDATE_ON_RESIZE)
+static void
+random_hostname_suffix(char* out, size_t outSize)
 {
-	_Init();
-}
-
-
-LogoView::~LogoView(void)
-{
-	delete fLogo;
-}
-
-
-void
-LogoView::Draw(BRect update)
-{
-	BRect bounds(Bounds());
-	SetLowColor(ui_color(B_DOCUMENT_BACKGROUND_COLOR));
-	FillRect(bounds, B_SOLID_LOW);
-
-	if (fLogo == NULL)
-		return;
-
-	BPoint placement;
-	placement.x = (bounds.left + bounds.right - fLogo->Bounds().Width()) / 2;
-	placement.y = (bounds.top + bounds.bottom - fLogo->Bounds().Height()) / 2;
-
-	DrawBitmap(fLogo, placement);
-}
-
-
-void
-LogoView::GetPreferredSize(float* _width, float* _height)
-{
-	float width = 0.0;
-	float height = 0.0;
-	if (fLogo) {
-		width = fLogo->Bounds().Width();
-		height = fLogo->Bounds().Height();
+	static const char kAlpha[] = "abcdefghijklmnopqrstuvwxyz0123456789";
+	unsigned char rnd[4];
+	if (getrandom(rnd, sizeof(rnd), 0) == (ssize_t)sizeof(rnd)) {
+		snprintf(out, outSize, "vitruvian-%c%c%c%c",
+			kAlpha[rnd[0] % 36], kAlpha[rnd[1] % 36],
+			kAlpha[rnd[2] % 36], kAlpha[rnd[3] % 36]);
+	} else {
+		snprintf(out, outSize, "vitruvian");
 	}
-	if (_width)
-		*_width = width;
-	if (_height)
-		*_height = height;
-}
-
-
-void
-LogoView::_Init()
-{
-	SetDrawingMode(B_OP_OVER);
-
-#ifdef HAIKU_DISTRO_COMPATIBILITY_OFFICIAL
-	rgb_color bgColor = ui_color(B_DOCUMENT_BACKGROUND_COLOR);
-
-	if (bgColor.IsLight())
-		fLogo = BTranslationUtils::GetBitmap(B_PNG_FORMAT, "logo.png");
-	else
-		fLogo = BTranslationUtils::GetBitmap(B_PNG_FORMAT, "logo_dark.png");
-#else
-	fLogo = BTranslationUtils::GetBitmap(B_PNG_FORMAT, "walter_logo.png");
-#endif
-}
-
-
-// #pragma mark -
-
-
-static BLayoutItem*
-layout_item_for(BView* view)
-{
-	BLayout* layout = view->Parent()->GetLayout();
-	int32 index = layout->IndexOfView(view);
-	return layout->ItemAt(index);
 }
 
 
 InstallerWindow::InstallerWindow()
 	:
-	BWindow(BRect(-2400, -2000, -1800, -1800),
-		B_TRANSLATE_SYSTEM_NAME("Installer"), B_TITLED_WINDOW,
+	BWindow(BRect(0, 0, 520, 480), B_TRANSLATE_SYSTEM_NAME("Installer"),
+		B_TITLED_WINDOW,
 		B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS),
-	fEncouragedToSetupPartitions(false),
-	fDriveSetupLaunched(false),
-	fBootManagerLaunched(false),
 	fInstallStatus(kReadyForInstall),
-	fWorkerThread(new WorkerThread(this)),
+	fWorkerThread(new WorkerThread(BMessenger(this))),
 	fCopyEngineCancelSemaphore(-1)
 {
-	if (!be_roster->IsRunning(kTrackerSignature))
-		SetWorkspaces(B_ALL_WORKSPACES);
-
-	LogoView* logoView = new LogoView();
-
-	rgb_color baseColor = ui_color(B_DOCUMENT_TEXT_COLOR);
-	fStatusView = new BTextView("statusView", be_plain_font, &baseColor,
-		B_WILL_DRAW);
-	fStatusView->SetViewUIColor(B_DOCUMENT_BACKGROUND_COLOR);
-	fStatusView->MakeEditable(false);
-	fStatusView->MakeSelectable(false);
-
-	BSize logoSize = logoView->MinSize();
-	logoView->SetExplicitMaxSize(logoSize);
-
-	// In the status view, make sure that we can display 5 lines of text of ~28 characters each
-	font_height height;
-	fStatusView->GetFontHeight(&height);
-	float fontHeight = height.ascent + height.descent + height.leading;
-	fStatusView->SetExplicitMinSize(BSize(fStatusView->StringWidth("W") * 28,
-		fontHeight * 5 + 8));
-
-	// Create a group view with a white background since the logo and status text won't have the
-	// same height, this background will show in the remaining space
-	fLogoGroup = new BGroupView(B_HORIZONTAL, 10);
-	fLogoGroup->SetViewUIColor(B_DOCUMENT_BACKGROUND_COLOR);
-	fLogoGroup->GroupLayout()->SetInsets(0, 0, 10, 0);
-	fLogoGroup->AddChild(logoView);
-	fLogoGroup->AddChild(fStatusView);
-
 	fDestMenu = new BPopUpMenu(B_TRANSLATE("scanning" B_UTF8_ELLIPSIS),
 		true, false);
-	fSrcMenu = new BPopUpMenu(B_TRANSLATE("scanning" B_UTF8_ELLIPSIS),
-		true, false);
+	fDestMenuField = new BMenuField("destMenuField",
+		B_TRANSLATE("Install to:"), fDestMenu);
 
-	fSrcMenuField = new BMenuField("srcMenuField",
-		B_TRANSLATE("Install from:"), fSrcMenu);
-	fSrcMenuField->SetAlignment(B_ALIGN_RIGHT);
+	char hostDefault[24];
+	random_hostname_suffix(hostDefault, sizeof(hostDefault));
 
-	fDestMenuField = new BMenuField("destMenuField", B_TRANSLATE("Onto:"),
-		fDestMenu);
-	fDestMenuField->SetAlignment(B_ALIGN_RIGHT);
+	fHostnameField = new BTextControl("hostname",
+		B_TRANSLATE("Hostname:"), hostDefault, NULL);
 
-	fPackagesSwitch = new PaneSwitch("options_button");
-	fPackagesSwitch->SetLabels(B_TRANSLATE("Hide optional packages"),
-		B_TRANSLATE("Show optional packages"));
-	fPackagesSwitch->SetMessage(new BMessage(SHOW_BOTTOM_MESSAGE));
-	fPackagesSwitch->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED,
-		B_SIZE_UNSET));
-	fPackagesSwitch->SetExplicitAlignment(BAlignment(B_ALIGN_LEFT,
-		B_ALIGN_TOP));
+	fFullNameField = new BTextControl("fullname",
+		B_TRANSLATE("Full name:"), "", NULL);
+	fFullNameField->TextView()->SetText("");
+	fFullNameField->SetToolTip(B_TRANSLATE("Optional"));
 
-	fPackagesView = new PackagesView("packages_view");
-	BScrollView* packagesScrollView = new BScrollView("packagesScroll",
-		fPackagesView, B_WILL_DRAW, false, true);
+	fUserField = new BTextControl("user",
+		B_TRANSLATE("User:"), "", NULL);
 
-	const char* requiredDiskSpaceString
-		= B_TRANSLATE("Additional disk space required: 0.0 KiB");
-	fSizeView = new BStringView("size_view", requiredDiskSpaceString);
-	fSizeView->SetAlignment(B_ALIGN_RIGHT);
-	fSizeView->SetExplicitAlignment(
-		BAlignment(B_ALIGN_RIGHT, B_ALIGN_TOP));
+	fPasswordField = new BTextControl("password",
+		B_TRANSLATE("Password:"), "",
+		new BMessage(kMsgPasswordChanged));
+	fPasswordField->TextView()->HideTyping(true);
+	fPasswordField->SetModificationMessage(
+		new BMessage(kMsgPasswordChanged));
 
-	fProgressBar = new BStatusBar("progress",
-		B_TRANSLATE("Install progress:  "));
-	fProgressBar->SetMaxValue(100.0);
+	fConfirmField = new BTextControl("confirm",
+		B_TRANSLATE("Confirm:"), "",
+		new BMessage(kMsgPasswordChanged));
+	fConfirmField->TextView()->HideTyping(true);
+	fConfirmField->SetModificationMessage(
+		new BMessage(kMsgPasswordChanged));
 
-	fBeginButton = new BButton("begin_button", B_TRANSLATE("Begin"),
-		new BMessage(BEGIN_MESSAGE));
-	fBeginButton->MakeDefault(true);
-	fBeginButton->SetEnabled(false);
+	fSudoCheck = new BCheckBox("sudo",
+		B_TRANSLATE("Enable sudo"), NULL);
+	fSudoCheck->SetValue(B_CONTROL_ON);
+
+	fAutologinCheck = new BCheckBox("autologin",
+		B_TRANSLATE("Log in automatically"), NULL);
+	fAutologinCheck->SetValue(B_CONTROL_OFF);
+
+	fAutologinNote = new BStringView("autologinNote",
+		B_TRANSLATE("Anyone with physical access will boot into "
+			"this session."));
+	BFont smallFont(be_plain_font);
+	smallFont.SetSize(smallFont.Size() * 0.9f);
+	fAutologinNote->SetFont(&smallFont, B_FONT_SIZE);
+
+	fAdvancedCheck = new BCheckBox("advanced",
+		B_TRANSLATE("Advanced"),
+		new BMessage(kMsgAdvancedToggled));
+
+	fRootPasswordField = new BTextControl("rootPassword",
+		B_TRANSLATE("Root password:"), "",
+		new BMessage(kMsgPasswordChanged));
+	fRootPasswordField->TextView()->HideTyping(true);
+	fRootPasswordField->SetModificationMessage(
+		new BMessage(kMsgPasswordChanged));
+
+	fRootConfirmField = new BTextControl("rootConfirm",
+		B_TRANSLATE("Confirm root:"), "",
+		new BMessage(kMsgPasswordChanged));
+	fRootConfirmField->TextView()->HideTyping(true);
+	fRootConfirmField->SetModificationMessage(
+		new BMessage(kMsgPasswordChanged));
+
+	fPasswordStatus = new BStringView("passwordStatus", "");
+
+	fProgressBar = new BStatusBar("progress", B_TRANSLATE("Progress:"));
+	fProgressBar->SetMaxValue(100.0f);
+	fProgressBar->SetBarHeight(20);
+
+	fInstallButton = new BButton("install", B_TRANSLATE("Install"),
+		new BMessage(kMsgBegin));
+	fInstallButton->MakeDefault(true);
+	fInstallButton->SetEnabled(false);
+
+	fQuitButton = new BButton("quit", B_TRANSLATE("Quit"),
+		new BMessage(kMsgQuit));
 
 	fLaunchDriveSetupButton = new BButton("setup_button",
 		B_TRANSLATE("Set up partitions" B_UTF8_ELLIPSIS),
-		new BMessage(LAUNCH_DRIVE_SETUP));
+		new BMessage(MSG_LAUNCH_DRIVE_SETUP));
 
-	fLaunchBootManagerItem = new BMenuItem(B_TRANSLATE("Set up boot menu" B_UTF8_ELLIPSIS),
-		new BMessage(LAUNCH_BOOTMAN));
-	fLaunchBootManagerItem->SetEnabled(false);
+	fTargetSetupButton = new BButton("target_setup",
+		B_TRANSLATE("Create or format target" B_UTF8_ELLIPSIS),
+		new BMessage(MSG_TARGET_SETUP));
 
-	fMakeBootableItem = new BMenuItem(B_TRANSLATE("Write boot sector"),
-		new BMessage(MSG_WRITE_BOOT_SECTOR));
-	fMakeBootableItem->SetEnabled(false);
+	fBootloaderChoiceMenu = new BPopUpMenu("bootloaderChoice");
+	fBootloaderField = new BMenuField("bootloaderField",
+		B_TRANSLATE("Bootloader:"), fBootloaderChoiceMenu);
+	fBootloaderChoiceMenu->SetTargetForItems(this);
 
-	fEFILoaderMenu = new BMenu(B_TRANSLATE("Install EFI loader"));
+	BBox* setupBox = new BBox("setup");
+	setupBox->SetLabel(B_TRANSLATE("Set up your account"));
+	BLayoutBuilder::Group<>(setupBox, B_VERTICAL, B_USE_SMALL_SPACING)
+		.SetInsets(B_USE_ITEM_SPACING)
+		.Add(fHostnameField)
+		.Add(fFullNameField)
+		.Add(fUserField)
+		.Add(fPasswordField)
+		.Add(fConfirmField)
+		.Add(fSudoCheck)
+		.Add(fAutologinCheck)
+		.Add(fAutologinNote)
+		.Add(fAdvancedCheck)
+		.Add(fRootPasswordField)
+		.Add(fRootConfirmField)
+		.Add(fPasswordStatus);
 
-	BMenuBar* mainMenu = new BMenuBar("main menu");
-	BMenu* toolsMenu = new BMenu(B_TRANSLATE("Tools"));
-	toolsMenu->AddItem(fLaunchBootManagerItem);
-	toolsMenu->AddItem(fMakeBootableItem);
-	toolsMenu->AddItem(fEFILoaderMenu);
-	mainMenu->AddItem(toolsMenu);
+	fMenuBar = new BMenuBar("main menu");
+	fToolsMenu = new BMenu(B_TRANSLATE("Tools"));
+	fBootloaderMenu = new BMenu(B_TRANSLATE("Install bootloader"));
+	fBootloaderSetupItem = new BMenuItem(
+		B_TRANSLATE("Configure boot menu" B_UTF8_ELLIPSIS),
+		new BMessage(MSG_BOOTLOADER_SETUP));
+	fBootloaderSetupItem->SetEnabled(false);
+	fToolsMenu->AddItem(fBootloaderSetupItem);
+	fToolsMenu->AddItem(fBootloaderMenu);
+	fMenuBar->AddItem(fToolsMenu);
 
-	BGroupView* packagesGroup = new BGroupView(B_VERTICAL, B_USE_ITEM_SPACING);
-	packagesGroup->AddChild(fPackagesSwitch);
-	packagesGroup->AddChild(packagesScrollView);
-	packagesGroup->AddChild(fProgressBar);
-	packagesGroup->AddChild(fSizeView);
-
-	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
-		.Add(mainMenu)
-		.Add(fLogoGroup)
-		.Add(new BSeparatorView(B_HORIZONTAL, B_PLAIN_BORDER))
-		.AddGroup(B_VERTICAL, B_USE_ITEM_SPACING)
-			.SetInsets(B_USE_WINDOW_SPACING)
-			.AddGrid(new BGridView(B_USE_ITEM_SPACING, B_USE_ITEM_SPACING))
-				.AddMenuField(fSrcMenuField, 0, 0)
-				.AddMenuField(fDestMenuField, 0, 1)
-				.AddGlue(2, 0, 1, 2)
-				.Add(BSpaceLayoutItem::CreateVerticalStrut(5), 0, 2, 3)
-			.End()
-			.Add(packagesGroup)
-			.AddGroup(B_HORIZONTAL, B_USE_WINDOW_SPACING)
-				.Add(fLaunchDriveSetupButton)
-				.AddGlue()
-				.Add(fBeginButton)
-			.End()
+	BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_ITEM_SPACING)
+		.SetInsets(B_USE_WINDOW_INSETS)
+		.Add(fMenuBar)
+		.AddGroup(B_HORIZONTAL)
+			.Add(fDestMenuField)
+			.Add(fBootloaderField)
 		.End()
-	.End();
+		.Add(setupBox)
+		.Add(fProgressBar)
+		.AddGroup(B_HORIZONTAL)
+			.Add(fLaunchDriveSetupButton)
+			.Add(fTargetSetupButton)
+			.AddGlue()
+			.Add(fQuitButton)
+			.Add(fInstallButton)
+		.End();
 
-	// Make the optional packages and progress bar invisible on start
-	fPackagesLayoutItem = layout_item_for(packagesScrollView);
-	fPkgSwitchLayoutItem = layout_item_for(fPackagesSwitch);
-	fSizeViewLayoutItem = layout_item_for(fSizeView);
-	fProgressLayoutItem = layout_item_for(fProgressBar);
-
-	fPackagesLayoutItem->SetVisible(false);
-	fSizeViewLayoutItem->SetVisible(false);
-	fProgressLayoutItem->SetVisible(false);
-
-	// finish creating window
-	if (!be_roster->IsRunning(kDeskbarSignature))
-		SetFlags(Flags() | B_NOT_MINIMIZABLE);
+	_UpdateAdvancedEnabled();
+	_UpdatePasswordStatus();
 
 	CenterOnScreen();
 	Show();
 
-	// Register to receive notifications when apps launch or quit...
-	be_roster->StartWatching(this);
-	// ... and check the two we are interested in.
-	fDriveSetupLaunched = be_roster->IsRunning(kDriveSetupSignature);
-	fBootManagerLaunched = be_roster->IsRunning(kBootManagerSignature);
+	// Subscribe to disk device add/remove so a USB stick plugged in while
+	// the installer is open triggers a rescan of the target menu.
+	BDiskDeviceRoster().StartWatching(BMessenger(this));
+	// DriveSetup quits after the user repartitions; rescan on its exit so
+	// the fresh layout is offered without a manual refresh.
+	be_roster->StartWatching(BMessenger(this));
 
-	if (Lock()) {
-		fLaunchDriveSetupButton->SetEnabled(!fDriveSetupLaunched);
-		fLaunchBootManagerItem->SetEnabled(!fBootManagerLaunched);
-		Unlock();
-	}
-
-	PostMessage(START_SCAN);
+	PostMessage(kMsgInit);
 }
 
 
 InstallerWindow::~InstallerWindow()
 {
+	BDiskDeviceRoster().StopWatching(BMessenger(this));
+	be_roster->StopWatching(BMessenger(this));
 	_SetCopyEngineCancelSemaphore(-1);
-	be_roster->StopWatching(this);
 }
 
 
 void
-InstallerWindow::MessageReceived(BMessage *msg)
+InstallerWindow::MessageReceived(BMessage* message)
 {
-	switch (msg->what) {
+	switch (message->what) {
+		case kMsgInit:
+			_ScanPartitions();
+			_UpdateControls();
+			break;
+
+		case TARGET_PARTITION:
+		{
+			PartitionMenuItem* item = (PartitionMenuItem*)
+				fDestMenu->FindMarked();
+			if (item != NULL) {
+				fDestMenuField->MenuItem()->SetLabel(item->Label());
+				fWorkerThread->SetInPlace(
+					item->ID() == (partition_id)kInPlacePartitionId);
+				// A plan describes one specific target; picking another
+				// one drops it rather than silently reusing it.
+				if (!fPlanText.IsEmpty()
+					&& item->ID() != (partition_id)kPlannedPartitionId) {
+					_ClearPlan();
+				}
+			}
+			_UpdateControls();
+			break;
+		}
+
+		case MSG_LAUNCH_DRIVE_SETUP:
+			_LaunchDriveSetup();
+			break;
+
+		case MSG_TARGET_SETUP:
+		{
+			if (fInstallStatus != kReadyForInstall)
+				break;
+			TargetSetupWindow* window = new TargetSetupWindow(
+				BMessenger(this));
+			window->Show();
+			break;
+		}
+
+		case MSG_PLAN_READY:
+		{
+			const char* plan = NULL;
+			if (message->FindString("plan", &plan) == B_OK) {
+				fPlanText = plan;
+				// _ScanPartitions adds and marks the planned item.
+				_ScanPartitions();
+				PartitionMenuItem* planned
+					= (PartitionMenuItem*)fDestMenu->FindMarked();
+				if (planned != NULL)
+					fDestMenuField->MenuItem()->SetLabel(
+						planned->Label());
+				fWorkerThread->SetInPlace(false);
+				_UpdateControls();
+			}
+			break;
+		}
+
+		case kMsgBootChoice:
+		{
+			const char* choice = NULL;
+			if (message->FindString("choice", &choice) == B_OK)
+				fBootloaderChoice = choice;
+			break;
+		}
+
+		case B_SOME_APP_LAUNCHED:
+		{
+			entry_ref app;
+			if (message->FindRef("ref", &app) == B_OK
+				&& app.name != NULL
+				&& strcmp(app.name, "DriveSetup") == 0) {
+				fLaunchDriveSetupButton->SetEnabled(false);
+			}
+			break;
+		}
+
+		case B_SOME_APP_QUIT:
+		{
+			entry_ref app;
+			if (message->FindRef("ref", &app) == B_OK
+				&& app.name != NULL
+				&& strcmp(app.name, "DriveSetup") == 0) {
+				fLaunchDriveSetupButton->SetEnabled(true);
+				// DriveSetup may have repartitioned; refresh targets.
+				_ScanPartitions();
+			}
+			break;
+		}
+
+		case MSG_INSTALL_BOOTLOADER:
+		{
+			int64 id = -1;
+			if (message->FindInt64("id", &id) == B_OK)
+				fWorkerThread->InstallBootloader((partition_id)id);
+			break;
+		}
+
+		case MSG_BOOTLOADER_SETUP:
+			fWorkerThread->BootloaderSetup();
+			break;
+
+		case kMsgAdvancedToggled:
+			_UpdateAdvancedEnabled();
+			_UpdatePasswordStatus();
+			break;
+
+		case kMsgPasswordChanged:
+			_UpdatePasswordStatus();
+			break;
+
+		case kMsgBegin:
+		{
+			BString err;
+			if (!_ValidateSetup(err)) {
+				BAlert* alert = new BAlert(B_TRANSLATE("Cannot install"),
+					err.String(), B_TRANSLATE("OK"), NULL, NULL,
+					B_WIDTH_AS_USUAL, B_STOP_ALERT);
+				alert->Go();
+				break;
+			}
+			PartitionMenuItem* item = (PartitionMenuItem*)
+				fDestMenu->FindMarked();
+			if (item == NULL) {
+				fInstallButton->SetEnabled(false);
+				break;
+			}
+			bool inPlace = (item->ID() == (partition_id)kInPlacePartitionId);
+
+			InstallSpec spec;
+			spec.planText = fPlanText;
+			_ReadBootloaderChoice();
+			if (!inPlace) {
+				if (fBootloaderChoice.StartsWith("esp:")) {
+					spec.efiMode = "vitruvian";
+					spec.biosMode = "none";
+					spec.espPath = fBootloaderChoice.String() + 4;
+				} else if (fBootloaderChoice == "bios:disk") {
+					spec.efiMode = "none";
+					spec.biosMode = "disk";
+					spec.espPath = "none";
+				} else {
+					spec.efiMode = "none";
+					spec.biosMode = "none";
+					spec.espPath = "none";
+				}
+			}
+
+			BString targetLabel = item->Label();
+			BString prompt = _ComposeSummary(targetLabel.String(), inPlace);
+			BAlert* alert = new BAlert(B_TRANSLATE("Confirm install"),
+				prompt.String(),
+				B_TRANSLATE("Cancel"),
+				inPlace ? B_TRANSLATE("Set up") : B_TRANSLATE("Install"),
+				NULL, B_WIDTH_AS_USUAL, B_STOP_ALERT);
+			alert->SetShortcut(0, B_ESCAPE);
+			if (alert->Go() != 1)
+				break;
+
+			BString conf = _ComposeSetupConf();
+			fPasswordField->SetText("");
+			fConfirmField->SetText("");
+			fRootPasswordField->SetText("");
+			fRootConfirmField->SetText("");
+
+			fInstallStatus = kInstalling;
+			fInstallButton->SetEnabled(false);
+			fDestMenuField->SetEnabled(false);
+			fHostnameField->SetEnabled(false);
+			fFullNameField->SetEnabled(false);
+			fUserField->SetEnabled(false);
+			fPasswordField->SetEnabled(false);
+			fConfirmField->SetEnabled(false);
+			fSudoCheck->SetEnabled(false);
+			fAutologinCheck->SetEnabled(false);
+			fAdvancedCheck->SetEnabled(false);
+			fRootPasswordField->SetEnabled(false);
+			fRootConfirmField->SetEnabled(false);
+			fBootloaderSetupItem->SetEnabled(false);
+			fLaunchDriveSetupButton->SetEnabled(false);
+			fTargetSetupButton->SetEnabled(false);
+
+			sem_id cancelSem = create_sem(0, "installer_cancel");
+			_SetCopyEngineCancelSemaphore(cancelSem);
+			fWorkerThread->SetLock(cancelSem);
+			fWorkerThread->SetSetupConf(conf);
+			explicit_bzero(conf.LockBuffer(0), conf.Length());
+			conf.UnlockBuffer(0);
+			fWorkerThread->StartInstall(item->ID(), spec);
+			break;
+		}
+
+		case MSG_STATUS_MESSAGE:
+		{
+			const char* text = NULL;
+			if (message->FindString("status", &text) == B_OK)
+				fProgressBar->SetText(text);
+			float progress = 0.0f;
+			if (message->FindFloat("progress", &progress) == B_OK)
+				fProgressBar->SetTo(progress);
+			break;
+		}
+
+		case MSG_INSTALL_FINISHED:
+		{
+			_SetCopyEngineCancelSemaphore(-1);
+			fInstallStatus = kFinished;
+			fProgressBar->SetTo(100.0f);
+
+			PartitionMenuItem* target =
+				(PartitionMenuItem*)fDestMenu->FindMarked();
+			bool canBootloader = target != NULL
+				&& target->ID() != (partition_id)kInPlacePartitionId;
+
+			if (canBootloader) {
+				BAlert* alert = new BAlert(B_TRANSLATE("Installation complete"),
+					B_TRANSLATE("Installation completed successfully.\n\n"
+						"Install the bootloader on the target disk now? Skip "
+						"this if you manage your own bootloader or are "
+						"dual-booting."),
+					B_TRANSLATE("Skip"), B_TRANSLATE("Install bootloader"),
+					NULL, B_WIDTH_AS_USUAL, B_INFO_ALERT);
+				alert->SetShortcut(0, B_ESCAPE);
+				if (alert->Go() == 1) {
+					fWorkerThread->InstallBootloader(target->ID());
+					break;
+				}
+			} else {
+				BAlert* alert = new BAlert(B_TRANSLATE("Installation complete"),
+					B_TRANSLATE("Installation completed successfully. "
+						"You can now reboot into the installed system."),
+					B_TRANSLATE("Quit"), NULL, NULL,
+					B_WIDTH_AS_USUAL, B_INFO_ALERT);
+				alert->Go();
+			}
+			be_app->PostMessage(B_QUIT_REQUESTED);
+			break;
+		}
+
 		case MSG_RESET:
 		{
 			_SetCopyEngineCancelSemaphore(-1);
+			status_t err = B_OK;
+			message->FindInt32("error", &err);
+			fInstallStatus = kReadyForInstall;
+			fInstallButton->SetEnabled(true);
+			fDestMenuField->SetEnabled(true);
+			fHostnameField->SetEnabled(true);
+			fFullNameField->SetEnabled(true);
+			fUserField->SetEnabled(true);
+			fPasswordField->SetEnabled(true);
+			fConfirmField->SetEnabled(true);
+			fSudoCheck->SetEnabled(true);
+			fAutologinCheck->SetEnabled(true);
+			fAdvancedCheck->SetEnabled(true);
+			_UpdateAdvancedEnabled();
+			fBootloaderSetupItem->SetEnabled(fDestMenu->FindMarked() != NULL);
+			fLaunchDriveSetupButton->SetEnabled(true);
+			fTargetSetupButton->SetEnabled(true);
 
-			status_t error;
-			if (msg->FindInt32("error", &error) == B_OK) {
-				char errorMessage[2048];
-				snprintf(errorMessage, sizeof(errorMessage),
-					B_TRANSLATE("An error was encountered and the "
-					"installation was not completed:\n\n"
-					"Error:  %s"), strerror(error));
-				BAlert* alert = new BAlert("error", errorMessage, B_TRANSLATE("OK"));
-				alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
-				alert->Go();
-			}
+			BString detail;
+			message->FindString("detail", &detail);
 
-			_DisableInterface(false);
-
-			fProgressLayoutItem->SetVisible(false);
-			fPkgSwitchLayoutItem->SetVisible(true);
-			_ShowOptionalPackages();
-			_UpdateControls();
-			break;
-		}
-		case START_SCAN:
-			_ScanPartitions();
-			break;
-		case BEGIN_MESSAGE:
-			switch (fInstallStatus) {
-				case kReadyForInstall:
-				{
-					// get source and target
-					PartitionMenuItem* targetItem
-						= (PartitionMenuItem*)fDestMenu->FindMarked();
-					PartitionMenuItem* srcItem
-						= (PartitionMenuItem*)fSrcMenu->FindMarked();
-					if (srcItem == NULL || targetItem == NULL)
-						break;
-
-					_SetCopyEngineCancelSemaphore(create_sem(1,
-						"copy engine cancel"));
-
-					BList* list = new BList();
-					int32 size = 0;
-					fPackagesView->GetPackagesToInstall(list, &size);
-					fWorkerThread->SetLock(fCopyEngineCancelSemaphore);
-					fWorkerThread->SetPackagesList(list);
-					fWorkerThread->SetSpaceRequired(size);
-					fInstallStatus = kInstalling;
-					fWorkerThread->StartInstall(srcItem->ID(),
-						targetItem->ID());
-					fBeginButton->SetLabel(B_TRANSLATE("Stop"));
-					_DisableInterface(true);
-
-					fProgressBar->SetTo(0.0, NULL, NULL);
-
-					fPkgSwitchLayoutItem->SetVisible(false);
-					fPackagesLayoutItem->SetVisible(false);
-					fSizeViewLayoutItem->SetVisible(false);
-					fProgressLayoutItem->SetVisible(true);
-					break;
-				}
-				case kInstalling:
-				{
-					_QuitCopyEngine(true);
-					break;
-				}
-				case kFinished:
-					PostMessage(B_QUIT_REQUESTED);
-					break;
-				case kCancelled:
-					break;
-			}
-			break;
-		case SHOW_BOTTOM_MESSAGE:
-			_ShowOptionalPackages();
-			break;
-		case SOURCE_PARTITION:
-			_PublishPackages();
-			_UpdateControls();
-			break;
-		case TARGET_PARTITION:
-			_UpdateControls();
-			break;
-		case EFI_PARTITION:
-		{
-			partition_id id;
-			msg->FindInt32("id", &id);
-			fWorkerThread->InstallEFILoader(id, false);
-			break;
-		}
-		case LAUNCH_DRIVE_SETUP:
-			_LaunchDriveSetup();
-			break;
-		case LAUNCH_BOOTMAN:
-			_LaunchBootManager();
-			break;
-		case PACKAGE_CHECKBOX:
-		{
-			char buffer[15];
-			fPackagesView->GetTotalSizeAsString(buffer, sizeof(buffer));
-			char string[256];
-			snprintf(string, sizeof(string),
-				B_TRANSLATE("Additional disk space required: %s"), buffer);
-			fSizeView->SetText(string);
-			fSizeView->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
-			break;
-		}
-		case ENCOURAGE_DRIVESETUP:
-		{
-			BAlert* alert = new BAlert("use drive setup", B_TRANSLATE("No partitions have "
-				"been found that are suitable for installation. Please set "
-				"up partitions and format at least one partition with the "
-				"Be File System."), B_TRANSLATE("OK"));
-			alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
+			BString msg;
+			msg.SetToFormat("%s: %s",
+				B_TRANSLATE("Installation failed"), strerror(err));
+			if (!detail.IsEmpty())
+				msg << "\n\n" << detail;
+			BAlert* alert = new BAlert(B_TRANSLATE("Installation failed"),
+				msg.String(), B_TRANSLATE("OK"), NULL, NULL,
+				B_WIDTH_AS_USUAL, B_STOP_ALERT);
 			alert->Go();
 			break;
 		}
-		case MSG_STATUS_MESSAGE:
-		{
-			float progress;
-			if (msg->FindFloat("progress", &progress) == B_OK) {
-				const char* currentItem;
-				if (msg->FindString("item", &currentItem) != B_OK) {
-					currentItem = B_TRANSLATE_COMMENT("???",
-						"Unknown currently copied item");
-				}
-				BString trailingLabel;
-				int32 currentCount;
-				int32 maximumCount;
-				if (msg->FindInt32("current", &currentCount) == B_OK
-					&& msg->FindInt32("maximum", &maximumCount) == B_OK) {
-					char buffer[64];
-					snprintf(buffer, sizeof(buffer),
-						B_TRANSLATE_COMMENT("%1ld of %2ld", "number of files copied"),
-						(long int)currentCount, (long int)maximumCount);
-					trailingLabel << buffer;
-				} else {
-					trailingLabel <<
-						B_TRANSLATE_COMMENT("?? of ??", "Unknown progress");
-				}
-				fProgressBar->SetTo(progress, currentItem,
-					trailingLabel.String());
-			} else {
-				const char *status;
-				if (msg->FindString("status", &status) == B_OK) {
-					fLastStatus = fStatusView->Text();
-					_SetStatusMessage(status);
-				} else
-					_SetStatusMessage(fLastStatus.String());
-			}
+
+		case kMsgQuit:
+			PostMessage(B_QUIT_REQUESTED);
 			break;
-		}
-		case MSG_INSTALL_FINISHED:
-		{
 
-			_SetCopyEngineCancelSemaphore(-1);
-
-			PartitionMenuItem* dstItem
-				= (PartitionMenuItem*)fDestMenu->FindMarked();
-
-			BString status;
-			if (be_roster->IsRunning(kDeskbarSignature)) {
-				fBeginButton->SetLabel(B_TRANSLATE("Quit"));
-
-				BString text(B_TRANSLATE("Installation "
-					"completed. Boot sector has been written to '%s'. Press "
-					"'Quit' to leave the %appname% or choose a new target "
-					"volume to perform another installation."));
-				text.ReplaceFirst("%appname%", B_TRANSLATE_SYSTEM_NAME("Installer"));
-				status.SetToFormat(text, dstItem ? dstItem->Name() : B_TRANSLATE_COMMENT("???",
-						"Unknown partition name"));
-			} else {
-				fBeginButton->SetLabel(B_TRANSLATE("Restart"));
-				status.SetToFormat(B_TRANSLATE("Installation "
-					"completed. Boot sector has been written to '%s'. Press "
-					"'Restart' to restart the computer or choose a new target "
-					"volume to perform another installation."),
-					dstItem ? dstItem->Name() : B_TRANSLATE_COMMENT("???",
-						"Unknown partition name"));
-			}
-
-			_SetStatusMessage(status.String());
-			fInstallStatus = kFinished;
-
-			_DisableInterface(false);
-			fProgressLayoutItem->SetVisible(false);
-			fPkgSwitchLayoutItem->SetVisible(true);
-			_ShowOptionalPackages();
-			break;
-		}
-		case B_SOME_APP_LAUNCHED:
-		case B_SOME_APP_QUIT:
-		{
-			const char *signature;
-			if (msg->FindString("be:signature", &signature) != B_OK)
-				break;
-			bool isDriveSetup = !strcasecmp(signature, kDriveSetupSignature);
-			bool isBootManager = !strcasecmp(signature, kBootManagerSignature);
-			if (isDriveSetup || isBootManager) {
-				bool scanPartitions = false;
-				if (isDriveSetup) {
-					bool launched = msg->what == B_SOME_APP_LAUNCHED;
-					// We need to scan partitions if DriveSetup has quit.
-					scanPartitions = fDriveSetupLaunched && !launched;
-					fDriveSetupLaunched = launched;
-				}
-				if (isBootManager)
-					fBootManagerLaunched = msg->what == B_SOME_APP_LAUNCHED;
-
-				fBeginButton->SetEnabled(
-					!fDriveSetupLaunched && !fBootManagerLaunched);
-				_DisableInterface(fDriveSetupLaunched || fBootManagerLaunched);
-				if (fDriveSetupLaunched && fBootManagerLaunched) {
-					_SetStatusMessage(B_TRANSLATE("Running BootManager and "
-						"DriveSetup" B_UTF8_ELLIPSIS
-						"\n\nClose both applications to continue with the "
-						"installation."));
-				} else if (fDriveSetupLaunched) {
-					_SetStatusMessage(B_TRANSLATE("Running DriveSetup"
-						B_UTF8_ELLIPSIS
-						"\n\nClose DriveSetup to continue with the "
-						"installation."));
-				} else if (fBootManagerLaunched) {
-					_SetStatusMessage(B_TRANSLATE("Running BootManager"
-						B_UTF8_ELLIPSIS
-						"\n\nClose BootManager to continue with the "
-						"installation."));
-				} else {
-					// If neither DriveSetup nor Bootman is running, we need
-					// to scan partitions in case DriveSetup has quit, or
-					// we need to update the guidance message, unless install
-					// was already finished.
-					if (scanPartitions)
-						_ScanPartitions();
-					else if (fInstallStatus != kFinished)
-						_UpdateControls();
-					else
-						PostMessage(MSG_INSTALL_FINISHED);
-				}
-			}
-			break;
-		}
-		case MSG_WRITE_BOOT_SECTOR:
-			fWorkerThread->WriteBootSector(fDestMenu);
+		case B_DEVICE_UPDATE:
+			if (fInstallStatus == kReadyForInstall)
+				_ScanPartitions();
 			break;
 
 		default:
-			BWindow::MessageReceived(msg);
-			break;
+			BWindow::MessageReceived(message);
 	}
 }
 
@@ -602,77 +612,398 @@ InstallerWindow::MessageReceived(BMessage *msg)
 bool
 InstallerWindow::QuitRequested()
 {
-	if ((Flags() & B_NOT_MINIMIZABLE) != 0) {
-		// This means Deskbar is not running, i.e. Installer is the only
-		// thing on the screen and we will reboot the machine once it quits.
-
-		if (fDriveSetupLaunched && fBootManagerLaunched) {
-			BAlert* alert = new BAlert(B_TRANSLATE("Quit BootManager and "
-				"DriveSetup"),	B_TRANSLATE("Please close the BootManager "
-				"and DriveSetup windows before closing the Installer window."),
-				B_TRANSLATE("OK"));
-			alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
-			alert->Go();
+	if (fInstallStatus == kInstalling) {
+		BAlert* alert = new BAlert(B_TRANSLATE("Cancel install"),
+			B_TRANSLATE("Installation is in progress. Cancel it?"),
+			B_TRANSLATE("Continue install"), B_TRANSLATE("Cancel install"),
+			NULL, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+		alert->SetShortcut(0, B_ESCAPE);
+		if (alert->Go() == 0)
 			return false;
-		}
-		if (fDriveSetupLaunched) {
-			BAlert* alert = new BAlert(B_TRANSLATE("Quit DriveSetup"),
-				B_TRANSLATE("Please close the DriveSetup window before "
-				"closing the Installer window."), B_TRANSLATE("OK"));
-			alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
-			alert->Go();
-			return false;
-		}
-		if (fBootManagerLaunched) {
-			BAlert* alert = new BAlert(B_TRANSLATE("Quit BootManager"),
-				B_TRANSLATE("Please close the BootManager window before "
-				"closing the Installer window."), B_TRANSLATE("OK"));
-			alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
-			alert->Go();
-			return false;
-		}
-		if (fInstallStatus != kFinished) {
-			BAlert* alert = new BAlert(B_TRANSLATE_SYSTEM_NAME("Installer"),
-				B_TRANSLATE("Are you sure you want to stop the installation?"),
-				B_TRANSLATE("Cancel"), B_TRANSLATE("Stop"), NULL,
-				B_WIDTH_AS_USUAL, B_STOP_ALERT);
-			alert->SetShortcut(0, B_ESCAPE);
-			if (alert->Go() == 0)
-				return false;
-		}
-	} else if (fInstallStatus == kInstalling) {
-			BAlert* alert = new BAlert(B_TRANSLATE_SYSTEM_NAME("Installer"),
-				B_TRANSLATE("The installation is not complete yet!\n"
-                                "Are you sure you want to stop it?"),
-				B_TRANSLATE("Cancel"), B_TRANSLATE("Stop"), NULL,
-				B_WIDTH_AS_USUAL, B_STOP_ALERT);
-			alert->SetShortcut(0, B_ESCAPE);
-			if (alert->Go() == 0)
-				return false;
+		_QuitCopyEngine(false);
 	}
-
-	_QuitCopyEngine(false);
-
-	BMessage quitWithInstallStatus(B_QUIT_REQUESTED);
-	quitWithInstallStatus.AddBool("install_complete",
-		fInstallStatus == kFinished);
-
-	fWorkerThread->PostMessage(&quitWithInstallStatus);
-	be_app->PostMessage(&quitWithInstallStatus);
+	be_app->PostMessage(B_QUIT_REQUESTED);
 	return true;
 }
 
 
-// #pragma mark -
+void
+InstallerWindow::_ScanPartitions()
+{
+	BMenuItem* item;
+	while ((item = fDestMenu->RemoveItem((int32)0)) != NULL)
+		delete item;
+	while ((item = fBootloaderMenu->RemoveItem((int32)0)) != NULL)
+		delete item;
+
+	fWorkerThread->ScanDisksPartitions(fDestMenu, fBootloaderMenu);
+
+	if (!fPlanText.IsEmpty()) {
+		PartitionMenuItem* planned = new PartitionMenuItem(
+			"planned",
+			B_TRANSLATE("New Vitruvian partition (created at install "
+				"time)"),
+			B_TRANSLATE("New Vitruvian partition"),
+			new BMessage(TARGET_PARTITION), kPlannedPartitionId);
+		planned->SetIsValidTarget(true);
+		fDestMenu->AddItem(planned, 0);
+		planned->SetMarked(true);
+	}
+
+	if (fBootloaderMenu->CountItems() == 0) {
+		BMenuItem* noEsp = new BMenuItem(
+			B_TRANSLATE("No EFI System Partitions found"), NULL);
+		noEsp->SetEnabled(false);
+		fBootloaderMenu->AddItem(noEsp);
+	}
+
+	if (_in_place_available()) {
+		PartitionMenuItem* inPlace = new PartitionMenuItem("current",
+			B_TRANSLATE("Current system (in-place)"),
+			B_TRANSLATE("Current system (in-place)"),
+			new BMessage(TARGET_PARTITION), kInPlacePartitionId);
+		inPlace->SetIsValidTarget(true);
+		fDestMenu->AddItem(inPlace, 0);
+	}
+
+	_RebuildBootloaderMenu();
+
+	if (fDestMenu->CountItems() == 0) {
+		fDestMenuField->MenuItem()->SetLabel(
+			B_TRANSLATE("No writable partitions found"));
+		fInstallButton->SetEnabled(false);
+	} else {
+		PartitionMenuItem* marked
+			= (PartitionMenuItem*)fDestMenu->FindMarked();
+		if (marked != NULL)
+			fDestMenuField->MenuItem()->SetLabel(marked->Label());
+		else
+			fDestMenuField->MenuItem()->SetLabel(
+				B_TRANSLATE("Choose target volume"));
+	}
+}
 
 
 void
-InstallerWindow::_ShowOptionalPackages()
+InstallerWindow::_UpdateControls()
 {
-	if (fPackagesLayoutItem && fSizeViewLayoutItem) {
-		fPackagesLayoutItem->SetVisible(fPackagesSwitch->Value());
-		fSizeViewLayoutItem->SetVisible(fPackagesSwitch->Value());
+	BString err;
+	fInstallButton->SetEnabled(_ValidateSetup(err));
+	fBootloaderSetupItem->SetEnabled(fDestMenu->FindMarked() != NULL);
+}
+
+
+void
+InstallerWindow::_UpdateAdvancedEnabled()
+{
+	bool advanced = (fAdvancedCheck->Value() == B_CONTROL_ON);
+	fRootPasswordField->SetEnabled(advanced);
+	fRootConfirmField->SetEnabled(advanced);
+}
+
+
+void
+InstallerWindow::_UpdatePasswordStatus()
+{
+	const char* pwd  = fPasswordField->Text();
+	const char* pwd2 = fConfirmField->Text();
+
+	BString status;
+	bool ok = true;
+
+	if (pwd == NULL || *pwd == '\0') {
+		ok = false;
+	} else if (pwd2 == NULL || strcmp(pwd, pwd2) != 0) {
+		status = B_TRANSLATE("Passwords do not match.");
+		ok = false;
+	} else {
+		const char* user = fUserField->Text();
+		if (user != NULL && *user != '\0' && strcmp(user, pwd) == 0) {
+			status = B_TRANSLATE("Password must not equal the username.");
+			ok = false;
+		} else if (strlen(pwd) < 8) {
+			status = B_TRANSLATE("Password must be at least 8 characters.");
+			ok = false;
+		} else {
+			status = B_TRANSLATE("Password OK.");
+		}
 	}
+
+	if (ok && fAdvancedCheck->Value() == B_CONTROL_ON) {
+		const char* rp  = fRootPasswordField->Text();
+		const char* rp2 = fRootConfirmField->Text();
+		if (rp == NULL || *rp == '\0' || rp2 == NULL
+				|| strcmp(rp, rp2) != 0) {
+			status = B_TRANSLATE("Root password: empty or does not match.");
+			ok = false;
+		}
+	}
+
+	fPasswordStatus->SetText(status.String());
+	_UpdateControls();
+}
+
+
+bool
+InstallerWindow::_ValidateSetup(BString& errorOut)
+{
+	if (fDestMenu->FindMarked() == NULL) {
+		errorOut = B_TRANSLATE("Choose a target volume.");
+		return false;
+	}
+	const char* user = fUserField->Text();
+	if (user == NULL || *user == '\0') {
+		errorOut = B_TRANSLATE("Enter a username.");
+		return false;
+	}
+	if (!islower((unsigned char)user[0]) && user[0] != '_') {
+		errorOut = B_TRANSLATE("Username must start with a letter or _.");
+		return false;
+	}
+	for (const char* p = user; *p != '\0'; p++) {
+		if (!islower((unsigned char)*p) && !isdigit((unsigned char)*p)
+				&& *p != '_' && *p != '-') {
+			errorOut = B_TRANSLATE("Username may only contain "
+				"a-z, 0-9, _ and -.");
+			return false;
+		}
+	}
+	if (strlen(user) > 32) {
+		errorOut = B_TRANSLATE("Username too long (max 32 characters).");
+		return false;
+	}
+	if (strcasecmp(user, "root") == 0 || strcasecmp(user, "vos-live") == 0
+			|| strcasecmp(user, "vos_login") == 0
+			|| strcasecmp(user, "nobody") == 0) {
+		errorOut = B_TRANSLATE("Reserved username.");
+		return false;
+	}
+	const char* pwd = fPasswordField->Text();
+	if (pwd == NULL || strlen(pwd) < 8) {
+		errorOut = B_TRANSLATE("Password too short (min 8 characters).");
+		return false;
+	}
+	if (strcmp(pwd, fConfirmField->Text()) != 0) {
+		errorOut = B_TRANSLATE("Password confirmation does not match.");
+		return false;
+	}
+	if (strcmp(user, pwd) == 0) {
+		errorOut = B_TRANSLATE("Password must not equal the username.");
+		return false;
+	}
+	if (fAdvancedCheck->Value() == B_CONTROL_ON) {
+		const char* rp = fRootPasswordField->Text();
+		if (rp == NULL || *rp == '\0') {
+			errorOut = B_TRANSLATE("Advanced: enter a root password "
+				"or uncheck Advanced.");
+			return false;
+		}
+		if (strcmp(rp, fRootConfirmField->Text()) != 0) {
+			errorOut = B_TRANSLATE("Root password confirmation "
+				"does not match.");
+			return false;
+		}
+	}
+	return true;
+}
+
+
+// xkb rule options implied by the running key_map.
+static BString
+current_xkb_options()
+{
+	BString options;
+	key_map* map = NULL;
+	char* buffer = NULL;
+	get_key_map(&map, &buffer);
+	if (map != NULL)
+		options = look_up_xkb_modifier_options(*map);
+
+	free(map);
+	free(buffer);
+	return options;
+}
+
+
+// Handles bare "layout=de" and shell-quoted XKBLAYOUT="de".
+static bool
+read_keyboard_file(const char* path, BString& layout, BString& variant,
+	BString& options)
+{
+	BFile file(path, B_READ_ONLY);
+	off_t size;
+	if (file.InitCheck() != B_OK || file.GetSize(&size) != B_OK || size <= 0)
+		return false;
+
+	if (size > 8192)
+		size = 8192;
+	BString contents;
+	char* buffer = contents.LockBuffer(size + 1);
+	if (buffer == NULL)
+		return false;
+	ssize_t read = file.Read(buffer, size);
+	buffer[read > 0 ? read : 0] = '\0';
+	contents.UnlockBuffer();
+
+	int32 offset = 0;
+	while (offset < contents.Length()) {
+		int32 end = contents.FindFirst('\n', offset);
+		if (end < 0)
+			end = contents.Length();
+
+		BString line;
+		contents.CopyInto(line, offset, end - offset);
+		offset = end + 1;
+
+		int32 equals = line.FindFirst('=');
+		if (equals < 0)
+			continue;
+
+		BString key;
+		BString value;
+		line.CopyInto(key, 0, equals);
+		line.CopyInto(value, equals + 1, line.Length() - equals - 1);
+		key.Trim();
+		value.Trim();
+		value.RemoveAll("\"");
+
+		if (key == "layout" || key == "XKBLAYOUT")
+			layout = value;
+		else if (key == "variant" || key == "XKBVARIANT")
+			variant = value;
+		else if (key == "options" || key == "XKBOPTIONS")
+			options = value;
+	}
+
+	return layout.Length() > 0;
+}
+
+
+// Written by FirstBootPrompt; keep the two in step.
+static const char* kFirstBootHandoffPath = "/run/vos/firstboot.conf";
+
+
+static BString
+first_boot_language()
+{
+	BFile file(kFirstBootHandoffPath, B_READ_ONLY);
+	char buffer[256];
+	ssize_t read = file.InitCheck() == B_OK
+		? file.Read(buffer, sizeof(buffer) - 1) : -1;
+	if (read <= 0)
+		return BString();
+
+	buffer[read] = '\0';
+	BString contents(buffer);
+	int32 start = contents.FindFirst("language=");
+	if (start < 0)
+		return BString();
+
+	start += strlen("language=");
+	int32 end = contents.FindFirst('\n', start);
+	if (end < 0)
+		end = contents.Length();
+
+	BString language;
+	contents.CopyInto(language, start, end - start);
+	language.Trim();
+	return language;
+}
+
+
+// Resolved the same way the keyboard add-on does: input/layout, then the
+// xkb_layout cache, then /etc/default/keyboard.
+static bool
+current_keyboard_layout(BString& layout, BString& variant, BString& options)
+{
+	BPath path;
+	if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
+		BPath namePath(path);
+		namePath.Append("input/layout");
+
+		char name[B_FILE_NAME_LENGTH + 1];
+		BFile file(namePath.Path(), B_READ_ONLY);
+		ssize_t read = file.InitCheck() == B_OK
+			? file.Read(name, sizeof(name) - 1) : -1;
+		if (read > 0) {
+			name[read] = '\0';
+			BString keymapName(name);
+			keymapName.Trim();
+			if (keymapName.Length() > 0) {
+				const char* xkbLayout;
+				const char* xkbVariant;
+				look_up_xkb_layout(keymapName.String(), xkbLayout, xkbVariant);
+				layout = xkbLayout;
+				variant = xkbVariant;
+				// Derived from the running key_map, so the installed
+				// system inherits the arrangement actually in force.
+				options = current_xkb_options();
+				return true;
+			}
+		}
+
+		BPath cachePath(path);
+		cachePath.Append("input/xkb_layout");
+		if (read_keyboard_file(cachePath.Path(), layout, variant, options))
+			return true;
+	}
+
+	return read_keyboard_file("/etc/default/keyboard", layout, variant,
+		options);
+}
+
+
+BString
+InstallerWindow::_ComposeSetupConf()
+{
+	BString conf;
+	const char* full = fFullNameField->Text();
+	const char* host = fHostnameField->Text();
+	const char* user = fUserField->Text();
+
+	BString language = first_boot_language();
+	if (language.Length() > 0)
+		conf << "language=" << language << "\n";
+
+	BString layout;
+	BString variant;
+	BString options;
+	if (current_keyboard_layout(layout, variant, options)) {
+		conf << "keymap="         << layout  << "\n";
+		conf << "keymap_variant=" << variant << "\n";
+		conf << "keymap_options=" << options << "\n";
+	}
+
+	conf << "username="  << user << "\n";
+	conf << "hostname="  << host << "\n";
+	if (full != NULL && *full != '\0')
+		conf << "full_name=" << full << "\n";
+	conf << "sudo_enabled=" <<
+		(fSudoCheck->Value() == B_CONTROL_ON ? "1" : "0") << "\n";
+	conf << "autologin=" <<
+		(fAutologinCheck->Value() == B_CONTROL_ON ? "1" : "0") << "\n";
+
+	conf << "password=" << fPasswordField->Text() << "\n";
+	if (fAdvancedCheck->Value() == B_CONTROL_ON)
+		conf << "root_password=" << fRootPasswordField->Text() << "\n";
+	return conf;
+}
+
+
+void
+InstallerWindow::_SetCopyEngineCancelSemaphore(sem_id id, bool alreadyLocked)
+{
+	if (fCopyEngineCancelSemaphore >= 0 && !alreadyLocked)
+		delete_sem(fCopyEngineCancelSemaphore);
+	fCopyEngineCancelSemaphore = id;
+}
+
+
+void
+InstallerWindow::_QuitCopyEngine(bool /*askUser*/)
+{
+	if (fWorkerThread != NULL)
+		fWorkerThread->Cancel();
 }
 
 
@@ -680,9 +1011,8 @@ void
 InstallerWindow::_LaunchDriveSetup()
 {
 	if (be_roster->Launch(kDriveSetupSignature) != B_OK) {
-		// Try really hard to launch it. It's very likely that this fails,
-		// when we run from the CD and there is only an incomplete mime
-		// database for example...
+		// The mime database can be incomplete on live media; fall back
+		// to the known install path like the legacy installer did.
 		BPath path;
 		if (find_directory(B_SYSTEM_APPS_DIRECTORY, &path) != B_OK
 			|| path.Append("DriveSetup") != B_OK) {
@@ -691,310 +1021,199 @@ InstallerWindow::_LaunchDriveSetup()
 		BEntry entry(path.Path());
 		entry_ref ref;
 		if (entry.GetRef(&ref) != B_OK || be_roster->Launch(&ref) != B_OK) {
-			BAlert* alert = new BAlert("error", B_TRANSLATE("DriveSetup, the "
-				"application to configure disk partitions, could not be "
-				"launched."), B_TRANSLATE("OK"));
-			alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
+			BAlert* alert = new BAlert(B_TRANSLATE("DriveSetup"),
+				B_TRANSLATE("DriveSetup, the application to configure "
+					"disk partitions, could not be launched."),
+				B_TRANSLATE("OK"), NULL, NULL, B_WIDTH_AS_USUAL,
+				B_STOP_ALERT);
 			alert->Go();
-		}
-	}
-}
-
-
-void
-InstallerWindow::_LaunchBootManager()
-{
-	// TODO: Currently BootManager always tries to install to the "first"
-	// harddisk. If/when it later supports being installed to a certain
-	// harddisk, we would have to pass it the disk that contains the target
-	// partition here.
-	if (be_roster->Launch(kBootManagerSignature) != B_OK) {
-		// Try really hard to launch it. It's very likely that this fails,
-		// when we run from the CD and there is only an incomplete mime
-		// database for example...
-		BPath path;
-		if (find_directory(B_SYSTEM_APPS_DIRECTORY, &path) != B_OK
-			|| path.Append("BootManager") != B_OK) {
-			path.SetTo("/boot/system/apps/BootManager");
-		}
-		BEntry entry(path.Path());
-		entry_ref ref;
-		if (entry.GetRef(&ref) != B_OK || be_roster->Launch(&ref) != B_OK) {
-			BAlert* alert = new BAlert(
-				B_TRANSLATE("Failed to launch BootManager"),
-				B_TRANSLATE("BootManager, the application to configure the "
-					"Haiku boot menu, could not be launched."),
-				B_TRANSLATE("OK"), NULL, NULL, B_WIDTH_AS_USUAL, B_STOP_ALERT);
-			alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
-			alert->Go();
-		}
-	}
-}
-
-
-void
-InstallerWindow::_DisableInterface(bool disable)
-{
-	fLaunchDriveSetupButton->SetEnabled(!disable);
-	fLaunchBootManagerItem->SetEnabled(!disable);
-	fMakeBootableItem->SetEnabled(!disable);
-	fSrcMenuField->SetEnabled(!disable);
-	fDestMenuField->SetEnabled(!disable);
-}
-
-
-void
-InstallerWindow::_ScanPartitions()
-{
-	_SetStatusMessage(B_TRANSLATE("Scanning for disks" B_UTF8_ELLIPSIS));
-
-	BMenuItem *item;
-	while ((item = fSrcMenu->RemoveItem((int32)0)))
-		delete item;
-	while ((item = fDestMenu->RemoveItem((int32)0)))
-		delete item;
-	while ((item = fEFILoaderMenu->RemoveItem((int32)0)))
-		delete item;
-
-	fWorkerThread->ScanDisksPartitions(fSrcMenu, fDestMenu, fEFILoaderMenu);
-
-	if (fSrcMenu->ItemAt(0) != NULL)
-		_PublishPackages();
-
-	if (fEFILoaderMenu->ItemAt(0) == NULL) {
-		BMenuItem* noPart = new BMenuItem(B_TRANSLATE("No valid EFI system data partitions found"),
-			NULL);
-		noPart->SetEnabled(false);
-		fEFILoaderMenu->AddItem(noPart);
-	}
-
-	// If the install is already finished, keep the button as is.
-	if (fInstallStatus != kFinished)
-		_UpdateControls();
-	else
-		PostMessage(MSG_INSTALL_FINISHED);
-}
-
-
-void
-InstallerWindow::_UpdateControls()
-{
-	PartitionMenuItem* srcItem = (PartitionMenuItem*)fSrcMenu->FindMarked();
-	BString label;
-	if (srcItem) {
-		label = srcItem->MenuLabel();
-	} else {
-		if (fSrcMenu->CountItems() == 0)
-			label = B_TRANSLATE_COMMENT("<none>", "No partition available");
-		else
-			label = ((PartitionMenuItem*)fSrcMenu->ItemAt(0))->MenuLabel();
-	}
-	fSrcMenuField->MenuItem()->SetLabel(label.String());
-
-	// Disable any unsuitable target items, check if at least one partition
-	// is suitable.
-	bool foundOneSuitableTarget = false;
-	for (int32 i = fDestMenu->CountItems() - 1; i >= 0; i--) {
-		PartitionMenuItem* dstItem
-			= (PartitionMenuItem*)fDestMenu->ItemAt(i);
-		if (srcItem != NULL && dstItem->ID() == srcItem->ID()) {
-			// Prevent the user from having picked the same partition as source
-			// and destination.
-			dstItem->SetEnabled(false);
-			dstItem->SetMarked(false);
-		} else
-			dstItem->SetEnabled(dstItem->IsValidTarget());
-
-		if (dstItem->IsEnabled())
-			foundOneSuitableTarget = true;
-	}
-
-	PartitionMenuItem* dstItem = (PartitionMenuItem*)fDestMenu->FindMarked();
-	if (dstItem) {
-		label = dstItem->MenuLabel();
-	} else {
-		if (fDestMenu->CountItems() == 0)
-			label = B_TRANSLATE_COMMENT("<none>", "No partition available");
-		else
-			label = B_TRANSLATE("Please choose target");
-	}
-	fDestMenuField->MenuItem()->SetLabel(label.String());
-
-	BString statusText;
-	if (srcItem != NULL && dstItem != NULL) {
-		statusText.SetToFormat(B_TRANSLATE("Press the 'Begin' button to install "
-			"from '%1s' onto '%2s'."), srcItem->Name(), dstItem->Name());
-	} else if (srcItem != NULL) {
-		BString partitionRequiredHaiku = B_TRANSLATE(
-			"Haiku has to be installed on a partition that uses "
-			"the Be File System, but there are currently no such "
-			"partitions available on your system.");
-
-		BString partitionRequiredDebranded = B_TRANSLATE(
-			"This operating system has to be installed on a partition "
-			"that uses the Be File System, but there are currently "
-			"no such partitions available on your system.");
-
-		if (!foundOneSuitableTarget) {
-#ifdef HAIKU_DISTRO_COMPATIBILITY_OFFICIAL
-			statusText.Append(partitionRequiredHaiku);
-#else
-			statusText.Append(partitionRequiredDebranded);
-#endif
-			statusText.Append(" ");
-			statusText.Append(B_TRANSLATE(
-				"Click on 'Set up partitions" B_UTF8_ELLIPSIS
-				"' to create one."));
-		} else {
-			statusText = B_TRANSLATE(
-				"Choose the disk you want to install "
-				"onto from the pop-up menu. Then click 'Begin'.");
-		}
-	} else if (dstItem != NULL) {
-		statusText = B_TRANSLATE("Choose the source disk from the "
-			"pop-up menu. Then click 'Begin'.");
-	} else {
-		statusText = B_TRANSLATE("Choose the source and destination disk "
-			"from the pop-up menus. Then click 'Begin'.");
-	}
-
-	_SetStatusMessage(statusText.String());
-
-	fInstallStatus = kReadyForInstall;
-	fBeginButton->SetLabel(B_TRANSLATE("Begin"));
-	fBeginButton->SetEnabled(srcItem && dstItem);
-
-	// adjust "Write Boot Sector" and "Set up boot menu" buttons
-	if (dstItem != NULL) {
-		char buffer[256];
-		snprintf(buffer, sizeof(buffer), B_TRANSLATE("Write boot sector to '%s'"),
-			dstItem->Name());
-		label = buffer;
-	} else
-		label = B_TRANSLATE("Write boot sector");
-	fMakeBootableItem->SetEnabled(dstItem != NULL);
-	fMakeBootableItem->SetLabel(label.String());
-// TODO: Once bootman support writing to specific disks, enable this, since
-// we would pass it the disk which contains the target partition.
-//	fLaunchBootManagerItem->SetEnabled(dstItem != NULL);
-
-	if (!fEncouragedToSetupPartitions && !foundOneSuitableTarget) {
-		// Focus the users attention on the DriveSetup button
-		fEncouragedToSetupPartitions = true;
-		PostMessage(ENCOURAGE_DRIVESETUP);
-	}
-}
-
-
-void
-InstallerWindow::_PublishPackages()
-{
-	fPackagesView->Clean();
-	PartitionMenuItem *item = (PartitionMenuItem *)fSrcMenu->FindMarked();
-	if (item == NULL)
-		return;
-
-	BPath directory;
-	BDiskDeviceRoster roster;
-	BDiskDevice device;
-	BPartition *partition;
-	if (roster.GetPartitionWithID(item->ID(), &device, &partition) == B_OK) {
-		if (partition->GetMountPoint(&directory) != B_OK)
 			return;
-	} else if (roster.GetDeviceWithID(item->ID(), &device) == B_OK) {
-		if (device.GetMountPoint(&directory) != B_OK)
-			return;
-	} else
-		return; // shouldn't happen
-
-	directory.Append(kPackagesDirectoryPath);
-	BDirectory dir(directory.Path());
-	if (dir.InitCheck() != B_OK)
-		return;
-
-	BEntry packageEntry;
-	BList packages;
-	while (dir.GetNextEntry(&packageEntry) == B_OK) {
-		Package* package = Package::PackageFromEntry(packageEntry);
-		if (package != NULL)
-			packages.AddItem(package);
+		}
 	}
-	packages.SortItems(_ComparePackages);
-
-	fPackagesView->AddPackages(packages, new BMessage(PACKAGE_CHECKBOX));
-	PostMessage(PACKAGE_CHECKBOX);
+	fLaunchDriveSetupButton->SetEnabled(false);
 }
 
 
 void
-InstallerWindow::_SetStatusMessage(const char *text)
+InstallerWindow::_ClearPlan()
 {
-	fStatusView->SetText(text);
-	fStatusView->InvalidateLayout();
-		// In case the status message makes the text view higher than the
-		// logo, then we need to resize te whole window to fit it.
+	fPlanText.Truncate(0);
+	_ScanPartitions();
 }
 
 
 void
-InstallerWindow::_SetCopyEngineCancelSemaphore(sem_id id, bool alreadyLocked)
+InstallerWindow::_RebuildBootloaderMenu()
 {
-	if (fCopyEngineCancelSemaphore >= 0) {
-		if (!alreadyLocked)
-			acquire_sem(fCopyEngineCancelSemaphore);
-		delete_sem(fCopyEngineCancelSemaphore);
+	BMenuItem* item;
+	while ((item = fBootloaderChoiceMenu->RemoveItem((int32)0)) != NULL)
+		delete item;
+
+	bool uefi = access("/sys/firmware/efi", F_OK) == 0;
+	if (uefi) {
+		BDiskDeviceRoster roster;
+		roster.RewindDevices();
+		BDiskDevice device;
+		while (roster.GetNextDevice(&device) == B_OK) {
+			BootloaderEspVisitor visitor(fBootloaderChoiceMenu);
+			device.VisitEachDescendant(&visitor);
+		}
+	} else {
+		BMessage* message = new BMessage(kMsgBootChoice);
+		message->AddString("choice", "bios:disk");
+		fBootloaderChoiceMenu->AddItem(new BMenuItem(
+			B_TRANSLATE("Master boot record of the target disk"), message));
 	}
-	fCopyEngineCancelSemaphore = id;
+
+	BMessage* noneMessage = new BMessage(kMsgBootChoice);
+	noneMessage->AddString("choice", "none");
+	fBootloaderChoiceMenu->AddItem(new BMenuItem(
+		B_TRANSLATE("None (the system will not boot)"), noneMessage));
+
+	int32 count = fBootloaderChoiceMenu->CountItems();
+	int32 mark = 0;
+	for (int32 i = 0; i < count; i++) {
+		BMenuItem* menuItem = fBootloaderChoiceMenu->ItemAt(i);
+		const char* choice = NULL;
+		if (menuItem->Message() != NULL
+			&& menuItem->Message()->FindString("choice", &choice) == B_OK
+			&& fBootloaderChoice == choice) {
+			mark = i;
+			break;
+		}
+	}
+	if (mark < count) {
+		fBootloaderChoiceMenu->ItemAt(mark)->SetMarked(true);
+		BMenuItem* marked = fBootloaderChoiceMenu->FindMarked();
+		const char* choice = NULL;
+		if (marked != NULL && marked->Message() != NULL
+			&& marked->Message()->FindString("choice", &choice) == B_OK) {
+			fBootloaderChoice = choice;
+		}
+	}
+	if (fBootloaderChoice.IsEmpty())
+		fBootloaderChoice = uefi ? "none" : "bios:disk";
 }
 
 
 void
-InstallerWindow::_QuitCopyEngine(bool askUser)
+InstallerWindow::_ReadBootloaderChoice()
 {
-	if (fCopyEngineCancelSemaphore < 0)
-		return;
+	BMenuItem* marked = fBootloaderChoiceMenu->FindMarked();
+	const char* choice = NULL;
+	if (marked != NULL && marked->Message() != NULL
+		&& marked->Message()->FindString("choice", &choice) == B_OK) {
+		fBootloaderChoice = choice;
+	}
+}
 
-	// First of all block the copy engine, so that it doesn't continue
-	// while the alert is showing, which would be irritating.
-	acquire_sem(fCopyEngineCancelSemaphore);
 
-	bool quit = true;
-	if (askUser) {
-		BAlert* alert = new BAlert("cancel",
-			B_TRANSLATE("Are you sure you want to to stop the installation?"),
-			B_TRANSLATE_COMMENT("Continue", "In alert after pressing Stop"),
-			B_TRANSLATE_COMMENT("Stop", "In alert after pressing Stop"), 0,
-			B_WIDTH_AS_USUAL, B_STOP_ALERT);
-		alert->SetShortcut(1, B_ESCAPE);
-		quit = alert->Go() != 0;
+// The single confirmation lists every change; nothing is written until
+// the user accepts this summary.
+BString
+InstallerWindow::_ComposeSummary(const char* targetLabel, bool inPlace)
+{
+	BString summary;
+	if (inPlace) {
+		summary = B_TRANSLATE("Set up this system with the account "
+			"details above? The live persona will be removed and the "
+			"machine will reboot into normal login.");
+		return summary;
 	}
 
-	if (quit) {
-		// Make it quit by having it's lock fail...
-		_SetCopyEngineCancelSemaphore(-1, true);
-	} else
-		release_sem(fCopyEngineCancelSemaphore);
+	summary = B_TRANSLATE("Nothing is written until you confirm. "
+		"Afterwards, in order:");
+	summary << "\n\n";
+
+	if (!fPlanText.IsEmpty()) {
+		BString kind, id, ref, fs, gtype, role, size, start;
+		int32 offset = 0;
+		while (offset < fPlanText.Length()) {
+			int32 end = fPlanText.FindFirst('\n', offset);
+			if (end < 0)
+				end = fPlanText.Length();
+			BString line;
+			fPlanText.CopyInto(line, offset, end - offset);
+			offset = end + 1;
+			line.Trim();
+
+			if (line == "[op]") {
+				kind.Truncate(0); id.Truncate(0); ref.Truncate(0);
+				fs.Truncate(0); gtype.Truncate(0); role.Truncate(0);
+				size.Truncate(0); start.Truncate(0);
+				continue;
+			}
+			if (!line.StartsWith("[") && line.FindFirst('=') > 0) {
+				int32 equals = line.FindFirst('=');
+				BString key, value;
+				line.CopyInto(key, 0, equals);
+				line.CopyInto(value, equals + 1,
+					line.Length() - equals - 1);
+				if (key == "kind") kind = value;
+				else if (key == "id") id = value;
+				else if (key == "target_ref") ref = value;
+				else if (key == "filesystem") fs = value;
+				else if (key == "gpt_type") gtype = value;
+				else if (key == "role") role = value;
+				else if (key == "size_mib") size = value;
+				else if (key == "start_mib") start = value;
+				continue;
+			}
+			if (kind.IsEmpty())
+				continue;
+			summary << "- ";
+			if (kind == "create_table") {
+				summary << B_TRANSLATE("Create a new partition table")
+					<< " (" << gtype << ")";
+			} else if (kind == "create") {
+				summary << B_TRANSLATE("Create partition") << " "
+					<< id;
+				if (size != "-1")
+					summary << " (" << size << " MiB, "
+						<< B_TRANSLATE("at") << " " << start
+						<< " MiB, " << gtype << ")";
+				else
+					summary << " (" << B_TRANSLATE("rest of disk")
+						<< ", " << gtype << ")";
+				if (!role.IsEmpty() && role != "none")
+					summary << ", " << role;
+			} else if (kind == "format") {
+				summary << B_TRANSLATE("Format") << " " << ref
+					<< " " << B_TRANSLATE("as") << " " << fs;
+				if (!role.IsEmpty() && role != "none")
+					summary << " (" << role << ")";
+			} else if (kind == "delete") {
+				summary << B_TRANSLATE("Delete") << " " << ref;
+			} else if (kind == "set_flags") {
+				summary << B_TRANSLATE("Set boot flags on") << " "
+					<< ref;
+			} else {
+				summary << kind << " " << ref;
+			}
+			summary << "\n";
+			kind.Truncate(0);
+		}
+		summary << "\n";
+	}
+
+	summary << "- " << B_TRANSLATE("Copy the running system to:")
+		<< " " << targetLabel << "\n";
+	summary << "- " << B_TRANSLATE("Create the user account; write "
+		"fstab, hostname, locale and initramfs") << "\n";
+
+	if (fBootloaderChoice.StartsWith("esp:")) {
+		summary << "- " << B_TRANSLATE("Install the UEFI bootloader to "
+			"the chosen ESP. Files go under \\EFI\\Vitruvian; "
+			"existing boot entries are kept.") << "\n";
+	} else if (fBootloaderChoice == "bios:disk") {
+		summary << "- " << B_TRANSLATE("Install the BIOS bootloader "
+			"(GRUB) to the master boot record of the target disk.")
+			<< "\n";
+	} else {
+		summary << "- " << B_TRANSLATE("No bootloader. The installed "
+			"system will not boot until you install one.") << "\n";
+	}
+
+	summary << "\n" << B_TRANSLATE("This cannot be undone. Continue?");
+	return summary;
 }
-
-
-// #pragma mark -
-
-
-int
-InstallerWindow::_ComparePackages(const void* firstArg, const void* secondArg)
-{
-	const Group* group1 = *static_cast<const Group* const *>(firstArg);
-	const Group* group2 = *static_cast<const Group* const *>(secondArg);
-	const Package* package1 = dynamic_cast<const Package*>(group1);
-	const Package* package2 = dynamic_cast<const Package*>(group2);
-	int sameGroup = strcmp(group1->GroupName(), group2->GroupName());
-	if (sameGroup != 0)
-		return sameGroup;
-	if (package2 == NULL)
-		return -1;
-	if (package1 == NULL)
-		return 1;
-	return strcmp(package1->Name(), package2->Name());
-}
-
-
