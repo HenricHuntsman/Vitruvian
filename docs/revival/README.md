@@ -23,3 +23,7 @@ The base profile selects desktop components, Terminal and system services. mkiso
 5. Qualify installation, updates and hardware separately before a release candidate.
 
 The image script uses mounts, chroot and package installation. Use an isolated build VM. Debug configuration includes password-based root SSH; review image defaults before distributing artifacts. Existing build paths and submodule locations were preserved by this documentation cleanup.
+
+## Upstream comparison
+
+Compared upstream master 606e0333580c7170037f97b74e0c51ca35803dc2 with fork master 4a9e675ae13c5075da3b46e1b5618e9130ac8b24: **876 commits behind, one ahead**. The ahead commit is this review's documentation cleanup; the comparison lists only README.md and docs/revival/README.md as fork-side changes. This establishes no separate Henric OS implementation in that branch comparison. Preserve the review documents when preparing an upstream synchronisation. The 876-commit update has not been merged or build-tested.
