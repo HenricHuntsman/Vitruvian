@@ -55,3 +55,7 @@ If you'd like to support the project, see the [Donate](https://wiki.v-os.dev/doc
 ### License
 
 VitruvianOS is released under a hybrid [GPL](https://www.gnu.org/licenses/gpl-3.0.html) / [MIT](https://opensource.org/licenses/MIT) license scheme.
+
+## Folder organisation and recovery
+
+See the [fork revival review](docs/revival/README.md) for preserved material, verified limits and the next milestone.
