@@ -35,7 +35,10 @@ jobs:
               raise SystemExit("Expected exactly one raw image")
           out = pathlib.Path("evidence")
           log = open(out / "qemu.log", "wb")
-          cmd = ["qemu-system-x86_64", "-accel", "tcg", "-bios", "/usr/share/OVMF/OVMF_CODE_4M.fd", "-m", "2048",
+          import shutil
+          shutil.copy("/usr/share/OVMF/OVMF_VARS_4M.fd", "/tmp/vitruvian-vars.fd")
+          cmd = ["qemu-system-x86_64", "-accel", "tcg", "-machine", "q35", "-drive", "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
+                 "-drive", "if=pflash,format=raw,file=/tmp/vitruvian-vars.fd", "-m", "2048",
                  "-smp", "2", "-drive", "file=" + images[0] + ",format=raw,if=ide",
                  "-snapshot", "-nic", "none", "-display", "none", "-vga", "std",
                  "-monitor", "unix:/tmp/vitruvian-monitor,server=on,wait=off",
