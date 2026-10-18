@@ -1,0 +1,79 @@
+name: VM boot evidence
+on:
+  push:
+    branches: [sync/upstream-20261018-606e033]
+    paths: [.github/workflows/vm-boot-evidence.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  boot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Install VM tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 zstd
+      - name: Download pinned candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir -p image evidence
+          gh run download 39080372001 -n Vitruvian-RAW -D image
+          cd image
+          sha256sum -c -- *.sha256 | tee ../evidence/checksums.txt
+          zstd -d -- *.raw.zst
+      - name: Boot isolated snapshot and capture displays
+        shell: python
+        run: |
+          import glob, json, pathlib, socket, subprocess, time
+          images = glob.glob("image/**/*.raw", recursive=True)
+          if len(images) != 1:
+              raise SystemExit("Expected exactly one raw image")
+          out = pathlib.Path("evidence")
+          log = open(out / "qemu.log", "wb")
+          cmd = ["qemu-system-x86_64", "-accel", "tcg", "-m", "2048",
+                 "-smp", "2", "-drive", "file=" + images[0] + ",format=raw,if=ide",
+                 "-snapshot", "-nic", "none", "-display", "none", "-vga", "std",
+                 "-monitor", "unix:/tmp/vitruvian-monitor,server=on,wait=off",
+                 "-serial", "file:evidence/serial.log", "-no-reboot"]
+          (out / "command.json").write_text(json.dumps(cmd, indent=2))
+          proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+          try:
+              for _ in range(100):
+                  if pathlib.Path("/tmp/vitruvian-monitor").exists(): break
+                  if proc.poll() is not None: raise RuntimeError("QEMU exited before monitor startup")
+                  time.sleep(.1)
+              with socket.socket(socket.AF_UNIX) as monitor:
+                  monitor.settimeout(5)
+                  monitor.connect("/tmp/vitruvian-monitor")
+                  monitor.recv(4096)
+                  for seconds in (30, 60, 90):
+                      time.sleep(30)
+                      if proc.poll() is not None: raise RuntimeError("QEMU exited during boot")
+                      target = str((out / ("boot-" + str(seconds) + "s.ppm")).resolve())
+                      monitor.sendall(("screendump " + target + "\n").encode())
+                      reply = monitor.recv(8192)
+                      (out / ("monitor-" + str(seconds) + ".txt")).write_bytes(reply)
+                  monitor.sendall(b"info status\n")
+                  (out / "vm-status.txt").write_bytes(monitor.recv(8192))
+              (out / "RESULT.txt").write_text(
+                  "Evidence captured from pinned run 39080372001, source c9a4d518991a7c2ee19b1c69ebc6ec76bf879484.\n"
+                  "Screenshots require human review. This does not certify desktop, installation, input or shutdown.\n")
+          finally:
+              proc.terminate()
+              try: proc.wait(timeout=10)
+              except subprocess.TimeoutExpired:
+                  proc.kill()
+                  proc.wait()
+              log.close()
+      - name: Upload boot evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitruvian-amd64-boot-evidence
+          path: evidence/
+          if-no-files-found: error
