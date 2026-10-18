@@ -202,6 +202,8 @@ _IMPEXP_TRACKER status_t FSCreateNewFolderIn(const node_ref* destDir,
 	entry_ref* newRef, node_ref* new_node);
 _IMPEXP_TRACKER void FSCreateTrashDirs();
 _IMPEXP_TRACKER status_t FSGetTrashDir(BDirectory* trashDir, dev_t volume);
+bool FSRecordTrashDir(BObjectList<node_ref, true>* seen,
+	const BDirectory* trashDir);
 _IMPEXP_TRACKER status_t FSGetDeskDir(BDirectory* deskDir);
 _IMPEXP_TRACKER status_t FSRecursiveCalcSize(BInfoWindow*,
 	CopyLoopControl* loopControl, BDirectory*, off_t* runningSize,
@@ -215,7 +217,10 @@ bool FSInTrashDir(const entry_ref*);
 // doesn't need to be exported
 bool FSGetPoseLocation(const BNode* node, BPoint* point);
 status_t FSSetPoseLocation(BEntry* entry, BPoint point);
-status_t FSSetPoseLocation(ino_t destDirInode, BNode* destNode, BPoint point);
+// destDirPath: resolved absolute path for the reboot-stable kAttrPoseInfoDir
+// check. NULL falls back to the legacy vnode identity check for this node.
+status_t FSSetPoseLocation(ino_t destDirInode, BNode* destNode, BPoint point,
+	const char* destDirPath = NULL);
 status_t FSGetBootDeskDir(BDirectory* deskDir);
 
 status_t FSGetOriginalPath(BEntry* entry, BPath* path);

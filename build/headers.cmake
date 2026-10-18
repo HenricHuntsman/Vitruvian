@@ -14,6 +14,7 @@ set(
 	"headers/os/add-ons/file_system"
 	"headers/os/add-ons/graphics"
 	"headers/os/add-ons/registrar"
+	"headers/os/add-ons/network_settings"
 	"headers/os/app"
 	"headers/os/arch/x86_64"
 	"headers/os/device"
@@ -30,6 +31,14 @@ set(
 	"headers/os/posix/compat/sys"
 
 	"headers/os/add-ons/input_server"
+	"headers/os/add-ons/tracker"
+
+	"headers/os/opengl"
+
+	"headers/os/media2"
+
+	"headers/os/experimental"
+	"headers/os/experimental/package"
 
 	"headers/posix"
 )
@@ -39,6 +48,7 @@ set(
 
 	"headers/private/"
 
+	"headers/private/opengl"
 	"headers/private/input"
 	"headers/private/shared"
 	"headers/private/storage"

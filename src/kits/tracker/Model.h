@@ -30,6 +30,8 @@ Tracker(TM), Be(R), BeOS(R), and BeIA(TM) are trademarks or registered trademark
 of Be Incorporated in the United States and other countries. Other brand product
 names are registered trademarks or trademarks of their respective holders.
 All rights reserved.
+
+Copyright 2026, Dario Casalinuovo. All rights reserved.
 */
 
 //	Dedicated to BModel
@@ -138,6 +140,9 @@ public:
 	bool IsSymLink() const;
 	bool InRoot() const;
 	bool IsRoot() const;
+#ifdef __VOS__
+	void OverrideAsDisksRoot();
+#endif
 	bool InTrash() const;
 	bool IsTrash() const;
 	bool IsVolume() const;
@@ -250,6 +255,7 @@ private:
 
 	entry_ref fEntryRef;
 	StatStruct fStatBuf;
+	node_ref fNodeRef;
 	BString fMimeType;
 		// should use string that may be shared for common types
 
@@ -340,8 +346,7 @@ Model::EntryRef() const
 inline const node_ref*
 Model::NodeRef() const
 {
-	// the stat structure begins with a node_ref
-	return (node_ref*)&fStatBuf;
+	return &fNodeRef;
 }
 
 
@@ -462,6 +467,20 @@ Model::IsRoot() const
 {
 	return fBaseType == kRootNode;
 }
+
+
+#ifdef __VOS__
+inline void
+Model::OverrideAsDisksRoot()
+{
+	fBaseType = kRootNode;
+	fIconFrom = kUnknownSource;	// force icon re-lookup so Disks icon is used
+	if (fVolumeName != NULL) {
+		free(fVolumeName);
+		fVolumeName = NULL;
+	}
+}
+#endif
 
 
 inline bool

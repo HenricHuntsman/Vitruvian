@@ -1,5 +1,6 @@
-Application(
-	WonderbrushTranslator
+
+TranslatorAddOn(
+	WonderbrushTranslator SHARED
 
 	SOURCES
 	support/bitmap_compression.cpp
@@ -21,3 +22,4 @@ Application(
 	RDEF WonderBrushTranslator.rdef
 )
 
+DoCatalogs("x-vnd.Haiku-WonderBrushTranslator" add-ons/translators/wonderbrush)

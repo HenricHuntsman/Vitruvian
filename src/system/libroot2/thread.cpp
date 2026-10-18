@@ -6,10 +6,19 @@
 #include <OS.h>
 
 #include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sched.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
 
 #include <syscalls.h>
 
@@ -26,12 +35,32 @@ static __thread pthread_key_t sOnExitKey;
 
 
 struct thread_data {
-	const char* name;
-	thread_id father;
+	char name[B_OS_NAME_LENGTH];
 
 	thread_func func;
 	void* data;
+
+	// Creator handshake: the child publishes its tid, the creator registers
+	// it with nexus before spawn_thread() returns, then releases the child.
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	thread_id tid;
+	status_t registered;	// 0 pending, 1 registered, < 0 failed
 };
+
+
+// comm holds 15 characters against B_OS_NAME_LENGTH's 32, and PR_SET_NAME
+// fails with ERANGE without setting anything, so truncate by hand.
+static void
+SetOsThreadName(const char* name)
+{
+	if (name == NULL)
+		return;
+
+	char buffer[16];
+	strlcpy(buffer, name, sizeof(buffer));
+	prctl(PR_SET_NAME, buffer, 0, 0, 0);
+}
 
 
 void* thread_run(void* data)
@@ -39,8 +68,24 @@ void* thread_run(void* data)
 	CALLED();
 
 	thread_data* threadData = (thread_data*)data;
-	// TODO do we need to pass father?
-	nexus_thread_spawn spawnInfo = { threadData->name, threadData->father };
+
+	pthread_mutex_lock(&threadData->lock);
+	threadData->tid = find_thread(NULL);
+	pthread_cond_signal(&threadData->cond);
+	while (threadData->registered == 0)
+		pthread_cond_wait(&threadData->cond, &threadData->lock);
+	status_t registered = threadData->registered;
+	pthread_mutex_unlock(&threadData->lock);
+
+	if (registered < 0) {
+		delete threadData;
+		pthread_detach(pthread_self());
+		return NULL;
+	}
+
+	// Already registered by the creator: this only parks us until
+	// resume_thread().
+	nexus_thread_spawn spawnInfo = { threadData->name };
 
 	int nexus = BKernelPrivate::Team::GetNexusDescriptor();
 	status_t ret = nexus_io(nexus, NEXUS_THREAD_SPAWN, &spawnInfo);
@@ -50,23 +95,132 @@ void* thread_run(void* data)
 		return EINVAL;
 	}
 
+	// nexus can't read the name back, so _get_thread_info() takes it from
+	// /proc/<tid>/comm.
+	SetOsThreadName(threadData->name);
+
 	pthread_detach(pthread_self());
 
 	status_t error = threadData->func(threadData->data);
 
 	delete threadData;
 
-	// TODO at the moment that's the best we can do
-	// but this will be replaced by nexus automatic thread cleanup
-	struct nexus_thread_exchange exchange;
-	memset(&exchange, 0, sizeof(exchange));
-	exchange.return_code = B_OK;
-	int err = nexus_io(nexus, NEXUS_THREAD_EXIT, &exchange);
-	if (err < 0) {
-		TRACE("thread_run: NEXUS_THREAD_EXIT failed\n");
-		return EINVAL;
-	}
+	nexus_io(nexus, NEXUS_THREAD_SET_RETURN_CODE, (void*)(intptr_t)error);
 	return NULL;
+}
+
+
+}
+
+
+namespace {
+// 0 means "not cached yet"; a real tid is never 0.
+__thread thread_id sCachedTid = 0;
+
+
+// utime/stime are /proc/<id>/stat fields 14/15; the strrchr(')') is needed
+// because a thread name can itself contain spaces and parentheses.
+void
+GetThreadCpuTimes(thread_id id, bigtime_t* userTime, bigtime_t* kernelTime)
+{
+	*userTime = 0;
+	*kernelTime = 0;
+
+	char path[64];
+	char buf[4096];
+	snprintf(path, sizeof(path), "/proc/%d/stat", (int)id);
+
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return;
+
+	ssize_t dataRead = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (dataRead <= 0)
+		return;
+
+	buf[dataRead] = '\0';
+
+	char* paren = strrchr(buf, ')');
+	if (paren == NULL)
+		return;
+
+	char* p = paren + 2;
+	unsigned long utime_ticks = 0, stime_ticks = 0;
+	int field = 3;
+	char* save = NULL;
+	char* token = strtok_r(p, " ", &save);
+
+	while (token) {
+		if (field == 14) {
+			utime_ticks = strtoul(token, NULL, 10);
+		} else if (field == 15) {
+			stime_ticks = strtoul(token, NULL, 10);
+			break;
+		}
+		field++;
+		token = strtok_r(NULL, " ", &save);
+	}
+
+	long hz = sysconf(_SC_CLK_TCK);
+	if (hz <= 0)
+		hz = 100;
+
+	*userTime = (bigtime_t)((utime_ticks * 1000000ULL) / (unsigned long)hz);
+	*kernelTime = (bigtime_t)((stime_ticks * 1000000ULL) / (unsigned long)hz);
+}
+
+
+// Inverts the mapping set_thread_priority() applies. Anything unreadable or
+// outside the known ranges falls back to 10 rather than guess.
+int32
+GetThreadPriority(thread_id id)
+{
+	int policy = sched_getscheduler((pid_t)id);
+	if (policy < 0)
+		return 10;
+
+	if (policy == SCHED_IDLE)
+		return 0;
+
+	if (policy == SCHED_RR || policy == SCHED_FIFO) {
+		struct sched_param param;
+		memset(&param, 0, sizeof(param));
+		if (sched_getparam((pid_t)id, &param) == 0
+			&& param.sched_priority >= 1 && param.sched_priority <= 90) {
+			// inverse of: sched_priority = 1 + (priority - 31)
+			return 31 + (param.sched_priority - 1);
+		}
+		return 10;
+	}
+
+	errno = 0;
+	int nice = getpriority(PRIO_PROCESS, (id_t)id);
+	if (nice == -1 && errno != 0)
+		return 10;
+
+	if (nice == 0)
+		return 10;
+	if (nice > 0 && nice <= 19)
+		// inverse of: nice = 19 - (priority - 1), priority in [1, 9]
+		return 20 - nice;
+	if (nice < 0 && nice >= -20)
+		// inverse of: nice = -1 - (priority - 11), priority in [11, 30]
+		return 10 - nice;
+
+	return 10;
+}
+
+}
+
+
+namespace BKernelPrivate {
+
+
+void
+ResetCachedThreadId()
+{
+	sCachedTid = 0;
 }
 
 
@@ -90,27 +244,48 @@ spawn_thread(thread_func func, const char* name, int32 priority, void* data)
 	if (threadData == NULL)
 		return B_NO_MEMORY;
 
-	threadData->name = name;
-	threadData->father = find_thread(NULL); 
-	threadData->func = func;	
+	if (name != NULL)
+		strlcpy(threadData->name, name, sizeof(threadData->name));
+	else
+		threadData->name[0] = '\0';
+	threadData->func = func;
 	threadData->data = data;
+	pthread_mutex_init(&threadData->lock, NULL);
+	pthread_cond_init(&threadData->cond, NULL);
+	threadData->tid = 0;
+	threadData->registered = 0;
 
 	pthread_t pThread;
 	int32 ret = pthread_create(&pThread, NULL,
 		BKernelPrivate::thread_run, threadData);
 	if (ret != 0) {
 		delete threadData;
-		return -errno;
+		return -ret;
 	}
 
+	// From here the child owns threadData; it only frees it after we
+	// release it below, and we don't touch it after that.
+	pthread_mutex_lock(&threadData->lock);
+	while (threadData->tid == 0)
+		pthread_cond_wait(&threadData->cond, &threadData->lock);
+	thread_id tid = threadData->tid;
+
 	int nexus = BKernelPrivate::Team::GetNexusDescriptor();
-	thread_id id = nexus_io(nexus, NEXUS_THREAD_WAIT_NEWBORN, NULL);
+	thread_id id = nexus_io(nexus, NEXUS_THREAD_REGISTER,
+		(void*)(intptr_t)tid);
+
+	threadData->registered = id >= 0 ? 1 : id;
+	pthread_cond_signal(&threadData->cond);
+	pthread_mutex_unlock(&threadData->lock);
+
 	if (id < 0)
 		return B_BAD_THREAD_ID;
-	return id;
+	return tid;
 }
 
 
+// Linux has no way to kill one thread: SIGKILL to a tid takes down its whole
+// thread group, so this kills the thread's team. Documented in OS.h.
 status_t
 kill_thread(thread_id thread)
 {
@@ -133,31 +308,28 @@ rename_thread(thread_id thread, const char* newName)
 	if (newName == NULL)
 		return B_BAD_VALUE;
 
-	struct nexus_thread_exchange exchange;
+	if (thread != find_thread(NULL))
+		return B_NOT_ALLOWED;
+
+	struct nexus_thread_set_name_req exchange;
 	memset(&exchange, 0, sizeof(exchange));
-	exchange.op = NEXUS_THREAD_SET_NAME;
-	exchange.buffer = newName;
-	exchange.receiver = thread;
+	exchange.name = newName;
+	exchange.size = strlen(newName) + 1;
 
 	int nexus = BKernelPrivate::Team::GetNexusDescriptor();
-	return nexus_io(nexus, NEXUS_THREAD_OP, &exchange);
+	if (nexus_io(nexus, NEXUS_THREAD_SET_NAME, &exchange) < 0)
+		return B_ERROR;
+
+	BKernelPrivate::SetOsThreadName(newName);
+	return B_OK;
 }
 
 
 void
 exit_thread(status_t status)
 {
-	struct nexus_thread_exchange exchange;
-	memset(&exchange, 0, sizeof(exchange));
-	exchange.return_code = status;
-
 	int nexus = BKernelPrivate::Team::GetNexusDescriptor();
-	status_t err = nexus_io(nexus, NEXUS_THREAD_EXIT, &exchange);
-	if (status < 0 || err != B_OK) {
-		pthread_exit((void*)(intptr_t) EINVAL);
-		return;
-	}
-
+	nexus_io(nexus, NEXUS_THREAD_SET_RETURN_CODE, (void*)(intptr_t)status);
 	return pthread_exit(NULL);
 }
 
@@ -186,16 +358,21 @@ send_data(thread_id thread, int32 code,
 	if (buffer == NULL || bufferSize == 0)
 		return B_BAD_VALUE;
 
-	struct nexus_thread_exchange exchange;
-	memset(&exchange, 0, sizeof(exchange));
-	exchange.op = NEXUS_THREAD_WRITE;
-	exchange.buffer = buffer;
-	exchange.size = bufferSize;
-	exchange.return_code = code;
-	exchange.receiver = thread;
-
 	int nexus = BKernelPrivate::Team::GetNexusDescriptor();
-	return nexus_io(nexus, NEXUS_THREAD_OP, &exchange);
+
+	// B_INTERRUPTED comes before anything was sent; only a kill ends
+	// Haiku's send_data().
+	struct nexus_thread_rw exchange;
+	do {
+		memset(&exchange, 0, sizeof(exchange));
+		exchange.buffer = buffer;
+		exchange.size = bufferSize;
+		exchange.return_code = code;
+		exchange.receiver = thread;
+		if (nexus_io(nexus, NEXUS_THREAD_WRITE, &exchange) != 0)
+			return B_BAD_VALUE;
+	} while (exchange.ret == B_INTERRUPTED);
+	return exchange.ret;
 }
 
 
@@ -207,22 +384,25 @@ receive_data(thread_id* sender, void* buffer, size_t bufferSize)
 	if (sender == NULL || buffer == NULL || bufferSize == 0)
 		return B_BAD_VALUE;
 
-	struct nexus_thread_exchange exchange;
-	memset(&exchange, 0, sizeof(exchange));
-	exchange.op = NEXUS_THREAD_READ;
-	exchange.buffer = buffer;
-	exchange.size = bufferSize;
-
-	// TODO B_INTERRUPTED
 	int nexus = BKernelPrivate::Team::GetNexusDescriptor();
-	status_t ret = nexus_io(nexus, NEXUS_THREAD_OP, &exchange);
-	if (ret != B_OK)
-		return ret;
+
+	// B_INTERRUPTED comes before any data arrived; only a kill ends
+	// Haiku's receive_data().
+	struct nexus_thread_rw exchange;
+	do {
+		memset(&exchange, 0, sizeof(exchange));
+		exchange.buffer = buffer;
+		exchange.size = bufferSize;
+		if (nexus_io(nexus, NEXUS_THREAD_READ, &exchange) != 0)
+			return B_BAD_VALUE;
+	} while (exchange.ret == B_INTERRUPTED);
+	if (exchange.ret != B_OK)
+		return exchange.ret;
 
 	if (sender)
 		*sender = exchange.sender;
 
-	return ret;
+	return exchange.return_code;
 }
 
 
@@ -232,14 +412,15 @@ has_data(thread_id thread)
 	if (thread < 0)
 		return false;
 
-	struct nexus_thread_exchange exchange;
+	struct nexus_thread_rw exchange;
 	memset(&exchange, 0, sizeof(exchange));
-	exchange.op = NEXUS_THREAD_HAS_DATA;
 	exchange.receiver = thread;
 
 	int nexus = BKernelPrivate::Team::GetNexusDescriptor();
 
-	return nexus_io(nexus, NEXUS_THREAD_OP, &exchange) == B_OK;
+	if (nexus_io(nexus, NEXUS_THREAD_HAS_DATA, &exchange) != 0)
+		return false;
+	return exchange.ret == B_OK;
 }
 
 
@@ -279,8 +460,10 @@ _get_thread_info(thread_id id, thread_info* info, size_t size)
 	}
 
 	info->state = B_THREAD_RUNNING;
-	info->priority = 10;
+	info->priority = GetThreadPriority(id);
 	info->team = id;
+
+	GetThreadCpuTimes(id, &info->user_time, &info->kernel_time);
 
 	snprintf(path, sizeof(path), "/proc/%d/status", id);
 	fd = open(path, O_RDONLY);
@@ -326,51 +509,75 @@ _get_thread_info(thread_id id, thread_info* info, size_t size)
 status_t
 _get_next_thread_info(team_id team, int32* cookie, thread_info* info, size_t size)
 {
-	if (cookie == NULL || info == NULL || size != sizeof(thread_info))
+	if (cookie == NULL || *cookie < 0 || info == NULL
+		|| size != sizeof(thread_info)) {
 		return B_BAD_VALUE;
+	}
 
 	if (team == 0)
 		team = getpid();
 
-	char path[64];
-	snprintf(path, sizeof(path), "/proc/%d/task", team);
+	// The cookie holds the open /proc/<team>/task fd between calls,
+	// encoded as fd+1 so that 0 still means "start fresh".
+	int fd;
+	if (*cookie == 0) {
+		char path[64];
+		snprintf(path, sizeof(path), "/proc/%d/task", team);
+		fd = _kern_open_dir(-1, path);
+		if (fd < 0)
+			return B_BAD_TEAM_ID;
+	} else
+		fd = *cookie - 1;
 
-	DIR* dir = opendir(path);
-	if (dir == NULL)
-		return B_BAD_TEAM_ID;
+	union {
+		struct dirent entry;
+		char buffer[sizeof(struct dirent) + NAME_MAX + 1];
+	} dirent;
 
-	struct dirent* entry;
-	int32 index = 0;
+	while (true) {
+		ssize_t count = _kern_read_dir(fd, &dirent.entry, sizeof(dirent), 1);
+		if (count <= 0) {
+			_kern_close(fd);
+			*cookie = 0;
+			return B_BAD_VALUE;
+		}
 
-	while ((entry = readdir(dir)) != NULL) {
-		if (entry->d_name[0] == '.')
+		if (dirent.entry.d_name[0] == '.')
 			continue;
 
-		if (index == *cookie) {
-			thread_id tid = atoi(entry->d_name);
-			closedir(dir);
-			(*cookie)++;
-			return _get_thread_info(tid, info, size);
-		}
-		index++;
-	}
+		thread_id tid = atoi(dirent.entry.d_name);
+		if (tid <= 0)
+			continue;
 
-	closedir(dir);
-	return B_BAD_VALUE;
+		if (_get_thread_info(tid, info, size) == B_OK) {
+			*cookie = fd + 1;
+			return B_OK;
+		}
+	}
 }
 
 
 thread_id
 find_thread(const char* name)
 {
-	if (name == NULL)
-		return syscall(SYS_gettid);
+	if (name == NULL) {
+		if (sCachedTid == 0)
+			sCachedTid = syscall(SYS_gettid);
+		return sCachedTid;
+	}
 
-	debugger("You are calling find_thread with something different than NULL");
+	// Names are stored truncated to 15 chars; truncate the query to match.
+	char truncated[16];
+	strlcpy(truncated, name, sizeof(truncated));
 
-	// TODO: deprecate
+	team_id team = getpid();
+	int32 cookie = 0;
+	thread_info info;
+	while (_get_next_thread_info(team, &cookie, &info, sizeof(info)) == B_OK) {
+		if (strcmp(info.name, truncated) == 0)
+			return info.thread;
+	}
 
-	UNIMPLEMENTED();
 	return B_NAME_NOT_FOUND;
 }
 
@@ -378,13 +585,31 @@ find_thread(const char* name)
 status_t
 set_thread_priority(thread_id id, int32 priority)
 {
-	UNIMPLEMENTED();
-	// Mapping:
-	// 0, SCHED_IDLE
-	// 1-9, SCHED_OTHER 19, 1
-	// 10, SCHED_OTHER 0
-	// 11-30, SCHED_OTHER -1,-20
-	// 31-120, SCHED_FIFO, 1,99
+	struct sched_param param = {};
+
+	if (priority == 0) {
+		sched_setscheduler(id, SCHED_IDLE, &param);
+	} else if (priority >= 1 && priority <= 9) {
+		sched_setscheduler(id, SCHED_OTHER, &param);
+		setpriority(PRIO_PROCESS, id, 19 - (priority - 1));
+	} else if (priority == 10) {
+		sched_setscheduler(id, SCHED_OTHER, &param);
+		setpriority(PRIO_PROCESS, id, 0);
+	} else if (priority >= 11 && priority <= 30) {
+		sched_setscheduler(id, SCHED_OTHER, &param);
+		setpriority(PRIO_PROCESS, id, -1 - (priority - 11));
+	} else if (priority >= 31 && priority <= 120) {
+		// Try SCHED_RR — works if CAP_SYS_NICE or RLIMIT_RTPRIO allows it.
+		// If not, fall back to nice -20 (highest non-RT priority available
+		// without privileges).
+		// 31->1, 120->90
+		param.sched_priority = 1 + (priority - 31);
+		if (sched_setscheduler(id, SCHED_RR, &param) != 0) {
+			param.sched_priority = 0;
+			sched_setscheduler(id, SCHED_OTHER, &param);
+			setpriority(PRIO_PROCESS, id, -20);
+		}
+	}
 	return B_OK;
 }
 
@@ -395,46 +620,38 @@ wait_for_remote_thread(thread_id id, status_t* returnCode)
 	CALLED();
 
 	if (id <= 0)
-		return B_BAD_VALUE;
+		return B_BAD_THREAD_ID;
 
-	errno = 0;
 	int pfd = syscall(SYS_pidfd_open, id, 0);
 	if (pfd < 0)
-		return pfd;
+		return B_BAD_THREAD_ID;
 
 	struct pollfd p = { .fd = pfd, .events = POLLIN };
-	int pollfd = poll(&p, 1, -1);
+	int pollfd;
+	do {
+		pollfd = poll(&p, 1, -1);
+	} while (pollfd < 0 && errno == EINTR);
+
 	if (pollfd < 0) {
-		int saved = errno;
 		close(pfd);
-		if (saved == EINTR)
-			return B_INTERRUPTED;
-		return B_ERROR;
+		return B_BAD_THREAD_ID;
 	}
 
+	status_t exitStatus = B_OK;
 	siginfo_t si;
 	memset(&si, 0, sizeof(si));
-	if (waitid(P_PIDFD, pfd, &si, WEXITED | WNOWAIT) != 0) {
-		int saved = errno;
-		close(pfd);
-		if (saved == ECHILD)
-			return B_ENTRY_NOT_FOUND;
-		return B_ERROR;
+
+	if (waitid(P_PIDFD, pfd, &si, WEXITED) == 0) {
+		if (si.si_code == CLD_EXITED)
+			exitStatus = (status_t)si.si_status;
+		else if (si.si_code == CLD_KILLED || si.si_code == CLD_DUMPED)
+			exitStatus = (status_t)(-si.si_status);
 	}
 
-	status_t status = B_ERROR;
-	if (si.si_code == CLD_EXITED) {
-		status = (status_t)si.si_status;
-	} else if (si.si_code == CLD_KILLED || si.si_code == CLD_DUMPED) {
-		status = (status_t)(-si.si_status);
-	} else
-		status = B_ERROR;
-
-	waitid(P_PIDFD, pfd, &si, WEXITED);
 	close(pfd);
 
-	if (returnCode)
-		*returnCode = status;
+	if (returnCode != NULL)
+		*returnCode = exitStatus;
 
 	return B_OK;
 }
@@ -448,46 +665,34 @@ wait_for_thread(thread_id id, status_t* returnCode)
 	if (id < 0)
 		return B_BAD_THREAD_ID;
 
-	if (id == getpid()) {
-		debugger("wait_for_thread: you can't wait for your own team!");
-		return B_BAD_TEAM_ID;
-	}
-
 	if (id == find_thread(NULL)) {
 		debugger("wait_for_thread: do you really want to wait for yourself?");
 		return B_BAD_THREAD_ID;
 	}
 
-	struct nexus_thread_exchange exchange;
-	memset(&exchange, 0, sizeof(exchange));
-	exchange.op = NEXUS_THREAD_WAITFOR;
-	exchange.receiver = id;
-
 	int nexus = BKernelPrivate::Team::GetNexusDescriptor();
-	status_t ret = nexus_io(nexus, NEXUS_THREAD_OP, &exchange);
-	if (ret == B_BAD_THREAD_ID) {
-		if (kill(id, 0) < 0)
-			return B_BAD_THREAD_ID;
 
-		if (kill(id, SIGCONT) < 0)
-			return -errno;
+	// Haiku restarts an interrupted wait_for_thread(); nexus returns
+	// B_INTERRUPTED for any signal and for the freezer during suspend.
+	struct nexus_thread_waitfor_req exchange;
+	int nio;
+	do {
+		memset(&exchange, 0, sizeof(exchange));
+		exchange.receiver = id;
+		nio = nexus_io(nexus, NEXUS_THREAD_WAITFOR, &exchange);
+	} while (nio == 0 && exchange.ret == B_INTERRUPTED);
 
-		return wait_for_remote_thread(id, returnCode);
+	if (nio == 0 && exchange.ret == B_OK) {
+		if (returnCode != NULL)
+			*returnCode = exchange.return_code;
+		return B_OK;
 	}
 
-	if (ret == B_INTERRUPTED)
-		return B_INTERRUPTED;
-
-	if (ret != B_OK)
-		return ret;
-
-	if (returnCode != NULL)
-		*returnCode = exchange.return_code;
-
-	return B_OK;
+	return wait_for_remote_thread(id, returnCode);
 }
 
 
+// Not supported on V\OS, by design. Documented in OS.h.
 status_t
 suspend_thread(thread_id id)
 {
@@ -518,23 +723,31 @@ resume_thread(thread_id id)
 
 
 status_t
-snooze(bigtime_t time)
-{
-	return usleep(time);
-}
-
-
-status_t
 snooze_until(bigtime_t time, int timeBase)
 {
 	if (timeBase != B_SYSTEM_TIMEBASE)
 		return B_ERROR;
 
-	bigtime_t now = system_time();
-	if (time <= now)
+	// system_time() is CLOCK_MONOTONIC. The suspend freezer restarts the sleep transparently,
+	// and only a signal handler ends it early, reported as B_INTERRUPTED.
+	struct timespec deadline;
+	deadline.tv_sec = time / 1000000;
+	deadline.tv_nsec = (time % 1000000) * 1000;
+	int error = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline,
+		NULL);
+	if (error == EINTR)
+		return B_INTERRUPTED;
+	return error == 0 ? B_OK : B_ERROR;
+}
+
+
+status_t
+snooze(bigtime_t time)
+{
+	if (time <= 0)
 		return B_OK;
 
-	return snooze(time - now);
+	return snooze_until(system_time() + time, B_SYSTEM_TIMEBASE);
 }
 
 

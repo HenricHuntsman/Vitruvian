@@ -1,5 +1,6 @@
 /*
  * Copyright 2005-2011, Haiku.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -16,6 +17,7 @@
 #include <algorithm>
 
 #include <InterfaceDefs.h>
+#include <PrivateScreen.h>
 #include <String.h>
 
 #include <compute_display_timing.h>
@@ -31,7 +33,8 @@
  * which may even happen before R1 hits the streets.
  */
 
-#include "multimon.h"	// the usual: DANGER WILL, ROBINSON!
+// Radeon multi-monitor tunnel not available; all multimon UI is hidden at runtime.
+#include "multimon.h"
 
 
 
@@ -437,6 +440,83 @@ ScreenMode::GetDeviceInfo(accelerant_device_info& info)
 {
 	BScreen screen(fWindow);
 	return screen.GetDeviceInfo(&info);
+}
+
+
+status_t
+ScreenMode::GetConnectorName(BString& name)
+{
+	BPrivate::BPrivateScreen* screen = BPrivate::BPrivateScreen::Get(fWindow);
+	if (screen == NULL)
+		return B_ERROR;
+
+	status_t status = screen->GetConnectorName(name);
+	BPrivate::BPrivateScreen::Put(screen);
+	return status;
+}
+
+
+status_t
+ScreenMode::SetRotation(int32 rotation)
+{
+	BPrivate::BPrivateScreen* screen
+		= BPrivate::BPrivateScreen::Get(fWindow);
+	if (screen == NULL)
+		return B_ERROR;
+
+	status_t status = screen->SetRotation(rotation);
+	BPrivate::BPrivateScreen::Put(screen);
+
+	return status;
+}
+
+
+int32
+ScreenMode::Rotation() const
+{
+	BPrivate::BPrivateScreen* screen
+		= BPrivate::BPrivateScreen::Get(fWindow);
+	if (screen == NULL)
+		return 0;
+
+	int32 rotation;
+	if (screen->GetRotation(&rotation) != B_OK)
+		rotation = 0;
+	BPrivate::BPrivateScreen::Put(screen);
+
+	return rotation;
+}
+
+
+status_t
+ScreenMode::SetReflection(int32 reflection)
+{
+	BPrivate::BPrivateScreen* screen
+		= BPrivate::BPrivateScreen::Get(fWindow);
+	if (screen == NULL)
+		return B_ERROR;
+
+	status_t status = screen->SetReflection(reflection);
+	BPrivate::BPrivateScreen::Put(screen);
+
+	return status;
+}
+
+
+int32
+ScreenMode::Reflection() const
+{
+	BPrivate::BPrivateScreen* screen
+		= BPrivate::BPrivateScreen::Get(fWindow);
+	if (screen == NULL)
+		return 0;
+
+	int32 reflection;
+	if (screen->GetReflection(&reflection) != B_OK)
+		reflection = 0;
+	BPrivate::BPrivateScreen::Put(screen);
+
+	return reflection;
 }
 
 

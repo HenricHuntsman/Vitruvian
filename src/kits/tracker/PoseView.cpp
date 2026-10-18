@@ -38,12 +38,17 @@ All rights reserved.
 #include <algorithm>
 #include <functional>
 #include <map>
+#include <string>
+#include <unordered_set>
 
 #include <ctype.h>
 #include <errno.h>
 #include <float.h>
+#include <stdio.h>
+#include <linux/magic.h>
 #include <stdlib.h>
 #include <strings.h>
+#include <sys/vfs.h>
 
 #include <compat/sys/stat.h>
 
@@ -95,6 +100,7 @@ All rights reserved.
 #include "Tests.h"
 #include "Thread.h"
 #include "Tracker.h"
+#include "TrackerSettings.h"
 #include "TrackerString.h"
 #include "WidgetAttributeText.h"
 #include "WidthBuffer.h"
@@ -135,10 +141,13 @@ enum {
 	kInsertAfter
 };
 
-const BPoint kTransparentDragThreshold(be_control_look->ComposeIconSize(256).Width(),
-	be_control_look->ComposeIconSize(192).Width());
+const BPoint kTransparentDragThreshold(
+	be_control_look->ComposeIconSize(512).Width(),
+	be_control_look->ComposeIconSize(384).Width());
 	// maximum size of the transparent drag bitmap, use a drag rect
-	// if larger in any direction
+	// if larger in any direction. Haiku uses 256x192, which a selection of
+	// four icons across already overflows, so the drag image loses its
+	// outer icons to the edge fade while the drop still carries them.
 
 struct attr_column_relation {
 	uint32	attrHash;
@@ -520,7 +529,7 @@ BPoseView::AddColumnList(BObjectList<BColumn>* list)
 		column->SetOffset(nextLeftEdge);
 
 		nextLeftEdge = column->Offset() + column->Width()
-			- kRoomForLine / 2.0f + kTitleColumnExtraMargin;
+			- kRoomForLine / 2.0f + title_column_margin();
 		fColumnList->AddItem(column);
 
 		if (!IsWatchingDateFormatChange()
@@ -780,7 +789,7 @@ BPoseView::SavePoseLocations(BRect* frameIfDesktop)
 	Model* targetModel = TargetModel();
 	ThrowOnAssert(targetModel != NULL);
 
-	BVolume volume(TargetModel()->NodeRef()->dereference().dev());
+	BVolume volume(TargetModel()->NodeRef()->device());
 	if (volume.InitCheck() != B_OK)
 		return;
 
@@ -794,6 +803,15 @@ BPoseView::SavePoseLocations(BRect* frameIfDesktop)
 
 	bool isDesktop = !IsFilePanel() && IsDesktopView() && (frameIfDesktop != NULL);
 
+	// Resolved once, outside the loop: targetPath is written to each pose's
+	// kAttrPoseInfoDir below so ReadPoseInfo() can match it after a reboot.
+	BPath targetPath;
+	BEntry targetEntry;
+	if (targetModel->EntryRef() != NULL
+		&& targetEntry.SetTo(targetModel->EntryRef()) == B_OK) {
+		targetEntry.GetPath(&targetPath);
+	}
+
 	int32 poseCount = fPoseList->CountItems();
 	for (int32 index = 0; index < poseCount; index++) {
 		BPose* pose = fPoseList->ItemAt(index);
@@ -802,9 +820,9 @@ BPoseView::SavePoseLocations(BRect* frameIfDesktop)
 			poseInfo.fInvisible = false;
 
 			if (model->IsRoot())
-				poseInfo.fInitedDirectory = targetModel->NodeRef()->ino();
+				poseInfo.fInitedDirectory = targetModel->NodeRef()->vnode();
 			else
-				poseInfo.fInitedDirectory = model->EntryRef()->dir();
+				poseInfo.fInitedDirectory = model->EntryRef()->vdirectory();
 
 			poseInfo.fLocation = pose->Location(this);
 
@@ -870,6 +888,12 @@ BPoseView::SavePoseLocations(BRect* frameIfDesktop)
 				model->WriteAttrKillForeign(kAttrPoseInfo,
 					kAttrPoseInfoForeign, B_RAW_TYPE, 0, &poseInfo,
 					sizeof(poseInfo));
+
+				// Persist so ReadPoseInfo() can match this location after a reboot.
+				if (targetPath.Path() != NULL && model->Node() != NULL) {
+					model->Node()->WriteAttr(kAttrPoseInfoDir, B_STRING_TYPE, 0,
+						targetPath.Path(), strlen(targetPath.Path()) + 1);
+				}
 
 				if (isDesktop) {
 					model->WriteAttrKillForeign(kAttrExtendedPoseInfo,
@@ -1435,37 +1459,43 @@ BPoseView::AddPosesTask(void* castToParams)
 		posesResult->fModels[index] = (Model*)0xdeadbeef;
 #endif
 
+	node_ref cachedDirNode;
+	BEntry parentEntry(&ref);
+	bool dirNodeValid = parentEntry.InitCheck() == B_OK
+		&& parentEntry.GetNodeRef(&cachedDirNode) == B_OK;
+
 	try {
 		for (;;) {
 			lock.Unlock();
 
 			status_t result = B_OK;
-			char entBuf[1024];
-			dirent* eptr = (dirent*)entBuf;
 			Model* model = 0;
 			node_ref dirNode;
 			node_ref itemNode;
 
-			BEntry reff; // vos mod
-			int32 count = container->GetNextEntry(&reff) == B_OK ? 1 : 0;
+			entry_ref reff;
+			int32 count = container->GetNextRef(&reff) == B_OK ? 1 : 0;
 			if (count > 0) {
 				ASSERT(count == 1);
 
-				if ((!hideDotFiles && (!strcmp(reff.Name(), ".")
-					|| !strcmp(reff.Name(), "..")))
-					|| (hideDotFiles && reff.Name()[0] == '.')) {
+				if ((!hideDotFiles && (!strcmp(reff.name, ".")
+					|| !strcmp(reff.name, "..")))
+					|| (hideDotFiles && reff.name[0] == '.')) {
 					continue;
 				}
 
-				BEntry parent;
-				reff.GetParent(&parent);
-				reff.GetNodeRef(&itemNode);
-				parent.GetNodeRef(&dirNode);
+				BEntry refEntry(&reff);
+				refEntry.GetNodeRef(&itemNode);
+				if (dirNodeValid) {
+					dirNode = cachedDirNode;
+				} else {
+					dirNode = node_ref(reff.vdevice(), reff.vdirectory());
+				}
 				BPoseView::WatchNewNode(&itemNode, watchMask, lock.Target());
 					// have to node monitor ahead of time because Model will
 					// cache up the file type and preferred app
 					// OK to call when poseView is not locked
-				model = new Model(&dirNode, &itemNode, reff.Name(), false); // end mod
+				model = new Model(&dirNode, &itemNode, reff.name, false);
 				result = model->InitCheck();
 				modelChunkIndex++;
 				posesResult->fModels[modelChunkIndex] = model;
@@ -1522,12 +1552,11 @@ BPoseView::AddPosesTask(void* castToParams)
 
 			bigtime_t now = system_time();
 
-			if (count <= 0 || modelChunkIndex >= kMaxAddPosesChunk - 1
-				|| now > nextChunkTime) {
+			if (modelChunkIndex >= 0 && (count <= 0
+				|| modelChunkIndex >= kMaxAddPosesChunk - 1
+				|| now > nextChunkTime)) {
 				// keep getting models until we get <kMaxAddPosesChunk> of them
 				// or until 300000 runs out
-
-				ASSERT(modelChunkIndex >= 0);
 
 				// send of the created poses
 
@@ -1656,7 +1685,15 @@ BPoseView::ToggleDisksVolumes()
 
 		if (TrackerSettings().MountVolumesOntoDesktop()) {
 			RemoveRootPose();
+#ifdef __VOS__
+			// On VOS, AddVolumePoses() -> CreateVolumePose() uses vref-backed
+			// BDirectory refs that are unreliable in this context. CreateRootPose()
+			// uses BEntry("/") directly and does the right thing (no override when
+			// ShowDisksIcon=false, so "/" comes back as kVolumeNode = Vitruvian).
+			CreateRootPose();
+#else
 			AddVolumePoses();
+#endif
 		} else {
 			RemoveVolumePoses();
 			CreateRootPose();
@@ -1675,13 +1712,15 @@ BPoseView::AddTrashPoses()
 	BVolumeRoster volRoster;
 	volRoster.Rewind();
 	BVolume volume;
+	BObjectList<node_ref, true> seen(4);
 	while (volRoster.GetNextVolume(&volume) == B_OK) {
-		if (!volume.IsPersistent())
+		if (volume.IsReadOnly())
 			continue;
 
 		BDirectory trashDir;
 		BEntry entry;
 		if (FSGetTrashDir(&trashDir, volume.Device()) == B_OK
+			&& FSRecordTrashDir(&seen, &trashDir)
 			&& trashDir.GetEntry(&entry) == B_OK) {
 			Model model(&entry);
 			if (model.InitCheck() == B_OK)
@@ -1738,36 +1777,69 @@ BPoseView::CreateVolumePose(BVolume* volume)
 	if (volume->GetRootDirectory(&root) != B_OK)
 		return;
 
-	BEntry entry;
-	root.GetEntry(&entry);
-
 	entry_ref ref;
-	entry.GetRef(&ref);
+	root.GetRef(&ref);
+
+#ifdef __VOS__
+	// The boot volume's entry_ref has an empty leaf, so the generic
+	// EntryCreated() route below silently zombies the model. Not in the
+	// Disks window, which handles the root pose itself.
+	if (!TargetModel()->IsRoot()) {
+		BEntry rootEntry;
+		if (root.GetEntry(&rootEntry) == B_OK && FSIsRootDir(&rootEntry)) {
+			CreateRootPose();
+			return;
+		}
+	}
+#endif
 
 	// If the volume is mounted at a directory of a persistent volume, we don't
-	// want it on the desktop or in the disks window.
-	BVolume parentVolume(ref.dereference().dev());
-#ifdef __VOS__
-	// On Vitruvian, allow the boot volume (root filesystem) to be shown even
-	// if it appears to be mounted within another persistent volume, as the
-	// Linux filesystem structure is different from Haiku's volume model
-	BVolumeRoster roster;
-	BVolume bootVolume;
-	bool isBootVolume = (roster.GetBootVolume(&bootVolume) == B_OK
-		&& bootVolume.Device() == volume->Device());
-
-	if (!isBootVolume && parentVolume.InitCheck() == B_OK && parentVolume.IsPersistent())
-		return;
+	// want it on the desktop or in the disks window — except on Vitruvian where
+	// we only skip volumes whose mount-point parent IS the root volume but the
+	// volume itself is not the root (i.e. sub-mounts like /boot/efi are hidden;
+	// the root volume "/" and user-removable media at e.g. /media/user/X are shown).
+	{
+		BVolume parentVolume(ref.device());
+		if (parentVolume.InitCheck() == B_OK && parentVolume.IsPersistent()) {
+#ifndef __VOS__
+			return;
 #else
-	if (parentVolume.InitCheck() == B_OK && parentVolume.IsPersistent())
-		return;
+			// In the Disks window (IsRoot) show all persistent volumes.
+			// On the Desktop, only show the root volume "/" and removable
+			// media (under /media or /mnt); skip system sub-mounts.
+			if (!TargetModel()->IsRoot()) {
+				BEntry rootEntry;
+				root.GetEntry(&rootEntry);
+				BPath mountPath(&rootEntry);
+				if (mountPath.InitCheck() == B_OK) {
+					const char* p = mountPath.Path();
+					bool isRemovable = (strncmp(p, "/media/", 7) == 0
+						|| strncmp(p, "/mnt/", 5) == 0
+						|| strcmp(p, "/mnt") == 0);
+					bool isRoot = (strcmp(p, "/") == 0);
+					if (!isRoot && !isRemovable)
+						return;
+				}
+			}
 #endif
+		}
+	}
 
 	node_ref itemNode;
 	root.GetNodeRef(&itemNode);
 
+	// dirNode is the directory the volume is mounted in, not the volume
+	// root. Upstream builds it from ref.device/directory; vref-backed
+	// node_refs cannot be, so walk to the parent.
+	BEntry volumeEntry;
+	BDirectory parent;
 	node_ref dirNode;
-	root.GetNodeRef(&dirNode);
+	if (root.GetEntry(&volumeEntry) != B_OK
+		|| volumeEntry.GetParent(&parent) != B_OK
+		|| parent.GetNodeRef(&dirNode) != B_OK) {
+		// "/" has no parent; it is its own mount point.
+		dirNode = itemNode;
+	}
 
 	BPose* pose = EntryCreated(&dirNode, &itemNode, ref.name, 0);
 	if (pose != NULL && !TargetModel()->IsRoot()) {
@@ -1788,6 +1860,13 @@ BPoseView::CreateRootPose()
 		delete model;
 		return;
 	}
+
+#ifdef __VOS__
+	// On Vitruvian "/" is a real volume. When ShowDisksIcon is on, promote the
+	// Desktop pose to kRootNode so it displays as "Disks" and opens BDisksWindow.
+	if (TrackerSettings().ShowDisksIcon())
+		model->OverrideAsDisksRoot();
+#endif
 
 	PoseInfo info;
 	ReadPoseInfo(model, &info);
@@ -2030,10 +2109,13 @@ BPoseView::CreatePoses(Model** models, PoseInfo* poseInfoArray, int32 count,
 			resultingPoses[modelIndex] = pose;
 
 		// set location from poseinfo if saved loc was for this dir
-		if (poseInfo->fInitedDirectory != -1LL) {
+		if (poseInfo->fInitedDirectory != kUninitedDirectory) {
 			PinPointToValidRange(poseInfo->fLocation);
 			pose->SetLocation(poseInfo->fLocation, this);
 			AddToVSList(pose);
+
+			SnapPoseToGrid(pose, viewBounds);
+				// restored locations have to end up on a free grid slot
 		}
 
 		BRect poseBounds;
@@ -2054,7 +2136,8 @@ BPoseView::CreatePoses(Model** models, PoseInfo* poseInfoArray, int32 count,
 
 			case kIconMode:
 			case kMiniIconMode:
-				if (poseInfo->fInitedDirectory == -1LL || fAlwaysAutoPlace) {
+				if (poseInfo->fInitedDirectory == kUninitedDirectory
+					|| fAlwaysAutoPlace) {
 					if (pose->HasLocation())
 						RemoveFromVSList(pose);
 
@@ -2162,14 +2245,20 @@ BPoseView::RefreshMimeTypeList()
 	fMimeTypeList.MakeEmpty();
 	fMimeTypeListIsDirty = false;
 
+	std::unordered_set<std::string> seen;
 	for (int32 index = 0;; index++) {
 		BPose* pose = PoseAtIndex(index);
 		if (pose == NULL)
 			break;
 
 		Model* targetModel = pose->TargetModel();
-		if (targetModel != NULL)
-			AddMimeType(targetModel->MimeType());
+		if (targetModel == NULL)
+			continue;
+		const char* type = targetModel->MimeType();
+		if (type == NULL || *type == '\0')
+			continue;
+		if (seen.insert(type).second)
+			fMimeTypeList.Add(type);
 	}
 }
 
@@ -2426,7 +2515,7 @@ BPoseView::MessageReceived(BMessage* message)
 			entry_ref ref;
 			message->FindRef("virtual:directory", &ref);
 
-			node_ref node = node_ref(ref.dev(), ref.dir());
+			node_ref node = node_ref(ref.vdevice(), ref.vdirectory());
 			Model* targetModel = TargetModel();
 			if (targetModel != NULL && *targetModel->NodeRef() == node)
 				UpdatePosesClipboardModeFromClipboard(message);
@@ -2701,6 +2790,10 @@ BPoseView::MessageReceived(BMessage* message)
 						AdaptToVolumeChange(message);
 						break;
 
+					case kSnapToGridChanged:
+						AdaptToSnapToGridChange(message);
+						break;
+
 					case kDesktopIntegrationChanged:
 						AdaptToDesktopIntegrationChange(message);
 						break;
@@ -2817,7 +2910,7 @@ BPoseView::RemoveColumn(BColumn* columnToRemove, bool runAlert)
 	for (int32 index = columnIndex; index < count; index++) {
 		BColumn* column = ColumnAt(index);
 		column->SetOffset(column->Offset()
-			- (attrWidth + kTitleColumnExtraMargin));
+			- (attrWidth + title_column_margin()));
 	}
 
 	BRect rect(Bounds());
@@ -2869,7 +2962,7 @@ BPoseView::AddColumn(BColumn* newColumn, const BColumn* after)
 	float offset;
 	int32 afterColumnIndex;
 	if (after != NULL) {
-		offset = after->Offset() + after->Width() + kTitleColumnExtraMargin;
+		offset = after->Offset() + after->Width() + title_column_margin();
 		afterColumnIndex = IndexOfColumn(after);
 	} else {
 		offset = StartOffset();
@@ -2908,7 +3001,7 @@ BPoseView::AddColumn(BColumn* newColumn, const BColumn* after)
 		BColumn* column = ColumnAt(index);
 		ASSERT(newColumn != column);
 
-		column->SetOffset(column->Offset() + attrWidth + kTitleColumnExtraMargin);
+		column->SetOffset(column->Offset() + attrWidth + title_column_margin());
 	}
 
 	rect.left = offset;
@@ -2997,8 +3090,6 @@ BPoseView::ReadPoseInfo(Model* model, PoseInfo* poseInfo)
 		return;
 
 	ReadAttrResult result = kReadAttrFailed;
-	BEntry entry;
-	model->GetEntry(&entry);
 	bool isTrash = model->IsTrash() && IsDesktopView();
 
 	// special case the "root" disks icon
@@ -3018,7 +3109,6 @@ BPoseView::ReadPoseInfo(Model* model, PoseInfo* poseInfo)
 		}
 	} else {
 		ASSERT(model->IsNodeOpen());
-		time_t now = time(NULL);
 
 		for (int32 count = 10; count >= 0; count--) {
 			if (model->Node() == NULL)
@@ -3058,16 +3148,46 @@ BPoseView::ReadPoseInfo(Model* model, PoseInfo* poseInfo)
 	if (result == kReadAttrFailed) {
 		poseInfo->fInitedDirectory = -1LL;
 		poseInfo->fInvisible = false;
-	} else if (TargetModel() == NULL
-		|| (poseInfo->fInitedDirectory != model->EntryRef()->dir()
-			&& (poseInfo->fInitedDirectory
-				!= TargetModel()->NodeRef()->ino()))) {
-		// info was read properly but it's not for this directory
+	} else if (TargetModel() == NULL) {
 		poseInfo->fInitedDirectory = -1LL;
-	} else if (poseInfo->fLocation.x < -kSanePoseLocation
-		|| poseInfo->fLocation.x > kSanePoseLocation
-		|| poseInfo->fLocation.y < -kSanePoseLocation
-		|| poseInfo->fLocation.y > kSanePoseLocation) {
+	} else {
+		// Prefer the reboot-stable kAttrPoseInfoDir path; fall back to the
+		// legacy vnode id compare when a node has no path attribute.
+		bool directoryMatches = false;
+		char savedDirPath[B_PATH_NAME_LENGTH];
+		ssize_t pathLen = -1;
+		if (model->Node() != NULL) {
+			pathLen = model->Node()->ReadAttr(kAttrPoseInfoDir, B_STRING_TYPE,
+				0, savedDirPath, sizeof(savedDirPath) - 1);
+		}
+		if (pathLen > 0) {
+			savedDirPath[pathLen] = '\0';
+			BEntry targetEntry;
+			BPath targetPath;
+			if (TargetModel()->EntryRef() != NULL
+				&& targetEntry.SetTo(TargetModel()->EntryRef()) == B_OK
+				&& targetEntry.GetPath(&targetPath) == B_OK
+				&& targetPath.Path() != NULL
+				&& strcmp(savedDirPath, targetPath.Path()) == 0) {
+				directoryMatches = true;
+			}
+		} else {
+			// No path attribute: legacy within-session identity check.
+			directoryMatches =
+				poseInfo->fInitedDirectory == model->EntryRef()->vdirectory()
+				|| poseInfo->fInitedDirectory
+					== TargetModel()->NodeRef()->vnode();
+		}
+
+		if (!directoryMatches)
+			poseInfo->fInitedDirectory = -1LL;
+	}
+
+	if (poseInfo->fInitedDirectory != kUninitedDirectory
+		&& (poseInfo->fLocation.x < -kSanePoseLocation
+			|| poseInfo->fLocation.x > kSanePoseLocation
+			|| poseInfo->fLocation.y < -kSanePoseLocation
+			|| poseInfo->fLocation.y > kSanePoseLocation)) {
 		// location values not realistic, probably screwed up, force reset
 		poseInfo->fInitedDirectory = -1LL;
 	}
@@ -3253,6 +3373,9 @@ BPoseView::SetViewMode(uint32 newMode)
 		AddToVSList(pose);
 	}
 
+	// saved icon locations predate the grid, settle them now
+	SnapAllPosesToGrid();
+
 	SortPoses();
 	if (newMode != kListMode)
 		RecalcExtent();
@@ -3344,7 +3467,7 @@ BPoseView::UpdatePosesClipboardModeFromClipboard(BMessage* clipboardReport)
 
 	entry_ref ref;
 	clipboardReport->FindRef("virtual:directory", &ref);
-	node_ref node = node_ref(ref.dev(), ref.dir());
+	node_ref node = node_ref(ref.vdevice(), ref.vdirectory());
 
 	bool clearClipboard = clipboardReport->GetBool("clearClipboard", false);
 	if (clearClipboard && fHasPosesInClipboard) {
@@ -3362,21 +3485,24 @@ BPoseView::UpdatePosesClipboardModeFromClipboard(BMessage* clipboardReport)
 	bool hasPosesInClipboard = false;
 	int32 foundNodeIndex = 0;
 
-	TClipboardNodeRef* clipNode = NULL;
-	ssize_t size;
-	for (int32 index = 0; clipboardReport->FindData("tcnode", T_CLIPBOARD_NODE,
-			index, (const void**)&clipNode, &size) == B_OK; index++) {
-		BPose* pose = fPoseList->FindPose(&clipNode->node, &foundNodeIndex);
+	node_ref clipNode;
+	uint32 clipMode = 0;
+	for (int32 index = 0;
+			clipboardReport->FindNodeRef("tcnode:node", index, &clipNode) == B_OK;
+			index++) {
+		if (clipboardReport->FindUInt32("tcnode:mode", index, &clipMode) != B_OK)
+			break;
+		BPose* pose = fPoseList->FindPose(&clipNode, &foundNodeIndex);
 		if (pose == NULL)
 			break;
 
-		if (clipNode->moveMode != pose->ClipboardMode() || pose->IsSelected()) {
-			pose->SetClipboardMode(clipNode->moveMode);
+		if (clipMode != pose->ClipboardMode() || pose->IsSelected()) {
+			pose->SetClipboardMode(clipMode);
 
 			if (!fullInvalidateNeeded) {
 				if (ViewMode() == kListMode) {
 					if (IsFiltering())
-						pose = fFilteredPoseList->FindPose(&clipNode->node, &foundNodeIndex);
+						pose = fFilteredPoseList->FindPose(&clipNode, &foundNodeIndex);
 
 					if (pose != NULL) {
 						loc.y = foundNodeIndex * fListElemHeight;
@@ -3393,7 +3519,7 @@ BPoseView::UpdatePosesClipboardModeFromClipboard(BMessage* clipboardReport)
 					}
 				}
 			}
-			if (clipNode->moveMode)
+			if (clipMode)
 				hasPosesInClipboard = true;
 		}
 	}
@@ -3431,7 +3557,7 @@ BPoseView::PlaceFolder(const entry_ref* ref, const BMessage* message)
 	if (setPosition) {
 		Model* targetModel = TargetModel();
 		if (targetModel != NULL && targetModel->NodeRef() != NULL) {
-			FSSetPoseLocation(targetModel->NodeRef()->ino(), &node,
+			FSSetPoseLocation(targetModel->NodeRef()->vnode(), &node,
 				location);
 		}
 	}
@@ -3447,7 +3573,8 @@ BPoseView::NewFileFromTemplate(const BMessage* message)
 	entry_ref destEntryRef;
 	node_ref destNodeRef;
 
-	BDirectory destDir(targetModel->NodeRef());
+	// TODO(T4.1 V-Vref): revert to NodeRef() once per-team vref cache lands.
+	BDirectory destDir(targetModel->EntryRef());
 	if (destDir.InitCheck() != B_OK)
 		return;
 
@@ -3463,8 +3590,13 @@ BPoseView::NewFileFromTemplate(const BMessage* message)
 
 	if (dir.InitCheck() == B_OK) {
 		// special handling of directories
-		if (FSCreateNewFolderIn(targetModel->NodeRef(), &destEntryRef,
-				&destNodeRef) == B_OK) {
+		// TODO(T4.1 V-Vref): revert to NodeRef() once per-team vref cache lands.
+		BDirectory containerDir(targetModel->EntryRef());
+		node_ref dirNodeRef;
+		if (containerDir.InitCheck() == B_OK
+				&& containerDir.GetNodeRef(&dirNodeRef) == B_OK
+				&& FSCreateNewFolderIn(&dirNodeRef, &destEntryRef,
+					&destNodeRef) == B_OK) {
 			BEntry destEntry(&destEntryRef);
 			destEntry.Rename(fileName);
 		}
@@ -3530,13 +3662,21 @@ BPoseView::NewFolder(const BMessage* message)
 	entry_ref ref;
 	node_ref nodeRef;
 
-	if (FSCreateNewFolderIn(targetModel->NodeRef(), &ref, &nodeRef) == B_OK) {
+	// TODO(T4.1 V-Vref): once per-team vref cache lands, NodeRef() will return
+	// a virtual ref and this workaround can be replaced with NodeRef() directly.
+	BDirectory targetDir(targetModel->EntryRef());
+	node_ref targetNodeRef;
+	if (targetDir.InitCheck() != B_OK
+			|| targetDir.GetNodeRef(&targetNodeRef) != B_OK)
+		return;
+
+	if (FSCreateNewFolderIn(&targetNodeRef, &ref, &nodeRef) == B_OK) {
 		// try to place new folder at click point or under mouse if possible
 
 		PlaceFolder(&ref, message);
 
 		int32 index;
-		BPose* pose = EntryCreated(targetModel->NodeRef(), &nodeRef, ref.name, &index);
+		BPose* pose = EntryCreated(&targetNodeRef, &nodeRef, ref.name, &index);
 
 		if (IsFiltering()) {
 			if (fFilteredPoseList->FindPose(&nodeRef, &index) == NULL) {
@@ -3648,6 +3788,51 @@ BPoseView::Cleanup(bool doAll)
 			}
 		}
 	}
+}
+
+
+void
+BPoseView::SnapPoseToGrid(BPose* pose, BRect& viewBounds)
+{
+	if (pose == NULL || ViewMode() == kListMode
+		|| !TrackerSettings().SnapToGrid())
+		return;
+
+	// remove pose from VSlist so it doesn't "bump" into itself
+	RemoveFromVSList(pose);
+
+	// nothing to do if the pose is already on a free and valid grid slot
+	BPoint location(pose->Location(this));
+	BPoint newLocation(PinToGrid(location, fGrid, fOffset));
+	if (newLocation == location && IsValidLocation(pose)) {
+		BRect rect(pose->CalcRect(this));
+		rect.InsetBy(-3, 0);
+		if (!SlotOccupied(rect, viewBounds)) {
+			AddToVSList(pose);
+			return;
+		}
+	}
+
+	// try new grid location
+	BRect oldBounds(pose->CalcRect(this));
+	BRect poseBounds(oldBounds);
+	pose->MoveTo(newLocation, this);
+	poseBounds = pose->CalcRect(this);
+	poseBounds.InsetBy(-3, 0);
+	if (SlotOccupied(poseBounds, viewBounds) || !IsValidLocation(pose)) {
+		ResetPosePlacementHint();
+		PlacePose(pose, viewBounds);
+		poseBounds = pose->CalcRect(this);
+	}
+
+	pose->SetSaveLocation();
+	AddToVSList(pose);
+	AddToExtent(poseBounds);
+
+	if (viewBounds.Intersects(poseBounds))
+		Invalidate(poseBounds);
+	if (viewBounds.Intersects(oldBounds))
+		Invalidate(oldBounds);
 }
 
 
@@ -3846,6 +4031,10 @@ BPoseView::CheckPoseVisibility(BRect* newFrame)
 				// add it at the new location
 			Invalidate(pose->CalcRect(this));
 				// make sure the new pose location updates properly
+
+			BRect viewBounds(Bounds());
+			SnapPoseToGrid(pose, viewBounds);
+				// the new location has to end up on a free grid slot
 		}
 	}
 }
@@ -4393,7 +4582,7 @@ BPoseView::TrySettingPoseLocation(BNode* node, BPoint point)
 	ASSERT(targetModel != NULL);
 
 	if (targetModel != NULL && targetModel->NodeRef() != NULL
-		&& FSSetPoseLocation(targetModel->NodeRef()->ino(), node, point)
+		&& FSSetPoseLocation(targetModel->NodeRef()->vnode(), node, point)
 			== B_OK) {
 		// get rid of opposite endianness attribute
 		node->RemoveAttr(kAttrPoseInfoForeign);
@@ -5097,6 +5286,7 @@ BPoseView::MoveSelectionInto(Model* destFolder, BContainerWindow* srcWindow,
 		}
 
 		BPoint delta = loc - where;
+		BRect viewBounds(targetView->Bounds());
 		int32 selectCount = targetView->CountSelected();
 		for (int32 index = 0; index < selectCount; index++) {
 			BPose* pose = targetView->SelectionList()->ItemAt(index);
@@ -5122,6 +5312,10 @@ BPoseView::MoveSelectionInto(Model* destFolder, BContainerWindow* srcWindow,
 
 			// remove and reinsert pose to keep VSlist sorted
 			targetView->AddToVSList(pose);
+
+			// the drop location has to end up on a free grid slot
+			// (does nothing when the grid is off)
+			targetView->SnapPoseToGrid(pose, viewBounds);
 		}
 
 		return;
@@ -5146,7 +5340,7 @@ BPoseView::MoveSelectionInto(Model* destFolder, BContainerWindow* srcWindow,
 	}
 
 	// can't copy to read-only volume
-	BVolume destVolume(destFolder->NodeRef()->dev());
+	BVolume destVolume(destFolder->NodeRef()->device());
 	if (destVolume.InitCheck() == B_OK && destVolume.IsReadOnly()) {
 		BAlert* alert = new BAlert("",
 			B_TRANSLATE("You can't move or copy items to read-only volumes."),
@@ -5237,6 +5431,9 @@ BPoseView::MoveSelectionTo(BPoint dropPoint, BPoint where, BContainerWindow* src
 
 	uint32 buttons = (uint32)window->CurrentMessage()->FindInt32("buttons");
 	bool pinToGrid = (modifiers() & B_COMMAND_KEY) != 0;
+	if (TrackerSettings().SnapToGrid())
+		pinToGrid = true;
+			// drops always snap to the grid when the setting is on
 	MoveSelectionInto(TargetModel(), srcWindow, window, buttons, dropPoint,
 		false, false, false, false, where, pinToGrid);
 }
@@ -5282,10 +5479,10 @@ void
 BPoseView::PoseHandleDeviceUnmounted(BPose* pose, Model* model, int32 index,
 	BPoseView* poseView, dev_t device)
 {
-	if (model->NodeRef()->device == device)
+	if (model->NodeRef()->device() == device)
 		poseView->DeletePose(model->NodeRef());
 	else if (model->IsSymLink() && model->LinkTo() != NULL
-		&& model->LinkTo()->NodeRef()->device == device) {
+		&& model->LinkTo()->NodeRef()->device() == device) {
 		poseView->DeleteSymLinkPoseTarget(model->LinkTo()->NodeRef(),
 			pose, index);
 	}
@@ -5422,7 +5619,9 @@ BPoseView::FSNotification(const BMessage* message)
 	Model* targetModel = TargetModel();
 	TrackerSettings settings;
 
-	switch (message->GetInt32("opcode", 0)) {
+	int32 opcode = message->GetInt32("opcode", 0);
+
+	switch (opcode) {
 		case B_ENTRY_CREATED:
 		{
 			ASSERT(targetModel != NULL);
@@ -5430,7 +5629,7 @@ BPoseView::FSNotification(const BMessage* message)
 			entry_ref ref;
 			message->FindRef("virtual:directory", &ref);
 			message->FindNodeRef("virtual:node", &itemNode);
-			node_ref dirNode = node_ref(ref.dev(), ref.dir());
+			node_ref dirNode = node_ref(ref.vdevice(), ref.vdirectory());
 
 			int32 count = fBrokenLinks->CountItems();
 			bool createPose = true;
@@ -5438,6 +5637,7 @@ BPoseView::FSNotification(const BMessage* message)
 			// The Disks window can too
 			// So can the Desktop, as long as the integrate flag is on
 			if (targetModel != NULL && dirNode != *targetModel->NodeRef()
+				&& !targetModel->IsTrash()
 				&& !targetModel->IsQuery()
 				&& !targetModel->IsVirtualDirectory()
 				&& !targetModel->IsRoot()
@@ -5540,7 +5740,22 @@ BPoseView::FSNotification(const BMessage* message)
 					}
 				}
 
-			 	DeletePose(&itemNode);
+				entry_ref dirRef;
+				const char* name;
+				if (pose == NULL
+					&& message->FindString("name", &name) == B_OK
+					&& name != NULL && name[0] != '\0'
+					&& message->FindRef("virtual:directory", &dirRef)
+						== B_OK) {
+					entry_ref poseRef(dirRef.vdevice(), dirRef.vdirectory(),
+						name);
+					pose = fPoseList->FindPose(&poseRef, &index);
+				}
+
+				if (pose != NULL)
+					DeletePose(pose->TargetModel()->NodeRef(), pose, index);
+				else
+					DeletePose(&itemNode);
 				TryUpdatingBrokenLinks();
 			}
 			break;
@@ -5585,7 +5800,7 @@ BPoseView::FSNotification(const BMessage* message)
 		case B_DEVICE_UNMOUNTED:
 			if (message->FindUInt64("device", &device) == B_OK) {
 				ASSERT(targetModel != NULL);
-				if (targetModel->NodeRef()->dev() == device) {
+				if (targetModel->NodeRef()->vdevice() == device) {
 					if (IsFilePanel()) {
 						// reset location to home directory
 						BMessage message(kSwitchToHome);
@@ -5613,6 +5828,27 @@ BPoseView::FSNotification(const BMessage* message)
 bool
 BPoseView::CreateSymlinkPoseTarget(Model* symlink)
 {
+	// Pseudo-filesystem symlinks (/dev, /proc, /sys, tmpfs) are admin/shell
+	// aliases, not user content. Resolving them is harmful: chains like
+	// /dev/stdin -> /proc/self/fd/0 -> /dev/pts/N drag traversal into /proc
+	// and stall on magic-link opens; /dev/disk/by-id/*, by-uuid/*, by-path/*
+	// all resolve to the same underlying device inode, causing duplicate
+	// fsnotify mark installs that trip the kernel's EEXIST race path.
+	// Skip resolution; the pose still appears with the generic symlink icon.
+	const entry_ref* sref = symlink->EntryRef();
+	BPath symPath(sref);
+	if (symPath.InitCheck() == B_OK) {
+		struct statfs sfs;
+		if (statfs(symPath.Path(), &sfs) == 0) {
+			switch ((unsigned long)sfs.f_type) {
+				case PROC_SUPER_MAGIC:
+				case SYSFS_MAGIC:
+				case TMPFS_MAGIC:
+					return true;
+			}
+		}
+	}
+
 	Model* newResolvedModel = NULL;
 	Model* result = symlink->LinkTo();
 
@@ -5623,7 +5859,7 @@ BPoseView::CreateSymlinkPoseTarget(Model* symlink)
 			entry_ref eref;
 			entry.GetNodeRef(&nref);
 			entry.GetRef(&eref);
-			if (eref.dir() != TargetModel()->NodeRef()->ino())
+			if (eref.vdirectory() != TargetModel()->NodeRef()->vnode())
 				WatchNewNode(&nref, B_WATCH_STAT | B_WATCH_ATTR | B_WATCH_NAME
 					| B_WATCH_INTERIM_STAT, this);
 			newResolvedModel = new Model(&entry, true);
@@ -5694,7 +5930,8 @@ BPoseView::EntryMoved(const BMessage* message)
 	message->FindRef("virtual:to directory", &dirRef);
 	message->FindRef("virtual:from directory", &oldDir);
 
-	node_ref dirNode = node_ref(dirRef.dev(), dirRef.dir());
+	node_ref dirNode = node_ref(dirRef.vdevice(), dirRef.vdirectory());
+
 
 	const char* name;
 	if (message->FindString("name", &name) != B_OK)
@@ -5707,14 +5944,13 @@ BPoseView::EntryMoved(const BMessage* message)
 	StatStruct st;
 	// get the inode of the root and check if we got a notification on it
 	if (stat("/", &st) >= 0
-		&& st.st_dev == dirNode.device
-		&& st.st_ino == dirNode.node) {
+		&& st.st_dev == dirNode.device()
+		&& st.st_ino == dirNode.node()) {
 		BString buffer;
 		buffer << "/" << name;
 		if (stat(buffer.String(), &st) >= 0) {
 			// point the dirNode to the actual volume
-			itemNode.node = st.st_ino;
-			itemNode.device = st.st_dev;
+			itemNode = node_ref(st.st_dev, st.st_ino);
 		}
 	}
 
@@ -5724,7 +5960,7 @@ BPoseView::EntryMoved(const BMessage* message)
 	node_ref thisDirNode;
 	if (TargetModel()->IsTrash()) {
 		BDirectory trashDir;
-		if (FSGetTrashDir(&trashDir, itemNode.dev()) != B_OK)
+		if (FSGetTrashDir(&trashDir, itemNode.device()) != B_OK)
 			return true;
 
 		trashDir.GetNodeRef(&thisDirNode);
@@ -5738,7 +5974,7 @@ BPoseView::EntryMoved(const BMessage* message)
 		assert_cast<BContainerWindow*>(Window())->UpdateTitle();
 	}
 
-	if (oldDir.dereference().dir() == dirNode.dereference().ino() || targetModel->IsQuery()
+	if (oldDir.directory() == dirNode.node() || targetModel->IsQuery()
 		|| targetModel->IsVirtualDirectory()) {
 		// rename or move of entry in this directory (or query)
 
@@ -5785,9 +6021,18 @@ BPoseView::EntryMoved(const BMessage* message)
 		}
 		if (pose != NULL)
 			pendingNodeMonitorCache.PoseCreatedOrMoved(this, pose);
-	} else if (oldDir.dereference().dir() == thisDirNode.dereference().ino()) {
-		DeletePose(&itemNode);
-	} else if (dirNode.ino() == thisDirNode.ino()) {
+	} else if (oldDir.directory() == thisDirNode.node()) {
+		int32 fallbackIndex;
+		BPose* fallbackPose = fPoseList->FindPose(&itemNode, &fallbackIndex);
+		if (fallbackPose == NULL && name != NULL && name[0] != '\0')
+			fallbackPose = fPoseList->FindPoseByFileName(name, &fallbackIndex);
+		if (fallbackPose != NULL) {
+			DeletePose(fallbackPose->TargetModel()->NodeRef(),
+				fallbackPose, fallbackIndex);
+		} else {
+			DeletePose(&itemNode);
+		}
+	} else if (dirNode.node() == thisDirNode.node()) {
 		EntryCreated(&dirNode, &itemNode, name);
 	}
 	TryUpdatingBrokenLinks();
@@ -5816,8 +6061,13 @@ BPoseView::WatchParentOf(const entry_ref* ref)
 	node_ref nref;
 	BNode(path.Path()).GetNodeRef(&nref);
 
-	if (nref != *TargetModel()->NodeRef())
-		watch_node(&nref, B_WATCH_DIRECTORY, this);
+	if (nref != *TargetModel()->NodeRef()) {
+		node_ref_key key(nref);
+		if (!fWatchedBrokenParents.Contains(key)) {
+			if (watch_node(&nref, B_WATCH_DIRECTORY, this) == B_OK)
+				fWatchedBrokenParents.Add(key);
+		}
+	}
 }
 
 
@@ -5864,8 +6114,10 @@ BPoseView::StopWatchingParentsOf(const entry_ref* ref)
 				keep = true;
 			}
 		}
-		if (!keep)
+		if (!keep) {
 			watch_node(&dirNode, B_STOP_WATCHING, this);
+			fWatchedBrokenParents.Remove(node_ref_key(dirNode));
+		}
 	}
 	delete brokenLinksCopy;
 }
@@ -5874,10 +6126,8 @@ BPoseView::StopWatchingParentsOf(const entry_ref* ref)
 bool
 BPoseView::AttributeChanged(const BMessage* message)
 {
-	entry_ref itemRef;
-
-	message->FindRef("virtual:node", &itemRef);
-	node_ref itemNode = node_ref(itemRef.dev(), itemRef.dir());
+	node_ref itemNode;
+	message->FindNodeRef("virtual:node", &itemNode);
 
 	const char* attrName;
 	if (message->FindString("attr", &attrName) != B_OK)
@@ -6213,9 +6463,9 @@ BPoseView::MoveListToTrash(BObjectList<entry_ref, true>* list, bool selectNext,
 
 inline void
 CopyOneTrashedRefAsEntry(const entry_ref* ref, BObjectList<entry_ref, true>* trashList,
-	BObjectList<entry_ref, true>* noTrashList, std::map<int32, bool>* deviceHasTrash)
+	BObjectList<entry_ref, true>* noTrashList, std::map<dev_t, bool>* deviceHasTrash)
 {
-	std::map<int32, bool> &deviceHasTrashTmp = *deviceHasTrash;
+	std::map<dev_t, bool> &deviceHasTrashTmp = *deviceHasTrash;
 		// work around stupid binding problems with EachListItem
 
 	BDirectory entryDir(ref);
@@ -6223,7 +6473,7 @@ CopyOneTrashedRefAsEntry(const entry_ref* ref, BObjectList<entry_ref, true>* tra
 		// volumes will get unmounted
 
 	// see if pose's device has a trash
-	int32 device = ref->dev();
+	int32 device = ref->vdevice();
 	BDirectory trashDir;
 
 	// cache up the result in a map so that we don't have to keep calling
@@ -6242,7 +6492,7 @@ CopyOneTrashedRefAsEntry(const entry_ref* ref, BObjectList<entry_ref, true>* tra
 
 static void
 CopyPoseOneAsEntry(BPose* pose, BObjectList<entry_ref, true>* trashList,
-	BObjectList<entry_ref, true>* noTrashList, std::map<int32, bool>* deviceHasTrash)
+	BObjectList<entry_ref, true>* noTrashList, std::map<dev_t, bool>* deviceHasTrash)
 {
 	CopyOneTrashedRefAsEntry(pose->TargetModel()->EntryRef(), trashList,
 		noTrashList, deviceHasTrash);
@@ -6252,7 +6502,7 @@ CopyPoseOneAsEntry(BPose* pose, BObjectList<entry_ref, true>* trashList,
 static bool
 CheckVolumeReadOnly(const entry_ref* ref)
 {
-	BVolume volume (ref->dereference().dev());
+	BVolume volume (ref->device());
 	if (volume.IsReadOnly()) {
 		BAlert* alert = new BAlert("",
 			B_TRANSLATE("Files cannot be moved or deleted from a read-only "
@@ -6274,7 +6524,7 @@ BPoseView::MoveSelectionOrEntryToTrash(const entry_ref* ref, bool selectNext)
 		BObjectList<entry_ref, true>(CountSelected());
 	BObjectList<entry_ref, true>* entriesToDeleteOnTheSpot = new
 		BObjectList<entry_ref, true>(20);
-	std::map<int32, bool> deviceHasTrash;
+	std::map<dev_t, bool> deviceHasTrash;
 
 	if (ref != NULL) {
 		if (!CheckVolumeReadOnly(ref)) {
@@ -8373,7 +8623,7 @@ BPoseView::CanUnmountSelection()
 		if (!model->IsVolume())
 			return false;
 
-		BVolume volume(model->NodeRef()->dereference().dev());
+		BVolume volume(model->NodeRef()->device());
 		if (volume.InitCheck() != B_OK)
 			continue;
 
@@ -8403,7 +8653,7 @@ BPoseView::UnmountSelectedVolumes()
 		if (!model->IsVolume())
 			continue;
 
-		BVolume volume(model->NodeRef()->dereference().dev());
+		BVolume volume(model->NodeRef()->device());
 		if (volume.InitCheck() != B_OK)
 			continue;
 
@@ -8412,7 +8662,8 @@ BPoseView::UnmountSelectedVolumes()
 			continue;
 
 		BMessage message(kUnmountVolume);
-		message.AddInt32("device_id", volume.Device());
+		// volume.Device() is dev_t; post as Int64 for mount_server.
+		message.AddInt64("device_id", (int64)volume.Device());
 		be_app->PostMessage(&message);
 	}
 }
@@ -8935,7 +9186,7 @@ BPoseView::SelectedVolumeIsReadOnly() const
 			entry.SetTo(pose->TargetModel()->EntryRef());
 			if (FSGetParentVirtualDirectoryAware(entry, parent) == B_OK) {
 				parent.GetNodeRef(&nref);
-				volume.SetTo(nref.dev());
+				volume.SetTo(nref.device());
 				if (volume.InitCheck() == B_OK && volume.IsReadOnly())
 					return true;
 			}
@@ -8948,18 +9199,18 @@ BPoseView::SelectedVolumeIsReadOnly() const
 			return true;
 		} else if (pose->TargetModel()->IsVolume()) {
 			// determine if read-only based on pose's volume
-			volume.SetTo(pose->TargetModel()->NodeRef()->dereference().dev());
+			volume.SetTo(pose->TargetModel()->NodeRef()->device());
 		} else {
 			// determine if read-only based on pose's parent directory
 			entry.SetTo(pose->TargetModel()->EntryRef());
 			if (FSGetParentVirtualDirectoryAware(entry, parent) == B_OK) {
 				parent.GetNodeRef(&nref);
-				volume.SetTo(nref.dev()); // not tested
+				volume.SetTo(nref.device());
 			}
 		}
 	} else {
 		// no items selected, check target volume instead
-		volume.SetTo(TargetModel()->NodeRef()->dereference().dev());
+		volume.SetTo(TargetModel()->NodeRef()->device());
 	}
 
 	return volume.InitCheck() == B_OK && volume.IsReadOnly();
@@ -8970,7 +9221,7 @@ bool
 BPoseView::TargetVolumeIsReadOnly() const
 {
 	Model* target = TargetModel();
-	BVolume volume(target->NodeRef()->dereference().dev());
+	BVolume volume(target->NodeRef()->device());
 
 	return target->IsQuery() || target->IsQueryTemplate() || target->IsVirtualDirectory()
 		|| (volume.InitCheck() == B_OK && volume.IsReadOnly());
@@ -9058,7 +9309,7 @@ BPoseView::ListModeExtent() const
 
 	BRect rect;
 	rect.left = rect.top = 0;
-	rect.right = column->Offset() + column->Width() + kTitleColumnRightExtraMargin
+	rect.right = column->Offset() + column->Width() + title_column_right_margin()
 		- kRoomForLine / 2.f;
 	rect.bottom = fListElemHeight * CurrentPoseList()->CountItems();
 
@@ -9673,7 +9924,7 @@ BPoseView::ResizeColumnToWidest(BColumn* column)
 
 	// returns true if actually resized
 
-	float maxWidth = kMinColumnWidth;
+	float maxWidth = min_column_width();
 
 	PoseList* poseList = CurrentPoseList();
 	int32 poseCount = poseList->CountItems();
@@ -9686,7 +9937,7 @@ BPoseView::ResizeColumnToWidest(BColumn* column)
 		}
 	}
 
-	if (maxWidth > kMinColumnWidth || maxWidth < column->Width()) {
+	if (maxWidth > min_column_width() || maxWidth < column->Width()) {
 		ResizeColumn(column, maxWidth);
 		return true;
 	}
@@ -9712,9 +9963,9 @@ BPoseView::ResizeColumn(BColumn* column, float newSize, float* lastLineDrawPos,
 
 	bool shrinking = newSize < column->Width();
 	columnDrawRect.left = column->Offset();
-	columnDrawRect.right = column->Offset() + kTitleColumnRightExtraMargin
+	columnDrawRect.right = column->Offset() + title_column_right_margin()
 		- kRoomForLine + newSize;
-	sourceRect.left = column->Offset() + kTitleColumnRightExtraMargin
+	sourceRect.left = column->Offset() + title_column_right_margin()
 		- kRoomForLine + column->Width();
 	destRect.left = columnDrawRect.right;
 	destRect.right = destRect.left + sourceRect.Width();
@@ -9729,7 +9980,7 @@ BPoseView::ResizeColumn(BColumn* column, float newSize, float* lastLineDrawPos,
 		column = fColumnList->ItemAt(index);
 		column->SetOffset(offset);
 		BColumn* last = column;
-		offset = last->Offset() + last->Width() + kTitleColumnExtraMargin;
+		offset = last->Offset() + last->Width() + title_column_margin();
 	}
 
 	if (shrinking) {
@@ -9785,7 +10036,7 @@ BPoseView::MoveColumnTo(BColumn* src, BColumn* dest)
 		BColumn* column = fColumnList->ItemAt(index);
 		column->SetOffset(offset);
 		BColumn* last = column;
-		offset = last->Offset() + last->Width() + kTitleColumnExtraMargin
+		offset = last->Offset() + last->Width() + title_column_margin()
 			- kRoomForLine / 2;
 	}
 
@@ -10385,6 +10636,30 @@ BPoseView::AdaptToVolumeChange(BMessage*)
 void
 BPoseView::AdaptToDesktopIntegrationChange(BMessage*)
 {
+}
+
+
+void
+BPoseView::AdaptToSnapToGridChange(BMessage*)
+{
+	SnapAllPosesToGrid();
+}
+
+
+void
+BPoseView::SnapAllPosesToGrid()
+{
+	if (Window() == NULL || ViewMode() == kListMode
+		|| !TrackerSettings().SnapToGrid())
+		return;
+
+	// poses already on a free grid slot are left alone
+	BRect bounds(Bounds());
+	int32 poseCount = fPoseList->CountItems();
+	for (int32 index = 0; index < poseCount; index++)
+		SnapPoseToGrid(fPoseList->ItemAt(index), bounds);
+
+	RecalcExtent();
 }
 
 

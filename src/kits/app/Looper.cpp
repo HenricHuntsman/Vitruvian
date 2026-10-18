@@ -1,5 +1,6 @@
 /*
  * Copyright 2001-2015 Haiku, Inc. All rights reserved
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -7,6 +8,7 @@
  *		Axel Dörfler, axeld@pinc-software.de
  *		Erik Jaesler, erik@cgsoftware.com
  *		Ingo Weinhold, bonefish@@users.sf.net
+ *		Dario Casalinuovo
  */
 
 
@@ -32,6 +34,7 @@
 #include <DirectMessageTarget.h>
 #include <LooperList.h>
 #include <MessagePrivate.h>
+#include <VRefCache.h>
 #include <TokenSpace.h>
 
 
@@ -501,9 +504,9 @@ BLooper::Run()
 		return fMsgPort;
 
 	fRunCalled = true;
+	Unlock();
 
 	status_t err = resume_thread(fThread);
-	Unlock();
 	if (err < B_OK)
 		return err;
 
@@ -1098,57 +1101,108 @@ BLooper::_task0_(void* arg)
 }
 
 
-void*
-BLooper::ReadRawFromPort(int32* msgCode, bigtime_t timeout)
-{
-	PRINT(("BLooper::ReadRawFromPort()\n"));
-	uint8* buffer = NULL;
-	ssize_t bufferSize;
-
-	do {
-		bufferSize = port_buffer_size_etc(fMsgPort, B_RELATIVE_TIMEOUT, timeout);
-	} while (bufferSize == B_INTERRUPTED);
-
-	if (bufferSize < B_OK) {
-		PRINT(("BLooper::ReadRawFromPort(): failed: %ld\n", bufferSize));
-		return NULL;
-	}
-
-	if (bufferSize > 0)
-		buffer = (uint8*)malloc(bufferSize);
-
-	// we don't want to wait again here, since that can only mean
-	// that someone else has read our message and our bufferSize
-	// is now probably wrong
-	PRINT(("read_port()...\n"));
-	bufferSize = read_port_etc(fMsgPort, msgCode, buffer, bufferSize,
-		B_RELATIVE_TIMEOUT, 0);
-
-	if (bufferSize < B_OK) {
-		free(buffer);
-		return NULL;
-	}
-
-	PRINT(("BLooper::ReadRawFromPort() read: %.4s, %p (%d bytes)\n",
-		(char*)msgCode, buffer, bufferSize));
-
-	return buffer;
-}
-
-
 BMessage*
 BLooper::ReadMessageFromPort(bigtime_t timeout)
 {
 	PRINT(("BLooper::ReadMessageFromPort()\n"));
-	int32 msgCode;
-	BMessage* message = NULL;
 
-	void* buffer = ReadRawFromPort(&msgCode, timeout);
-	if (buffer == NULL)
+	ssize_t bufferSize;
+	do {
+		bufferSize = port_buffer_size_etc(fMsgPort, B_RELATIVE_TIMEOUT,
+			timeout);
+	} while (bufferSize == B_INTERRUPTED);
+	if (bufferSize < B_OK) {
+		PRINT(("BLooper::ReadMessageFromPort(): port_buffer_size_etc "
+			"failed: %ld\n", bufferSize));
 		return NULL;
+	}
 
-	message = ConvertToMessage(buffer, msgCode);
+	void* buffer = NULL;
+	if (bufferSize > 0)
+		buffer = malloc(bufferSize);
+
+	port_cap_out stackCaps[8];
+	port_cap_out* caps = stackCaps;
+	size_t capsCapacity = sizeof(stackCaps) / sizeof(stackCaps[0]);
+	size_t actualBytes = 0;
+	size_t actualCaps = 0;
+	int32 msgCode;
+	ssize_t readResult;
+	port_message_info senderInfo;
+	memset(&senderInfo, 0, sizeof(senderInfo));
+	senderInfo.sender = (uid_t)-1;
+	for (;;) {
+		actualBytes = bufferSize;
+		actualCaps = capsCapacity;
+		readResult = read_port_with_caps_etc(fMsgPort, &msgCode, buffer,
+			&actualBytes, caps, &actualCaps, B_RELATIVE_TIMEOUT, 0,
+			&senderInfo);
+		if (readResult == B_INTERRUPTED)
+			continue;
+		if (readResult != B_BUFFER_OVERFLOW)
+			break;
+
+		if (actualCaps > capsCapacity) {
+			if (caps != stackCaps)
+				free(caps);
+			caps = (port_cap_out*)malloc(actualCaps * sizeof(port_cap_out));
+			if (caps == NULL) {
+				free(buffer);
+				return NULL;
+			}
+			capsCapacity = actualCaps;
+		}
+		if (actualBytes > (size_t)bufferSize) {
+			free(buffer);
+			buffer = malloc(actualBytes);
+			if (buffer == NULL) {
+				if (caps != stackCaps)
+					free(caps);
+				return NULL;
+			}
+			bufferSize = (ssize_t)actualBytes;
+		}
+	}
+
+	if (readResult < B_OK) {
+		free(buffer);
+		if (caps != stackCaps)
+			free(caps);
+		return NULL;
+	}
+
+	// Adopt the kernel-minted caps. Do NOT stamp CAPS_ADOPTED on the
+	// buffer — copies must run their own acquire pass; RegisterAdoptedTickets
+	// dedups by keeping the kernel-minted ticket.
+	std::vector<BPrivate::vref_ticket> adoptedTickets;
+	if (actualCaps > 0)
+		adoptedTickets.resize(actualCaps);
+	BPrivate::VRefCache::AdoptCaps(caps, actualCaps,
+		actualCaps > 0 ? adoptedTickets.data() : NULL);
+
+	BMessage* message = ConvertToMessage(buffer, msgCode);
+	if (message != NULL)
+		BMessage::Private(message).SetSenderUid(senderInfo.sender);
+
+	if (actualCaps > 0) {
+		if (message != NULL) {
+			BMessage::Private::RegisterAdoptedTickets(message,
+				caps, actualCaps, adoptedTickets.data());
+		} else {
+			for (size_t i = 0; i < actualCaps; i++) {
+				if (caps[i].kind == B_PORT_CAP_VREF
+						&& adoptedTickets[i]
+							!= BPrivate::B_INVALID_VREF_TICKET) {
+					BPrivate::VRefCache::Release(caps[i].vref_id_,
+						adoptedTickets[i]);
+				}
+			}
+		}
+	}
+
 	free(buffer);
+	if (caps != stackCaps)
+		free(caps);
 
 	PRINT(("BLooper::ReadMessageFromPort() done: %p\n", message));
 	return message;
@@ -1189,13 +1243,9 @@ BLooper::task_looper()
 	// loop: As long as we are not terminating.
 	while (!fTerminating) {
 		PRINT(("LOOPER: outer loop\n"));
-		// TODO: timeout determination algo
-		//	Read from message port (how do we determine what the timeout is?)
-		PRINT(("LOOPER: MessageFromPort()...\n"));
 		BMessage* msg = MessageFromPort();
 		PRINT(("LOOPER: ...done\n"));
 
-		//	Did we get a message?
 		if (msg)
 			_AddMessagePriv(msg);
 

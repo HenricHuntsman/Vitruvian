@@ -1,3 +1,9 @@
+# Current upstream candidate
+
+This candidate combines upstream 606e0333580c7170037f97b74e0c51ca35803dc2 with the fork's recovery documentation. Upstream release 0.6.2 lists amd64 and arm64 ISO/raw images and SHA-256 files: https://github.com/VitruvianOS/Vitruvian/releases/tag/0.6.2 . Release presence is not a boot test by this review. The updated configure source supports architecture selection beyond the old fork's arm64 stub and makes SSH debug opt-in. Executed: sh -n on the updated configure script passed. No full compilation, ISO creation or VM/hardware boot test was run. Treat the older inspection below as historical, tied to the old fork source.
+
+---
+
 # Fork revival review
 
 Reviewed 18 October 2026. This repository is a fork of [VitruvianOS/Vitruvian](https://github.com/VitruvianOS/Vitruvian); preserve upstream authorship and licences. Source presence does not establish Henric-authored implementation or a successful fork build.

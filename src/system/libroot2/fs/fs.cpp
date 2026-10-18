@@ -4,22 +4,90 @@
  */
 
 #include <syscalls.h>
+#include <VRefCache.h>
 
 #include <NodeMonitor.h>
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <string.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/sysmacros.h>
 
 #include "LinuxVolume.h"
 #include "KernelDebug.h"
 
 
-// Forward declarations for attribute directory support (from attr.cpp)
-extern bool _is_attr_dir_fd(int fd);
-extern ssize_t _read_attr_dir(int fd, struct dirent* buffer, size_t bufferSize, uint32 maxCount);
-extern status_t _rewind_attr_dir(int fd);
-extern status_t _close_attr_dir(int fd);
+// "dir" may itself be "/" here: unlike Haiku, Vitruvian mounts the boot
+// volume on the real root, and "%s/%s" would then yield "//leaf".
+static status_t
+join_path(const char* dir, const char* leaf, char* buffer, size_t bufferSize)
+{
+	size_t dirLength = strlen(dir);
+	bool hasTrailingSlash = dirLength > 0 && dir[dirLength - 1] == '/';
+	const char* format = hasTrailingSlash ? "%s%s" : "%s/%s";
+
+	int written = snprintf(buffer, bufferSize, format, dir, leaf);
+	if (written < 0 || (size_t)written >= bufferSize)
+		return B_BUFFER_OVERFLOW;
+
+	return B_OK;
+}
+
+
+status_t
+_kern_read_statx(int fd, const char* path, bool traverseLink,
+	unsigned int mask, struct statx* stx)
+{
+	CALLED();
+
+	if (stx == NULL || (fd < 0 && path == NULL))
+		return B_BAD_VALUE;
+
+	int flags = traverseLink ? 0 : AT_SYMLINK_NOFOLLOW;
+	if (path == NULL || path[0] == '\0') {
+		flags |= AT_EMPTY_PATH;
+		path = "";
+	}
+
+	if (fd < 0)
+		fd = AT_FDCWD;
+
+	if (::statx(fd, path, flags, mask, stx) == 0)
+		return B_OK;
+
+	// Kernel/filesystem without statx (pre-4.11 or unusual FS): fall back to
+	// fstatat and synthesize a struct statx without STATX_BTIME.
+	if (errno != ENOSYS)
+		return -errno;
+
+	struct stat st;
+	if (fstatat(fd, path, &st, flags & ~AT_EMPTY_PATH) < 0)
+		return -errno;
+
+	memset(stx, 0, sizeof(*stx));
+	stx->stx_mask = STATX_BASIC_STATS;
+	stx->stx_blksize = st.st_blksize;
+	stx->stx_nlink = st.st_nlink;
+	stx->stx_uid = st.st_uid;
+	stx->stx_gid = st.st_gid;
+	stx->stx_mode = st.st_mode;
+	stx->stx_ino = st.st_ino;
+	stx->stx_size = st.st_size;
+	stx->stx_blocks = st.st_blocks;
+	stx->stx_atime.tv_sec = st.st_atim.tv_sec;
+	stx->stx_atime.tv_nsec = st.st_atim.tv_nsec;
+	stx->stx_mtime.tv_sec = st.st_mtim.tv_sec;
+	stx->stx_mtime.tv_nsec = st.st_mtim.tv_nsec;
+	stx->stx_ctime.tv_sec = st.st_ctim.tv_sec;
+	stx->stx_ctime.tv_nsec = st.st_ctim.tv_nsec;
+	stx->stx_dev_major = major(st.st_dev);
+	stx->stx_dev_minor = minor(st.st_dev);
+	stx->stx_rdev_major = major(st.st_rdev);
+	stx->stx_rdev_minor = minor(st.st_rdev);
+	return B_OK;
+}
 
 
 status_t
@@ -28,24 +96,30 @@ _kern_read_stat(int fd, const char* path, bool traverseLink,
 {
 	CALLED();
 
-	if (fd < 0 && path == NULL)
-		return B_ERROR;
+	struct statx stx;
+	status_t err = _kern_read_statx(fd, path, traverseLink,
+		STATX_BASIC_STATS, &stx);
+	if (err != B_OK)
+		return err;
 
-	int flags = traverseLink == false ? AT_SYMLINK_NOFOLLOW : 0;
-	if (path == NULL) {
-		if (!traverseLink) {
-			if (fstat(fd, st) < 0)
-				return B_ENTRY_NOT_FOUND;
-
-			return B_OK;
-		}
-		flags |= AT_EMPTY_PATH;
-	}
-
-	if (fd < 0)
-		fd = AT_FDCWD;
-
-	return fstatat(fd, path, st, flags) < 0 ? B_ENTRY_NOT_FOUND : B_OK;
+	memset(st, 0, sizeof(*st));
+	st->st_dev = makedev(stx.stx_dev_major, stx.stx_dev_minor);
+	st->st_ino = stx.stx_ino;
+	st->st_mode = stx.stx_mode;
+	st->st_nlink = stx.stx_nlink;
+	st->st_uid = stx.stx_uid;
+	st->st_gid = stx.stx_gid;
+	st->st_rdev = makedev(stx.stx_rdev_major, stx.stx_rdev_minor);
+	st->st_size = stx.stx_size;
+	st->st_blksize = stx.stx_blksize;
+	st->st_blocks = stx.stx_blocks;
+	st->st_atim.tv_sec = stx.stx_atime.tv_sec;
+	st->st_atim.tv_nsec = stx.stx_atime.tv_nsec;
+	st->st_mtim.tv_sec = stx.stx_mtime.tv_sec;
+	st->st_mtim.tv_nsec = stx.stx_mtime.tv_nsec;
+	st->st_ctim.tv_sec = stx.stx_ctime.tv_sec;
+	st->st_ctim.tv_nsec = stx.stx_ctime.tv_nsec;
+	return B_OK;
 }
 
 
@@ -87,10 +161,6 @@ status_t
 _kern_close(int fd)
 {
 	CALLED();
-
-	// Check if this is an attribute directory fd
-	if (_is_attr_dir_fd(fd))
-		return _close_attr_dir(fd);
 
 	return (close(fd) < 0) ? -errno : B_OK;
 }
@@ -157,14 +227,20 @@ _kern_open_parent_dir(int fd, char* name, size_t length)
 			return ret;
 		}
 
-		char* baseName = basename(buf);
-		if (baseName == NULL) {
-			close(dirfd);
-			return B_ENTRY_NOT_FOUND;
-		}
-
-		if (strcmp(baseName, "/") == 0)
+		// Treat empty path and "/" as the root -> leaf name must be "."
+		// (the GNU basename() returns "" instead of "." for these inputs).
+		char* baseName;
+		if (buf[0] == '\0' || strcmp(buf, "/") == 0) {
 			baseName = (char*)".";
+		} else {
+			baseName = basename(buf);
+			if (baseName == NULL) {
+				close(dirfd);
+				return B_ENTRY_NOT_FOUND;
+			}
+			if (baseName[0] == '\0' || strcmp(baseName, "/") == 0)
+				baseName = (char*)".";
+		}
 
 		size_t len = strlen(baseName);
 		if (len+1 > length) {
@@ -188,7 +264,7 @@ _kern_open_dir_virtual_ref(vref_id id, const char* name)
 	if (id < 0)
 		return B_BAD_VALUE;
 
-	int fd = open_vref(id);
+	int fd = BPrivate::VRefCache::Open(id);
 	if (fd < 0)
 		return fd;
 
@@ -240,7 +316,7 @@ _kern_open_virtual_ref(vref_id id, const char* name,
 	if (id < 0)
 		return B_BAD_VALUE;
 
-	int fd = open_vref(id);
+	int fd = BPrivate::VRefCache::Open(id);
 	if (fd < 0)
 		return fd;
 
@@ -248,6 +324,8 @@ _kern_open_virtual_ref(vref_id id, const char* name,
 		return fd;
 
 	int retFd = openat(fd, name, openMode, perms);
+	if (retFd < 0 && errno == EISDIR)
+		retFd = openat(fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
 	close(fd);
 	return (retFd < 0) ? -errno : retFd;
 }
@@ -303,7 +381,7 @@ _kern_entry_ref_to_path(dev_t device, ino_t node, const char* leaf,
 		if (id < 0)
 			return B_ENTRY_NOT_FOUND;
 
-		int fd = open_vref(id);
+		int fd = BPrivate::VRefCache::Open(id);
 		if (fd < 0)
 			return fd;
 
@@ -314,40 +392,29 @@ _kern_entry_ref_to_path(dev_t device, ino_t node, const char* leaf,
 		return ret;
 	}
 
-	// This is an exception to support opening volumes. If the dev_t, ino_t
-	// and leaf match, then we open the entry ref.
-	struct mntent* mountEntry = BKernelPrivate::LinuxVolume::FindVolume(device);
-	if (!mountEntry) {
+	// Exception to support opening volume roots: if dev_t/ino_t/leaf match
+	// the mount point, hand back the mount-point path.
+	BPrivate::MountEntry mountEntry;
+	if (!BPrivate::MountInfo::FindByDev(device, &mountEntry))
 		return B_ENTRY_NOT_FOUND;
-	}
 
+	const char* mntDir = mountEntry.mount_point.String();
 	struct stat st;
-	if (stat(mountEntry->mnt_dir, &st) < 0) {
-		BKernelPrivate::LinuxVolume::FreeVolumeEntry(mountEntry);
+	if (stat(mntDir, &st) < 0)
 		return -errno;
+
+	if (node != st.st_ino)
+		return B_ENTRY_NOT_FOUND;
+
+	if (leaf == NULL || strcmp(leaf, ".") == 0) {
+		if (strlcpy(userPath, mntDir, pathLength) >= pathLength)
+			return B_BUFFER_OVERFLOW;
+	} else {
+		status_t joinStatus = join_path(mntDir, leaf, userPath, pathLength);
+		if (joinStatus != B_OK)
+			return joinStatus;
 	}
-
-	if (node == st.st_ino) {
-		if (leaf == NULL || strcmp(leaf, ".") == 0) {
-			// Caller wants the mount directory itself (e.g. "/" for root)
-			if (strlcpy(userPath, mountEntry->mnt_dir, pathLength) >= pathLength) {
-				BKernelPrivate::LinuxVolume::FreeVolumeEntry(mountEntry);
-				return B_BUFFER_OVERFLOW;
-			}
-		} else {
-			if (snprintf(userPath, pathLength, "%s/%s",
-					mountEntry->mnt_dir, leaf) >= (int)pathLength) {
-				BKernelPrivate::LinuxVolume::FreeVolumeEntry(mountEntry);
-				return B_BUFFER_OVERFLOW;
-			}
-		}
-		BKernelPrivate::LinuxVolume::FreeVolumeEntry(mountEntry);
-		return B_OK;
-	}
-
-	BKernelPrivate::LinuxVolume::FreeVolumeEntry(mountEntry);
-
-	return B_ENTRY_NOT_FOUND;
+	return B_OK;
 }
 
 
@@ -368,7 +435,7 @@ _kern_open_entry_ref_fd(dev_t device, ino_t node, const char* name,
 
 
 status_t
-_kern_entry_ref_to_path_by_fd(int fd, team_id team, char* name,
+_kern_entry_ref_to_path_by_fd(int fd, team_id team, const char* name,
 	char* buffer, size_t bufferSize)
 {
 	// NULL or "." both mean "the fd itself" — "." is the sentinel used by
@@ -390,10 +457,7 @@ _kern_entry_ref_to_path_by_fd(int fd, team_id team, char* name,
 	if (ret != B_OK)
 		return ret;
 
-	if (snprintf(buffer, bufferSize, "%s/%s", resolvedPath, name) >= (int)bufferSize)
-		return B_BUFFER_OVERFLOW;
-
-	return B_OK;
+	return join_path(resolvedPath, name, buffer, bufferSize);
 }
 
 
@@ -496,22 +560,14 @@ _kern_write_stat(int fd, const char* path, bool traverseLink,
 		}
 	}
 
-	if (statMask & B_STAT_UID) {
+	if (statMask & (B_STAT_UID | B_STAT_GID)) {
+		uid_t uid = (statMask & B_STAT_UID) ? st->st_uid : (uid_t)-1;
+		gid_t gid = (statMask & B_STAT_GID) ? st->st_gid : (gid_t)-1;
 		if (path == NULL) {
-			if (fchown(fd, st->st_uid, (gid_t)-1) < 0)
+			if (fchown(fd, uid, gid) < 0)
 				return -errno;
 		} else {
-			if (fchownat(fd, path, st->st_uid, (gid_t)-1, flags) < 0)
-				return -errno;
-		}
-	}
-
-	if (statMask & B_STAT_GID) {
-		if (path == NULL) {
-			if (fchown(fd, (uid_t)-1, st->st_gid) < 0)
-				return -errno;
-		} else {
-			if (fchownat(fd, path, (uid_t)-1, st->st_gid, flags) < 0)
+			if (fchownat(fd, path, uid, gid, flags) < 0)
 				return -errno;
 		}
 	}
@@ -520,6 +576,13 @@ _kern_write_stat(int fd, const char* path, bool traverseLink,
 		if (ftruncate64(fd, st->st_size) < 0)
 			return -errno;
 	}
+
+	// Linux has no userspace API to set the inode birth time (btime). statx
+	// can read STATX_BTIME but no setter exists. If a caller sets only
+	// B_STAT_CREATION_TIME we report B_NOT_SUPPORTED; if combined with other
+	// flags we honour those and ignore the creation-time portion.
+	if (statMask == B_STAT_CREATION_TIME)
+		return B_NOT_SUPPORTED;
 
 	if (statMask & (B_STAT_MODIFICATION_TIME | B_STAT_ACCESS_TIME)) {
 		struct timespec times[2];
@@ -563,10 +626,6 @@ _kern_read_dir(int fd, struct dirent* buffer, size_t bufferSize, uint32 maxCount
 
 	if (fd < 0)
 		return B_FILE_ERROR;
-
-	// Check if this is an attribute directory fd
-	if (_is_attr_dir_fd(fd))
-		return _read_attr_dir(fd, buffer, bufferSize, maxCount);
 
 	// linux_dirent64 header (LP64): d_ino(8) + d_off(8) + d_reclen(2) + d_type(1) = 19 bytes
 	const size_t LINUX_DIRENT64_HEADER = 8 + 8 + 2 + 1;
@@ -645,6 +704,19 @@ _kern_read_dir(int fd, struct dirent* buffer, size_t bufferSize, uint32 maxCount
 }
 
 
+ssize_t
+_kern_read_dents(int fd, void* buffer, size_t bufferSize)
+{
+	if (buffer == NULL || bufferSize == 0)
+		return B_BAD_VALUE;
+	if (fd < 0)
+		return B_FILE_ERROR;
+
+	ssize_t ret = syscall(SYS_getdents64, fd, buffer, bufferSize);
+	return ret < 0 ? -errno : ret;
+}
+
+
 off_t
 _kern_seek(int fd, off_t pos, int seekType)
 {
@@ -666,7 +738,8 @@ _kern_read(int fd, off_t pos, void* buffer, size_t bufferSize)
 	if (fd < 0)
 		return B_FILE_ERROR;
 
-	ssize_t size = pread(fd, buffer, bufferSize, pos);
+	ssize_t size = (pos < 0) ? read(fd, buffer, bufferSize)
+		: pread(fd, buffer, bufferSize, pos);
 	return (size < 0) ? -errno : size;
 }
 
@@ -679,7 +752,8 @@ _kern_write(int fd, off_t pos, const void* buffer, size_t bufferSize)
 	if (fd < 0)
 		return B_FILE_ERROR;
 
-	ssize_t size = pwrite(fd, buffer, bufferSize, pos);
+	ssize_t size = (pos < 0) ? write(fd, buffer, bufferSize)
+		: pwrite(fd, buffer, bufferSize, pos);
 	return (size < 0) ? -errno : size;
 }
 
@@ -691,10 +765,6 @@ _kern_rewind_dir(int fd)
 
 	if (fd < 0)
 		return B_FILE_ERROR;
-
-	// Check if this is an attribute directory fd
-	if (_is_attr_dir_fd(fd))
-		return _rewind_attr_dir(fd);
 
 	return _kern_seek(fd, 0, SEEK_SET);
 }

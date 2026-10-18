@@ -1,5 +1,6 @@
-Application(
-	SGITranslator
+
+TranslatorAddOn(
+	SGITranslator SHARED
 
 	SOURCES
 	SGIImage.cpp
@@ -14,3 +15,4 @@ Application(
 
 	RDEF SGITranslator.rdef
 )
+DoCatalogs("x-vnd.Haiku-SGITranslator" add-ons/translators/sgi)

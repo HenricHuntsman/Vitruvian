@@ -46,6 +46,33 @@ enum {
 	B_GET_LAUNCH_TARGET_INFO	= 'lntI',
 	B_GET_LAUNCH_JOB_INFO		= 'lnjI',
 	B_GET_LAUNCH_LOG			= 'lnLL',
+
+	// Janus login broker; sender_uid-gated to vos_login uid.
+	B_JANUS_AUTH_REQUEST		= 'jnaR',
+	B_JANUS_LOGIN_OK			= 'jnlO',
+	// Janus logout: sender_uid-gated to the currently authenticated
+	// user's uid; ignored if a system shutdown is already in flight.
+	B_JANUS_LOGOUT				= 'jnlX',
+
+	// Screen lock: LOCK_SESSION from the session user or root, UNLOCK_AUTH
+	// from the session user (PAM), LOCKER_DIED from app_server (relaunch).
+	B_JANUS_LOCK_SESSION		= 'jnLS',
+	B_JANUS_UNLOCK_AUTH			= 'jnUA',
+	B_JANUS_LOCKER_DIED			= 'jnLD',
+
+	// input_server asks janus to switch VT ("vt" int32); relayed to the
+	// current janus_session's control port, since that owns the seat.
+	B_JANUS_SWITCH_VT			= 'jnvt',
+
+	// janus_session -> supervisor at startup ("port" string, "uid" int32,
+	// "greeter" bool): registers this login's local control port.
+	B_JANUS_SESSION_HELLO		= 'jnsH',
+	// janus_session -> supervisor per spawned child ("name", "signature"
+	// strings, "pid", "port" int32): mirrors it into the app registry.
+	B_JANUS_REGISTER_APP		= 'jnrA',
+	// janus_session -> supervisor when a child is reaped ("signature"
+	// string, "pid" int32): drops that row from the app registry.
+	B_JANUS_UNREGISTER_APP		= 'jnuA',
 };
 
 

@@ -8,6 +8,11 @@ find_path(DRM_INCLUDE_DIR NAMES libdrm/drm.h)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBSEAT REQUIRED IMPORTED_TARGET libseat)
 pkg_check_modules(LIBEVDEV REQUIRED IMPORTED_TARGET libevdev)
+pkg_check_modules(GBM gbm)
+
+if(GBM_FOUND)
+	add_definitions(-DHAVE_GBM)
+endif()
 
 
 Server(
@@ -27,8 +32,10 @@ Server(
 		DesktopListener.cpp
 		DesktopSettings.cpp
 		DirectWindowInfo.cpp
+		DisplayChangeTracker.cpp
 		DrawState.cpp
 		EventDispatcher.cpp
+		PowerManager.cpp
 		EventStream.cpp
 		InputManager.cpp
 		IntPoint.cpp
@@ -45,6 +52,7 @@ Server(
 		Screen.cpp
 		ScreenConfigurations.cpp
 		ScreenManager.cpp
+		ScreenRelayout.cpp
 		ServerApp.cpp
 		ServerBitmap.cpp
 		ServerCursor.cpp
@@ -115,12 +123,16 @@ Server(
 		drawing/interface/linux/drm/DrmBuffer.cpp
 		drawing/interface/linux/drm/modeset.c
 
-		#drawing/interface/linux/fbdev/FBDevHWInterface.cpp
-		#drawing/interface/linux/fbdev/FBDevBuffer.cpp
+		drawing/interface/linux/fbdev/FBDevHWInterface.cpp
+		drawing/interface/linux/fbdev/FBDevBuffer.cpp
 		#drawing/interface/linux/fbdev/TTy.cpp
 
-		drawing/interface/linux/LibInputEventStream.cpp
-		#drawing/interface/linux/LibEvdevEventStream.cpp
+		#drawing/interface/linux/LibInputEventStream.cpp
+		# LibEvdevEventStream: fallback event stream (hardcoded US
+		# scancode table, no xkbcommon). Dormant unless the caller
+		# sets APP_SERVER_EMBED_INPUT=1 at spawn time — the default
+		# input path is input_server, run pre-auth via janus.
+		drawing/interface/linux/LibEvdevEventStream.cpp
 
 		stackandtile/SATDecorator.cpp
 		stackandtile/SATGroup.cpp
@@ -129,16 +141,18 @@ Server(
 		stackandtile/Stacking.cpp
 		stackandtile/Tiling.cpp
 
-	LIBS be root localestub shared agg icon linprog ${FREETYPE_LIBRARY}
-		${INPUT_LIBRARIES} ${UDEV_LIBRARIES} ${DRM_LIBRARIES} ${SEAT_LIBRARIES}
-		${EVDEV_LIBRARIES}
+	LIBS localestub shared agg icon linprog systemd ${FREETYPE_LIBRARY}
+		${UDEV_LIBRARIES} ${DRM_LIBRARIES} ${SEAT_LIBRARIES}
+		${LIBEVDEV_LIBRARIES} ${GBM_LIBRARIES} backlight
 
 	RDEF app_server.rdef
 
 	INCLUDES
 	${DRM_INCLUDE_DIR}/libdrm/
 	${FREETYPE_INCLUDE_DIRS}
-	${EVDEV_INCLUDES}
+	${LIBEVDEV_INCLUDE_DIRS}
+	${GBM_INCLUDE_DIRS}
+	"${PROJECT_SOURCE_DIR}/src/libs/backlight/"
 	"./drawing"
 	"./drawing/interface/linux"
 	"./drawing/interface/linux/drm"
@@ -154,7 +168,11 @@ Server(
 
 UsePrivateHeaders(app_server app interface graphics graphics/common kernel support)
 
+# Decorator add-ons subclass app_server classes and resolve them here.
+set_target_properties(app_server PROPERTIES ENABLE_EXPORTS ON)
+
 #TODO: we want a custom target_include_directories that does that:
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -iquote ${PROJECT_SOURCE_DIR}/src/servers/app/")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -iquote ${PROJECT_SOURCE_DIR}/src/servers/app/ \
-	-iquote ${PROJECT_SOURCE_DIR}/src/servers/app/drawing/Painter/bitmap_painter/")
+	-iquote ${PROJECT_SOURCE_DIR}/src/servers/app/drawing/Painter/bitmap_painter/ \
+	-iquote ${PROJECT_SOURCE_DIR}/src/add-ons/input_server/devices/keyboard/")

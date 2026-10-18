@@ -424,33 +424,6 @@ VirtualDirectoryManager::GetParentDirectoryDefinitionFile(
 	return _entryRef.name != NULL;
 }
 
-#ifndef __VOS__
-status_t
-VirtualDirectoryManager::TranslateDirectoryEntry(
-	const node_ref& definitionFileRef, dirent* buffer)
-{
-	#ifndef __VOS__
-	NotOwningEntryRef entryRef(buffer->d_pdev, buffer->d_pino, buffer->d_name);
-	node_ref nodeRef(buffer->d_dev, buffer->d_ino);
-
-	status_t result = TranslateDirectoryEntry(definitionFileRef, entryRef,
-		nodeRef);
-	if (result != B_OK)
-		return result;
-
-	buffer->d_pdev = entryRef.device;
-	buffer->d_pino = entryRef.directory;
-	buffer->d_dev = nodeRef.device;
-	buffer->d_ino = nodeRef.node;
-
-	return B_OK;
-	#endif
-	UNIMPLEMENTED();
-	return B_ERROR;
-}
-#endif
-
-
 status_t
 VirtualDirectoryManager::TranslateDirectoryEntry(
 	const node_ref& definitionFileRef, entry_ref& _entryRef, node_ref& _nodeRef)
@@ -529,7 +502,7 @@ VirtualDirectoryManager::TranslateDirectoryEntry(
 			"  name \"%s\"\n"
 			"}\n"
 			"subdir \"%s\"\n",
-			rootEntryRef.dev(), rootEntryRef.dir(), rootEntryRef.name,
+			rootEntryRef.vdevice(), rootEntryRef.vdirectory(), rootEntryRef.name,
 			info->Path().String());
 		// failure is not nice, but not mission critical for this application
 		if (!definitionFileContent.IsEmpty()) {
@@ -540,7 +513,7 @@ VirtualDirectoryManager::TranslateDirectoryEntry(
 
 	const entry_ref& entryRef = info->DefinitionFileEntryRef();
 	_nodeRef = info->DefinitionFileNodeRef();
-	_entryRef = entry_ref(entryRef.dev(), entryRef.dir(), _entryRef.name);
+	_entryRef = entry_ref(entryRef.vdevice(), entryRef.vdirectory(), _entryRef.name);
 	return B_OK;
 }
 

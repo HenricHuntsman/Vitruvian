@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <cmath>
 
 #include <Catalog.h>
 #include <Clipboard.h>
@@ -17,7 +18,9 @@
 #include <Handler.h>
 #include <Input.h>
 #include <List.h>
+#ifndef __VOS__
 #include <MediaRoster.h>
+#endif
 #include <Messenger.h>
 #include <Roster.h>
 
@@ -86,6 +89,7 @@ SystemInfoHandler::StartWatching()
 		_UpdateClipboardData();
 	}
 
+#ifndef __VOS__
 	if (BMediaRoster::Roster(&status) && (status >= B_OK)) {
 		BMediaRoster::Roster()->StartWatching(BMessenger(this), B_MEDIA_NODE_CREATED);
 		BMediaRoster::Roster()->StartWatching(BMessenger(this), B_MEDIA_NODE_DELETED);
@@ -105,6 +109,7 @@ SystemInfoHandler::StartWatching()
 		}
 		// TODO: get initial buffer count
 	}
+#endif
 
 	// doesn't work on R5
 	watch_input_devices(BMessenger(this), true);
@@ -116,6 +121,7 @@ SystemInfoHandler::StopWatching()
 {
 	status_t status;
 	watch_input_devices(BMessenger(this), false);
+#ifndef __VOS__
 	if (BMediaRoster::Roster(&status) && (status >= B_OK)) {
 		BMediaRoster::Roster()->StopWatching(BMessenger(this), B_MEDIA_NODE_CREATED);
 		BMediaRoster::Roster()->StopWatching(BMessenger(this), B_MEDIA_NODE_DELETED);
@@ -124,6 +130,7 @@ SystemInfoHandler::StopWatching()
 		BMediaRoster::Roster()->StopWatching(BMessenger(this), B_MEDIA_BUFFER_CREATED);
 		BMediaRoster::Roster()->StopWatching(BMessenger(this), B_MEDIA_BUFFER_DELETED);
 	}
+#endif
 	if (be_clipboard)
 		be_clipboard->StopWatching(BMessenger(this));
 	if (be_roster)
@@ -146,6 +153,7 @@ SystemInfoHandler::MessageReceived(BMessage* message)
 		case B_CLIPBOARD_CHANGED:
 			_UpdateClipboardData();
 			break;
+#ifndef __VOS__
 		case B_MEDIA_NODE_CREATED:
 			fMediaNodes++;
 			break;
@@ -164,6 +172,7 @@ SystemInfoHandler::MessageReceived(BMessage* message)
 		case B_MEDIA_BUFFER_DELETED:
 			fMediaBuffers--;
 			break;
+#endif
 		default:
 			message->PrintToStream();
 			BHandler::MessageReceived(message);

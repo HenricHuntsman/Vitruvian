@@ -640,7 +640,7 @@ StyledEditWindow::MessageReceived(BMessage* message)
 			bool readOnly = !fTextView->IsEditable();
 			message->AddBool("readOnly", readOnly);
 			if (readOnly) {
-				BVolume volume(fNodeRef.dereference().dev());
+				BVolume volume(fNodeRef.device());
 				message->AddBool("canUnlock", !volume.IsReadOnly());
 			}
 			fStatusView->SetStatus(message);
@@ -1574,7 +1574,7 @@ StyledEditWindow::_LoadFile(entry_ref* ref, const char* forceEncoding)
 		bool editable = (getuid() == st.st_uid && S_IWUSR & st.st_mode)
 					|| (getgid() == st.st_gid && S_IWGRP & st.st_mode)
 					|| (S_IWOTH & st.st_mode);
-		BVolume volume(ref->dereference().dev());
+		BVolume volume(ref->device());
 		editable = editable && !volume.IsReadOnly();
 		_SetReadOnly(!editable);
 	}
@@ -2131,10 +2131,12 @@ StyledEditWindow::_HandleNodeMonitorEvent(BMessage *message)
 	if (message->FindInt32("opcode", &opcode) != B_OK)
 		return;
 
-	if (opcode != B_ENTRY_CREATED
-		&& message->GetUInt64("node", 0) != (uint64)fNodeRef.ino())
-		// bypass foreign nodes' event
-		return;
+	if (opcode != B_ENTRY_CREATED) {
+		node_ref node;
+		if (message->FindNodeRef("virtual:node", &node) != B_OK
+			|| node != fNodeRef)
+			return;
+	}
 
 	switch (opcode) {
 		case B_STAT_CHANGED:
@@ -2157,18 +2159,23 @@ StyledEditWindow::_HandleNodeMonitorEvent(BMessage *message)
 			{
 				entry_ref dstFolder;
 				entry_ref srcFolder;
+				const char* name = NULL;
 				if (message->FindRef("virtual:to directory", &dstFolder) != B_OK
-					|| message->FindRef("virtual:from directory", &srcFolder))
+					|| message->FindRef("virtual:from directory", &srcFolder) != B_OK
+					|| message->FindString("name", &name) != B_OK)
 						break;
 
+				// virtual:to directory is the file's new location as
+				// entry_ref{parent_dir_vref, new_name}; its GetParent
+				// gives the new parent directory itself.
 				BEntry entry(&dstFolder);
 				BEntry dirEntry;
 				entry.GetParent(&dirEntry);
 
-				entry_ref ref;
-				dirEntry.GetRef(&ref);
-				fSaveMessage->ReplaceRef("directory", &ref);
-				fSaveMessage->ReplaceString("name", ref.name);
+				entry_ref dirRef;
+				dirEntry.GetRef(&dirRef);
+				fSaveMessage->ReplaceRef("directory", &dirRef);
+				fSaveMessage->ReplaceString("name", name);
 
 				// store previous name - it may be useful in case
 				// we have just moved to temporary copy of file (vim case)
@@ -2180,7 +2187,7 @@ StyledEditWindow::_HandleNodeMonitorEvent(BMessage *message)
 					fSaveMessage->AddInt64("move time", system_time());
 				}
 
-				SetTitle(ref.name);
+				SetTitle(name);
 
 				if (srcFolder != dstFolder) {
 					_SwitchNodeMonitor(false);
@@ -2209,7 +2216,7 @@ StyledEditWindow::_HandleNodeMonitorEvent(BMessage *message)
 					// reuse the source name if it is not too old
 					bigtime_t time = fSaveMessage->FindInt64("move time");
 					if ((system_time() - time) < 1000000) {
-						entry_ref ref(directory.dev(), directory.dir(), orgName);
+						entry_ref ref(directory.vdevice(), directory.vdirectory(), orgName);
 						BEntry entry(&ref);
 						if (entry.InitCheck() == B_OK) {
 							_SwitchNodeMonitor(true, &ref);

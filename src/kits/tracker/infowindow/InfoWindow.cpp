@@ -399,14 +399,15 @@ BInfoWindow::MessageReceived(BMessage* message)
 			if (fModel->IsVolume()) {
 				BVolume boot;
 				BVolumeRoster().GetBootVolume(&boot);
-				BVolume volume(fModel->NodeRef()->dereference().dev());
+				BVolume volume(fModel->NodeRef()->device());
 				if (volume != boot) {
 					TTracker* tracker = dynamic_cast<TTracker*>(be_app);
 					if (tracker != NULL)
 						tracker->SaveAllPoseLocations();
 
 					BMessage unmountMessage(kUnmountVolume);
-					unmountMessage.AddInt32("device_id", volume.Device());
+					// volume.Device() is dev_t; post as Int64 for mount_server.
+					unmountMessage.AddInt64("device_id", (int64)volume.Device());
 					be_app->PostMessage(&unmountMessage);
 				}
 			}
@@ -446,10 +447,10 @@ BInfoWindow::MessageReceived(BMessage* message)
 				{
 					// We were watching a volume that is no longer
 					// mounted, we might as well quit
-					node_ref itemNode;
-					// Only the device information is available
-					message->FindUInt64("device", (uint64*)&itemNode.device);
-					if (TargetModel()->NodeRef()->device == itemNode.device)
+					// Only the device information is available in unmount messages
+					dev_t unmountedDev;
+					message->FindUInt64("device", (uint64*)&unmountedDev);
+					if (TargetModel()->NodeRef()->device() == unmountedDev)
 						Close();
 					break;
 				}
@@ -517,7 +518,7 @@ BInfoWindow::CalcSize(void* castToWindow)
 	}
 
 	BDirectory trashDir;
-	dev_t device = window->TargetModel()->EntryRef()->device;
+	dev_t device = window->TargetModel()->EntryRef()->device();
 	if (device != 0 && device != (dev_t)B_INVALID_DEV)
 		FSGetTrashDir(&trashDir, device);
 

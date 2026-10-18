@@ -386,7 +386,7 @@ ShowImageView::SetImage(const entry_ref* ref, BBitmap* bitmap,
 	fBitmap = bitmap;
 	fBitmapOwner = bitmapOwner;
 	if (ref == NULL)
-		fCurrentRef.device = -1;
+		fCurrentRef.set_to(-1, -1);
 	else
 		fCurrentRef = *ref;
 
@@ -764,7 +764,7 @@ ShowImageView::_CopySelection(uchar alpha, bool imageSize)
 
 	if (bitmap->Lock()) {
 		bitmap->AddChild(&view);
-#ifdef __HAIKU__
+#ifdef __VOS__
 		// On Haiku, B_OP_SUBSTRACT does not affect alpha like it did on BeOS.
 		// Don't know if it's better to fix it or not (stippi).
 		if (hasAlpha) {

@@ -1,33 +1,38 @@
 /*
  * Copyright 2004-2019 Haiku Inc., All rights reserved.
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Distributed under the terms of the MIT License.
- *
- *	Authors:
- *		Adrien Destugues, <pulkomandy@pulkomandy.tk>
- *		Axel Dörfler, <axeld@pinc-software.de>
- *		Alexander von Gluck, <kallisti5@unixzen.com>
  */
-
 
 #include "NetworkWindow.h"
 
-#include <net/if.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "InterfaceDetailView.h"
+#include "JoinWiFiWindow.h"
+#include "MobileBroadbandView.h"
+#include "NMBackend.h"
+#include "ProxyView.h"
+#include "StaticIPView.h"
+
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
 
 #include <Alert.h>
 #include <Application.h>
 #include <Button.h>
+#include <CardLayout.h>
 #include <Catalog.h>
 #include <CheckBox.h>
 #include <ControlLook.h>
 #include <Deskbar.h>
+#include <Entry.h>
+#include <FilePanel.h>
+#include <Locale.h>
+#include <MessageRunner.h>
 #include <Directory.h>
+#include <Entry.h>
 #include <LayoutBuilder.h>
-#include <NetworkDevice.h>
 #include <NetworkInterface.h>
-#include <NetworkNotifications.h>
 #include <NetworkRoster.h>
 #include <OutlineListView.h>
 #include <Path.h>
@@ -35,33 +40,32 @@
 #include <PathMonitor.h>
 #include <Roster.h>
 #include <ScrollView.h>
+#include <String.h>
 #include <StringItem.h>
 #include <SymLink.h>
-
-#define ENABLE_PROFILES 0
-#if ENABLE_PROFILES
-#	include <PopUpMenu.h>
-#endif
-
-#include "InterfaceListItem.h"
-#include "InterfaceView.h"
-#include "ServiceListItem.h"
 
 
 const char* kNetworkStatusSignature = "application/x-vnd.Haiku-NetworkStatus";
 
-static const uint32 kMsgProfileSelected = 'prof';
-static const uint32 kMsgProfileManage = 'mngp';
-static const uint32 kMsgProfileNew = 'newp';
 static const uint32 kMsgRevert = 'rvrt';
 static const uint32 kMsgToggleReplicant = 'trep';
 static const uint32 kMsgItemSelected = 'ItSl';
+static const uint32 kMsgConnectDevice = 'cndv';
+static const uint32 kMsgDisconnectDevice = 'dscd';
+static const uint32 kMsgRefreshDevices = 'rfrd';
+static const uint32 kMsgInitialDeviceScan = 'inds';
+static const uint32 kMsgDevicesReady = 'dvrd';
+static const uint32 kMsgDeviceInfoReady = 'dird';
+static const uint32 kMsgWiFiRefresh = 'wfrf';
+static const uint32 kMsgImportVPNRefs = 'ivrf';
+static const uint32 kMsgImportVPNResult = 'ivrR';
+static const uint32 kMsgJoinHiddenResult = 'jhwr';
 
 BMessenger gNetworkWindow;
 
 
 #undef B_TRANSLATION_CONTEXT
-#define B_TRANSLATION_CONTEXT	"NetworkWindow"
+#define B_TRANSLATION_CONTEXT "NetworkWindow"
 
 
 class TitleItem : public BStringItem {
@@ -86,6 +90,130 @@ public:
 };
 
 
+// Row for a single NetworkManager device: status dot + name + status text,
+// modeled on upstream InterfaceListItem's two-zone layout
+// (haiku-latest/src/preferences/network/InterfaceListItem.cpp) but using a
+// programmatic ui_color() dot instead of per-type HVIF art -- no wifi/
+// ether/vpn icon resources exist in this tree yet (the Bluetooth tray glyph
+// takes the same "programmatic over authored art, for now" approach).
+// Replaces the legacy InterfaceListItem framework retired along
+// with the old BNetworkSettings UI.
+// Status dot, bold name, plain status line: devices and VPNs alike.
+class StatusListItem : public BStringItem {
+public:
+	StatusListItem(const char* name, const char* statusText, bool connected)
+		:
+		BStringItem(name),
+		fStatusText(statusText),
+		fConnected(connected),
+		fFirstLineOffset(0),
+		fLineOffset(0)
+	{
+	}
+
+	virtual void DrawItem(BView* owner, BRect bounds, bool complete)
+	{
+		owner->PushState();
+
+		if (IsSelected() || complete) {
+			owner->SetHighColor(IsSelected()
+				? ui_color(B_LIST_SELECTED_BACKGROUND_COLOR)
+				: owner->LowColor());
+			owner->FillRect(bounds);
+		}
+
+		const float dotSize = ceilf(be_plain_font->Size() * 2 / 3);
+		BPoint dotOrigin = bounds.LeftTop()
+			+ BPoint(be_control_look->DefaultLabelSpacing(),
+				(bounds.Height() - dotSize) / 2.0f);
+		rgb_color dotColor = fConnected
+			? ui_color(B_SUCCESS_COLOR) : tint_color(owner->LowColor(),
+				B_DARKEN_2_TINT);
+		owner->SetHighColor(dotColor);
+		owner->FillEllipse(BRect(dotOrigin,
+			dotOrigin + BPoint(dotSize, dotSize)));
+
+		BPoint namePoint = bounds.LeftTop() + BPoint(dotSize
+			+ 2 * be_control_look->DefaultLabelSpacing(), fFirstLineOffset);
+		BPoint statusPoint = bounds.LeftTop() + BPoint(dotSize
+			+ 2 * be_control_look->DefaultLabelSpacing(),
+			fFirstLineOffset + fLineOffset);
+
+		owner->SetHighColor(IsSelected()
+			? ui_color(B_LIST_SELECTED_ITEM_TEXT_COLOR)
+			: ui_color(B_LIST_ITEM_TEXT_COLOR));
+		owner->SetFont(be_bold_font);
+		owner->DrawString(Text(), namePoint);
+		owner->SetFont(be_plain_font);
+		owner->DrawString(fStatusText, statusPoint);
+
+		owner->PopState();
+	}
+
+	virtual void Update(BView* owner, const BFont* font)
+	{
+		BListItem::Update(owner, font);
+
+		font_height height;
+		font->GetHeight(&height);
+		float lineHeight = ceilf(height.ascent) + ceilf(height.descent)
+			+ ceilf(height.leading);
+		fFirstLineOffset = ceilf(height.ascent + height.leading / 2);
+		fLineOffset = lineHeight;
+
+		const float pad = 2 * be_control_look->DefaultLabelSpacing();
+		SetHeight(std::max(2 * lineHeight + pad,
+			std::max(6.0f, font->Size()) + pad));
+	}
+
+	bool Connected() const { return fConnected; }
+	const BString& StatusText() const { return fStatusText; }
+
+private:
+	BString fStatusText;
+	bool fConnected;
+	float fFirstLineOffset;
+	float fLineOffset;
+};
+
+
+class DeviceListItem : public StatusListItem {
+public:
+	DeviceListItem(const char* name, const char* devicePath,
+		const char* statusText, bool connected)
+		:
+		StatusListItem(name, statusText, connected),
+		fDevicePath(devicePath)
+	{
+	}
+
+	const BString& DevicePath() const { return fDevicePath; }
+
+private:
+	BString fDevicePath;
+};
+
+
+class VPNListItem : public StatusListItem {
+public:
+	VPNListItem(const char* name, const char* connectionPath,
+		const char* statusText, const BMessage& info)
+		:
+		StatusListItem(name, statusText, info.GetBool(kNMFieldVPNConnected)),
+		fConnectionPath(connectionPath),
+		fInfo(info)
+	{
+	}
+
+	const BString&	ConnectionPath() const { return fConnectionPath; }
+	const BMessage&	Info() const { return fInfo; }
+
+private:
+	BString		fConnectionPath;
+	BMessage	fInfo;
+};
+
+
 // #pragma mark -
 
 
@@ -94,25 +222,24 @@ NetworkWindow::NetworkWindow()
 	BWindow(BRect(100, 100, 750, 400), B_TRANSLATE_SYSTEM_NAME("Network"),
 		B_TITLED_WINDOW, B_ASYNCHRONOUS_CONTROLS | B_NOT_ZOOMABLE
 			| B_AUTO_UPDATE_SIZE_LIMITS),
+	fListView(NULL),
+	fDetailView(NULL),
+	fMobileView(NULL),
+	fProxyView(NULL),
+	fCards(NULL),
+	fRevertButton(NULL),
+	fWiFiRefreshRunner(NULL),
+	fImportVPNPanel(NULL),
+	fProxyItem(NULL),
+	fMobileItem(NULL),
 	fServicesItem(NULL),
 	fDialUpItem(NULL),
 	fVPNItem(NULL),
-	fOtherItem(NULL)
+	fOtherItem(NULL),
+	fWiredItem(NULL),
+	fWirelessItem(NULL)
 {
-	// Profiles section
-#if ENABLE_PROFILES
-	BPopUpMenu* profilesPopup = new BPopUpMenu("<none>");
-	_BuildProfilesMenu(profilesPopup, kMsgProfileSelected);
-
-	BMenuField* profilesMenuField = new BMenuField("profiles_menu",
-		B_TRANSLATE("Profile:"), profilesPopup);
-
-	profilesMenuField->SetFont(be_bold_font);
-	profilesMenuField->SetEnabled(false);
-#endif
-
 	// Settings section
-
 	fRevertButton = new BButton("revert", B_TRANSLATE("Revert"),
 		new BMessage(kMsgRevert));
 
@@ -129,67 +256,82 @@ NetworkWindow::NetworkWindow()
 
 	BScrollView* scrollView = new BScrollView("ScrollView", fListView,
 		0, false, true);
-	scrollView->SetExplicitMaxSize(BSize(B_SIZE_UNSET, B_SIZE_UNLIMITED));
+	// Not sized from the items: that made the window jump. The detail pane
+	// takes the extra width.
+	const float scale = be_plain_font->Size() / 12.0f;
+	scrollView->SetExplicitMinSize(BSize(180 * scale, 300 * scale));
+	scrollView->SetExplicitMaxSize(BSize(260 * scale, B_SIZE_UNLIMITED));
 
-	fAddOnShellView = new BView("add-on shell", 0,
-		new BGroupLayout(B_VERTICAL));
-	fAddOnShellView->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
-	fAddOnShellView->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
+	fDetailView = new InterfaceDetailView();
+	fMobileView = new MobileBroadbandView();
+	fProxyView = new ProxyView();
 
-	fInterfaceView = new InterfaceView();
-
-	// Build the layout
+	// The cards share the largest minimum, so switching panes keeps the
+	// window size.
 	BLayoutBuilder::Group<>(this, B_VERTICAL)
 		.SetInsets(B_USE_WINDOW_SPACING)
-
-#if ENABLE_PROFILES
-		.AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
-			.Add(profilesMenuField)
-			.AddGlue()
-		.End()
-#endif
 		.AddGroup(B_HORIZONTAL, B_USE_DEFAULT_SPACING)
 			.Add(scrollView)
-			.Add(fAddOnShellView)
+			.AddCards()
+				.Add(fDetailView)
+				.Add(fMobileView)
+				.Add(fProxyView)
+				.GetLayout(&fCards)
+			.End()
 		.End()
-
 		.Add(showReplicantCheckBox)
 		.AddGroup(B_HORIZONTAL, B_USE_DEFAULT_SPACING)
 			.Add(fRevertButton)
 			.AddGlue()
 		.End();
 
+	_ShowPane(fDetailView);
+
 	gNetworkWindow = this;
 
-	_ScanInterfaces();
-	_ScanAddOns();
+	// Placeholder shown until the async scan's reply arrives (see
+	// MessageReceived's kMsgInitialDeviceScan handler below). Populating the
+	// real list happens on message receipt, on this window's own thread --
+	// never from inside the constructor, which runs before Show() and before
+	// this window's looper is even attached. Calling NMBackend::GetDevices()
+	// (blocking) from here was the same bug that kept the Bluetooth preflet
+	// from ever appearing: ReadyToRun()/Show() would never be reached while
+	// stuck waiting on a wedged or slow NetworkManager.
+	fListView->AddItem(new BStringItem(B_TRANSLATE("Loading" B_UTF8_ELLIPSIS)));
+
 	_UpdateRevertButton();
-
-	fListView->Select(0);
-	_SelectItem(fListView->ItemAt(0));
-		// Call this manually, so that CenterOnScreen() below already
-		// knows the final window size.
-
-	// Set size of the list view from its contents
-	float width;
-	float height;
-	fListView->GetPreferredSize(&width, &height);
-	width += 2 * be_control_look->DefaultItemSpacing();
-	fListView->SetExplicitSize(BSize(width, B_SIZE_UNSET));
-	fListView->SetExplicitMinSize(BSize(width, std::min(height, 400.f)));
 
 	CenterOnScreen();
 
-	fSettings.StartMonitoring(this);
-	start_watching_network(B_WATCH_NETWORK_INTERFACE_CHANGES
-		| B_WATCH_NETWORK_LINK_CHANGES | B_WATCH_NETWORK_WLAN_CHANGES, this);
+	// WIFI_NETWORK_FOUND carries the AP list of the scan that
+	// ScanWiFiNetworks kicks; without it the Wi-Fi pane stays empty.
+	NMBackend* backend = NMBackend::Instance();
+	if (backend != NULL) {
+		backend->StartWatching(BMessenger(this),
+			NMBackend::NOTIFICATION_DEVICE_ADDED |
+			NMBackend::NOTIFICATION_DEVICE_REMOVED |
+			NMBackend::NOTIFICATION_DEVICE_STATE_CHANGED |
+			NMBackend::NOTIFICATION_CONNECTION_STATUS_CHANGED |
+			NMBackend::NOTIFICATION_WIFI_NETWORK_FOUND);
+	}
+
+	// Deferred, not called here: GetDevicesAsync() posts its reply back
+	// through this window's message queue, which does not exist until the
+	// looper is running -- PostMessage() here queues it for right after
+	// Show()/Run(), the same pattern BluetoothWindow uses for kMsgInitialScan.
+	PostMessage(kMsgInitialDeviceScan);
 }
 
 
 NetworkWindow::~NetworkWindow()
 {
-	stop_watching_network(this);
-	fSettings.StopMonitoring(this);
+	// Stop watching NetworkManager
+	NMBackend* backend = NMBackend::Instance();
+	if (backend != NULL) {
+		backend->StopWatching(BMessenger(this));
+	}
+	delete fWiFiRefreshRunner;
+	delete fImportVPNPanel;
 }
 
 
@@ -205,411 +347,544 @@ void
 NetworkWindow::MessageReceived(BMessage* message)
 {
 	switch (message->what) {
-		case kMsgProfileNew:
+		case kMsgInitialDeviceScan:
+			_RequestDeviceScan();
 			break;
 
-		case kMsgProfileSelected:
-		{
-			const char* path;
-			if (message->FindString("path", &path) != B_OK)
-				break;
-
-			// TODO!
-			break;
-		}
-
-		case kMsgItemSelected:
-		{
-			BListItem* listItem = fListView->FullListItemAt(
-				fListView->FullListCurrentSelection());
-			if (listItem == NULL)
-				break;
-
-			_SelectItem(listItem);
-			break;
-		}
-
-		case kMsgRevert:
-		{
-			SettingsMap::const_iterator iterator = fSettingsMap.begin();
-			for (; iterator != fSettingsMap.end(); iterator++)
-				iterator->second->Revert();
-			break;
-		}
-
-		case kMsgToggleReplicant:
-		{
-			_ShowReplicant(
-				message->GetInt32("be:value", B_CONTROL_OFF) == B_CONTROL_ON);
-			break;
-		}
-
-		case B_PATH_MONITOR:
-		{
-			fSettings.Update(message);
-			break;
-		}
-
-		case B_NETWORK_MONITOR:
-			_BroadcastConfigurationUpdate(*message);
+		case kMsgDevicesReady:
+			_PopulateDeviceList(message);
 			break;
 
-		case BNetworkSettings::kMsgInterfaceSettingsUpdated:
-		case BNetworkSettings::kMsgNetworkSettingsUpdated:
-		case BNetworkSettings::kMsgServiceSettingsUpdated:
-			_BroadcastSettingsUpdate(message->what);
-			break;
-
-		case kMsgSettingsItemUpdated:
-			// TODO: update list item
+		case kMsgDeviceInfoReady:
+			fDetailView->SetToDevice(*message);
 			_UpdateRevertButton();
 			break;
 
-		default:
-			inherited::MessageReceived(message);
-	}
-}
+		case kMsgRevert:
+			_RevertSettings();
+			break;
 
+		case StaticIPView::kMsgDirtyChanged:
+		case ProxyView::kMsgDirtyChanged:
+		case MobileBroadbandView::kMsgDirtyChanged:
+			_UpdateRevertButton();
+			break;
 
-void
-NetworkWindow::_BuildProfilesMenu(BMenu* menu, int32 what)
-{
-	char currentProfile[256] = { 0 };
+		case kMsgToggleReplicant:
+			_ToggleReplicant();
+			break;
 
-	menu->SetRadioMode(true);
+		case kMsgJoinOtherWiFi:
+			_JoinOtherWiFi(message);
+			break;
 
-	BDirectory dir("/boot/system/settings/network/profiles");
-	if (dir.InitCheck() == B_OK) {
-		BEntry entry;
+		case kMsgJoinHiddenWiFi:
+			_JoinHiddenWiFi(message);
+			break;
 
-		dir.Rewind();
-		while (dir.GetNextEntry(&entry) >= 0) {
-			BPath name;
-			entry.GetPath(&name);
-
-			if (entry.IsSymLink() &&
-				strcmp("current", name.Leaf()) == 0) {
-				BSymLink symlink(&entry);
-
-				if (symlink.IsAbsolute())
-					// oh oh, sorry, wrong symlink...
-					continue;
-
-				symlink.ReadLink(currentProfile, sizeof(currentProfile));
-				continue;
-			};
-
-			if (!entry.IsDirectory())
-				continue;
-
-			BMessage* message = new BMessage(what);
-			message->AddString("path", name.Path());
-
-			BMenuItem* item = new BMenuItem(name.Leaf(), message);
-			menu->AddItem(item);
-		}
-	}
-
-	menu->AddSeparatorItem();
-	menu->AddItem(new BMenuItem(B_TRANSLATE("New" B_UTF8_ELLIPSIS),
-		new BMessage(kMsgProfileNew)));
-	menu->AddItem(new BMenuItem(B_TRANSLATE("Manage" B_UTF8_ELLIPSIS),
-		new BMessage(kMsgProfileManage)));
-
-	if (currentProfile[0] != '\0') {
-		BMenuItem* item = menu->FindItem(currentProfile);
-		if (item != NULL) {
-			// TODO: translate
-			BString label(item->Label());
-			label << " (current)";
-			item->SetLabel(label.String());
-			item->SetMarked(true);
-		}
-	}
-}
-
-
-void
-NetworkWindow::_ScanInterfaces()
-{
-	// Try existing devices first
-	BNetworkRoster& roster = BNetworkRoster::Default();
-	BNetworkInterface interface;
-	uint32 cookie = 0;
-
-	while (roster.GetNextInterface(&cookie, interface) == B_OK) {
-		if ((interface.Flags() & IFF_LOOPBACK) != 0)
-			continue;
-
-		BNetworkDevice device(interface.Name());
-		BNetworkInterfaceType type = B_NETWORK_INTERFACE_TYPE_OTHER;
-
-		if (device.IsWireless())
-			type = B_NETWORK_INTERFACE_TYPE_WIFI;
-		else if (device.IsEthernet())
-			type = B_NETWORK_INTERFACE_TYPE_ETHERNET;
-
-		InterfaceListItem* item = new InterfaceListItem(interface.Name(), type);
-		item->SetExpanded(true);
-
-		fInterfaceItemMap.insert(std::pair<BString, InterfaceListItem*>(
-			BString(interface.Name()), item));
-		fListView->AddItem(item);
-	}
-
-	// TODO: Then consider those from the settings (for example, for USB)
-}
-
-
-void
-NetworkWindow::_ScanAddOns()
-{
-	BStringList paths;
-	BPathFinder::FindPaths(B_FIND_PATH_ADD_ONS_DIRECTORY, "Network Settings",
-		paths);
-
-	// Collect add-on paths by name, so that each name will only be
-	// loaded once.
-	typedef std::map<BString, BPath> PathMap;
-	PathMap addOnMap;
-
-	for (int32 i = 0; i < paths.CountStrings(); i++) {
-		BDirectory directory(paths.StringAt(i));
-		BEntry entry;
-		while (directory.GetNextEntry(&entry) == B_OK) {
-			BPath path;
-			if (entry.GetPath(&path) != B_OK)
-				continue;
-
-			if (addOnMap.find(path.Leaf()) == addOnMap.end())
-				addOnMap.insert(std::pair<BString, BPath>(path.Leaf(), path));
-		}
-	}
-
-	for (PathMap::const_iterator addOnIterator = addOnMap.begin();
-			addOnIterator != addOnMap.end(); addOnIterator++) {
-		const BPath& path = addOnIterator->second;
-
-		image_id image = load_add_on(path.Path());
-		if (image < 0) {
-			printf("Failed to load %s addon: %s.\n", path.Path(),
-				strerror(image));
-			continue;
-		}
-
-		BNetworkSettingsAddOn* (*instantiateAddOn)(image_id image,
-			BNetworkSettings& settings);
-
-		status_t status = get_image_symbol(image,
-			"instantiate_network_settings_add_on",
-			B_SYMBOL_TYPE_TEXT, (void**)&instantiateAddOn);
-		if (status != B_OK) {
-			// No "addon instantiate function" symbol found in this addon
-			printf("No symbol \"instantiate_network_settings_add_on\" found "
-				"in %s addon: not a network setup addon!\n", path.Path());
-			unload_add_on(image);
-			continue;
-		}
-
-		BNetworkSettingsAddOn* addOn = instantiateAddOn(image, fSettings);
-		if (addOn == NULL) {
-			unload_add_on(image);
-			continue;
-		}
-
-		fAddOns.AddItem(addOn);
-
-		// Per interface items
-		ItemMap::const_iterator iterator = fInterfaceItemMap.begin();
-		for (; iterator != fInterfaceItemMap.end(); iterator++) {
-			const BString& interface = iterator->first;
-			BListItem* interfaceItem = iterator->second;
-
-			uint32 cookie = 0;
-			while (true) {
-				BNetworkSettingsItem* item = addOn->CreateNextInterfaceItem(
-					cookie, interface.String());
-				if (item == NULL)
-					break;
-
-				fSettingsMap[item->ListItem()] = item;
-				fListView->AddUnder(item->ListItem(), interfaceItem);
+		case kMsgJoinHiddenResult:
+			if (message->GetInt32("status", B_ERROR) != B_OK) {
+				// The backend already mapped NM's state/reason to plain
+				// text ("No network with this name was found", etc).
+				BString reason;
+				message->FindString("reason", &reason);
+				BString text;
+				if (!reason.IsEmpty())
+					text = reason;
+				else
+					text = B_TRANSLATE("Could not join the network.");
+				BAlert* alert = new BAlert(B_TRANSLATE("Join other network"),
+					text, B_TRANSLATE("OK"));
+				alert->Go(NULL);
 			}
-			fListView->SortItemsUnder(interfaceItem, true,
-				NetworkWindow::_CompareListItems);
+			break;
+
+		case kMsgImportVPN:
+			_ImportVPNRequested();
+			break;
+
+		case kMsgImportVPNRefs:
+			_ImportVPNRefs(message);
+			break;
+
+		case kMsgImportVPNResult:
+			_ImportVPNResult(message);
+			break;
+
+		case kMsgItemSelected:
+		{
+			int32 index = fListView->CurrentSelection();
+			BListItem* item = fListView->ItemAt(index);
+			_SelectItem(item);
+			break;
 		}
 
-		// Generic items
-		uint32 cookie = 0;
-		while (true) {
-			BNetworkSettingsItem* item = addOn->CreateNextItem(cookie);
-			if (item == NULL)
-				break;
-
-			fSettingsMap[item->ListItem()] = item;
-			fListView->AddUnder(item->ListItem(),
-				_ListItemFor(item->Type()));
+		case kMsgConnectDevice:
+		{
+			const char* devicePath;
+			if (message->FindString("device_path", &devicePath) == B_OK) {
+				NMBackend* backend = NMBackend::Instance();
+				if (backend != NULL)
+					backend->ConnectDevice(devicePath);
+			}
+			break;
 		}
 
-		_SortItemsUnder(fServicesItem);
-		_SortItemsUnder(fOtherItem);
-	}
+		case kMsgDisconnectDevice:
+		{
+			const char* devicePath;
+			if (message->FindString("device_path", &devicePath) == B_OK) {
+				NMBackend* backend = NMBackend::Instance();
+				if (backend != NULL)
+					backend->DisconnectDevice(devicePath);
+			}
+			break;
+		}
 
-	fListView->SortItemsUnder(NULL, true,
-		NetworkWindow::_CompareTopLevelListItems);
-}
+		case kMsgRefreshDevices:
+			_RequestDeviceScan();
+			break;
 
+		case NMBackend::NOTIFICATION_CONNECTION_STATUS_CHANGED:
+		{
+			BString reason;
+			if (message->FindString("reason", &reason) == B_OK
+					&& !reason.IsEmpty()) {
+				BString text(B_TRANSLATE("Network operation failed."));
+				text << "\n" << reason;
+				BAlert* alert = new BAlert(B_TRANSLATE("Network"),
+					text.String(), B_TRANSLATE("OK"));
+				alert->Go(NULL);
+			}
+			_RequestDeviceScan();
+			break;
+		}
 
-BNetworkSettingsItem*
-NetworkWindow::_SettingsItemFor(BListItem* item)
-{
-	SettingsMap::const_iterator found = fSettingsMap.find(item);
-	if (found != fSettingsMap.end())
-		return found->second;
+		case NMBackend::NOTIFICATION_DEVICE_ADDED:
+		case NMBackend::NOTIFICATION_DEVICE_REMOVED:
+		case NMBackend::NOTIFICATION_DEVICE_STATE_CHANGED:
+		case NMBackend::NOTIFICATION_DEVICE_IP_CHANGED:
+			_RequestDeviceScan();
+			break;
 
-	return NULL;
-}
+		case NMBackend::NOTIFICATION_WIFI_NETWORK_FOUND:
+			// One per AP added or removed; refresh once the burst settles.
+			if (fWiFiRefreshRunner == NULL) {
+				BMessage refresh(kMsgWiFiRefresh);
+				fWiFiRefreshRunner = new BMessageRunner(BMessenger(this),
+					&refresh, 500000, 1);
+			}
+			break;
 
-
-void
-NetworkWindow::_SortItemsUnder(BListItem* item)
-{
-	if (item != NULL)
-		fListView->SortItemsUnder(item, true, NetworkWindow::_CompareListItems);
-}
-
-
-BListItem*
-NetworkWindow::_ListItemFor(BNetworkSettingsType type)
-{
-	switch (type) {
-		case B_NETWORK_SETTINGS_TYPE_SERVICE:
-			if (fServicesItem == NULL)
-				fServicesItem = _CreateItem(B_TRANSLATE("Services"));
-			return fServicesItem;
-
-		case B_NETWORK_SETTINGS_TYPE_OTHER:
-			if (fOtherItem == NULL)
-				fOtherItem = _CreateItem(B_TRANSLATE("Other"));
-			return fOtherItem;
+		case kMsgWiFiRefresh:
+		{
+			delete fWiFiRefreshRunner;
+			fWiFiRefreshRunner = NULL;
+			// List only: a full rebuild would rescan, drop the selection
+			// and lose unapplied IPv4 edits.
+			DeviceListItem* selected = dynamic_cast<DeviceListItem*>(
+				fListView->ItemAt(fListView->CurrentSelection()));
+			if (selected != NULL && fDetailView != NULL)
+				fDetailView->RefreshWiFiNetworks(
+					selected->DevicePath().String());
+			break;
+		}
 
 		default:
-			return NULL;
+			BWindow::MessageReceived(message);
+			break;
 	}
 }
 
 
-BListItem*
-NetworkWindow::_CreateItem(const char* label)
+void
+NetworkWindow::_RequestDeviceScan()
 {
-	BListItem* item = new TitleItem(label);
-	item->SetExpanded(true);
-	fListView->AddItem(item);
-	return item;
+	NMBackend* backend = NMBackend::Instance();
+	if (backend == NULL)
+		return;
+
+	// Fires the request and returns immediately -- this must never block:
+	// it is called from MessageReceived() on this window's own thread, and a
+	// preflet whose window thread is stuck waiting on NetworkManager cannot
+	// repaint, move, or close. The reply arrives as kMsgDevicesReady, handled
+	// above by _PopulateDeviceList().
+	backend->GetDevicesAsync(BMessenger(this), kMsgDevicesReady);
 }
 
 
 void
-NetworkWindow::_SelectItem(BListItem* listItem)
+NetworkWindow::_PopulateDeviceList(BMessage* devices)
 {
-	while (fAddOnShellView->CountChildren() > 0)
-		fAddOnShellView->ChildAt(0)->RemoveSelf();
+	// Capture the current selection before tearing the list down: NM
+	// notifications repopulate this list often. A section header has no
+	// stable path, so remember it by kind instead.
+	BString previousPath;
+	bool hadSelection = false;
+	int previousHeader = -1;
+	{
+		BListItem* selected = fListView->ItemAt(fListView->CurrentSelection());
+		DeviceListItem* deviceItem = dynamic_cast<DeviceListItem*>(selected);
+		VPNListItem* vpnItem = dynamic_cast<VPNListItem*>(selected);
+		if (deviceItem != NULL) {
+			previousPath = deviceItem->DevicePath();
+			hadSelection = true;
+		} else if (vpnItem != NULL) {
+			previousPath = vpnItem->ConnectionPath();
+			hadSelection = true;
+		} else if (selected == fProxyItem)
+			previousHeader = 0;
+		else if (selected == fWiredItem)
+			previousHeader = 1;
+		else if (selected == fWirelessItem)
+			previousHeader = 2;
+		else if (selected == fVPNItem)
+			previousHeader = 3;
+		else if (selected == fMobileItem)
+			previousHeader = 4;
+	}
 
-	BView* nextView = NULL;
+	// BListView does not own its items, so draining is the only way to avoid
+	// leaking one set per refresh -- and NM notifications refresh often.
+	BListItem* stale;
+	while ((stale = fListView->RemoveItem((int32)0)) != NULL)
+		delete stale;
 
-	BNetworkSettingsItem* item = _SettingsItemFor(listItem);
-	if (item != NULL) {
-		nextView = item->View();
-	} else {
-		InterfaceListItem* item = dynamic_cast<InterfaceListItem*>(
-			listItem);
-		if (item != NULL) {
-			fInterfaceView->SetTo(item->Name());
-			nextView = fInterfaceView;
+	bool nmAvailable = true;
+	devices->FindBool(kNMFieldNMAvailable, &nmAvailable);
+
+	// Proxy is session-wide and does not need NetworkManager; always show
+	// it so the pane stays reachable when NM is down.
+	fProxyItem = new TitleItem(B_TRANSLATE("Proxy"));
+	fListView->AddItem(fProxyItem);
+
+	if (!nmAvailable) {
+		// Unavailable, not empty: NetworkManager itself is not reachable,
+		// so an empty Wired/WiFi/VPN list here would be a lie about why.
+		BStringItem* unavailable = new BStringItem(
+			B_TRANSLATE("NetworkManager is not running"));
+		unavailable->SetEnabled(false);
+		fListView->AddItem(unavailable);
+		fDetailView->ShowEmpty(
+			B_TRANSLATE("NetworkManager is not running"));
+		_UpdateRevertButton();
+		return;
+	}
+
+	// Create section headers
+	fWiredItem = new TitleItem(B_TRANSLATE("Wired"));
+	fWirelessItem = new TitleItem(B_TRANSLATE("Wi-Fi"));
+	fVPNItem = new TitleItem(B_TRANSLATE("VPN"));
+
+	fListView->AddItem(fWiredItem);
+	fListView->AddItem(fWirelessItem);
+	fListView->AddItem(fVPNItem);
+
+	// Mobile broadband section appears only when NM reports a modem
+	// device; hidden otherwise.
+	fMobileItem = NULL;
+	bool hasModem = false;
+	BMessage modemSnapshot;
+
+	BListItem* restoredSelection = NULL;
+
+	// Header first: a Wi-Fi or VPN overview stays selected across the
+	// rebuild so an adapter/VPN state change refreshes it in place.
+	if (previousHeader == 0)
+		restoredSelection = fProxyItem;
+	else if (previousHeader == 1)
+		restoredSelection = fWiredItem;
+	else if (previousHeader == 2)
+		restoredSelection = fWirelessItem;
+	else if (previousHeader == 3)
+		restoredSelection = fVPNItem;
+	else if (previousHeader == 4)
+		restoredSelection = fMobileItem;
+
+	int32 deviceCount = 0;
+	if (devices->FindInt32(kNMFieldDeviceCount, &deviceCount) != B_OK)
+		deviceCount = 0;
+
+	for (int32 i = 0; i < deviceCount; i++) {
+		char deviceName[32];
+		snprintf(deviceName, sizeof(deviceName), "device_%" B_PRId32, i);
+
+		BMessage deviceInfo;
+		if (devices->FindMessage(deviceName, &deviceInfo) != B_OK)
+			continue;
+
+		const char* devicePath;
+		const char* interfaceName;
+		const char* deviceType;
+		uint32 deviceState;
+
+		if (deviceInfo.FindString(kNMFieldPath, &devicePath) != B_OK ||
+			deviceInfo.FindString(kNMFieldInterface, &interfaceName) != B_OK ||
+			deviceInfo.FindString(kNMFieldType, &deviceType) != B_OK ||
+			deviceInfo.FindUInt32(kNMFieldState, &deviceState) != B_OK)
+			continue;
+
+		if (strcmp(deviceType, "modem") == 0) {
+			hasModem = true;
+			if (modemSnapshot.IsEmpty())
+				modemSnapshot = deviceInfo;
+			continue;
 		}
+
+		// Determine which section to add to
+		BListItem* parentItem = NULL;
+		if (strcmp(deviceType, "ethernet") == 0) {
+			parentItem = fWiredItem;
+		} else if (strcmp(deviceType, "wifi") == 0) {
+			parentItem = fWirelessItem;
+		} else if (strcmp(deviceType, "vpn") == 0) {
+			parentItem = fVPNItem;
+		}
+
+		if (parentItem == NULL)
+			continue;
+
+		bool connected = deviceState == kNMDeviceStateActivated;
+		BString statusText = connected
+			? B_TRANSLATE("Connected") : B_TRANSLATE("Disconnected");
+
+		DeviceListItem* item = new DeviceListItem(interfaceName, devicePath,
+			statusText.String(), connected);
+
+		fListView->AddUnder(item, parentItem);
+
+		if (hadSelection && previousPath == devicePath)
+			restoredSelection = item;
 	}
 
-	if (nextView != NULL)
-		fAddOnShellView->AddChild(nextView);
+	if (hasModem) {
+		fMobileItem = new TitleItem(B_TRANSLATE("Mobile broadband"));
+		fListView->AddItem(fMobileItem);
+		fMobileView->SetModemDevice(modemSnapshot);
+	} else {
+		fMobileView->ClearModem();
+	}
+
+	if (restoredSelection == NULL && !fPendingVPNImportPath.IsEmpty())
+		restoredSelection = _PopulateVPNList(fPendingVPNImportPath);
+	else if (restoredSelection == NULL && hadSelection)
+		restoredSelection = _PopulateVPNList(previousPath);
+	else
+		_PopulateVPNList(BString());
+	fPendingVPNImportPath = "";
+
+	// Note: BListItem visibility toggling is private/friend-only in this
+	// tree (BOutlineListView/BListView only); empty sections are simply
+	// left as empty headers rather than hidden.
+
+	if (restoredSelection != NULL) {
+		fListView->Select(fListView->IndexOf(restoredSelection));
+		_SelectItem(restoredSelection);
+	} else {
+		fListView->Select(0);
+		_SelectItem(fListView->ItemAt(0));
+	}
+}
+
+
+// Returns the newly-created VPNListItem whose connection path matches
+// previousSelectionPath, or NULL if it's empty or nothing matched -- lets the
+// caller restore the previously-selected VPN row across a repopulate the
+// same way it does for devices.
+BListItem*
+NetworkWindow::_PopulateVPNList(const BString& previousSelectionPath)
+{
+	if (fVPNItem == NULL)
+		return NULL;
+
+	NMBackend* backend = NMBackend::Instance();
+	if (backend == NULL)
+		return NULL;
+
+	BMessage vpns;
+	if (backend->GetVPNConnections(&vpns) != B_OK)
+		return NULL;
+
+	int32 count = 0;
+	vpns.FindInt32(kNMFieldVPNCount, &count);
+
+	BListItem* matched = NULL;
+
+	for (int32 i = 0; i < count; i++) {
+		char vpnName[32];
+		snprintf(vpnName, sizeof(vpnName), "vpn_%" B_PRId32, i);
+
+		BMessage vpnInfo;
+		if (vpns.FindMessage(vpnName, &vpnInfo) != B_OK)
+			continue;
+
+		const char* name;
+		const char* path;
+		if (vpnInfo.FindString(kNMFieldVPNName, &name) != B_OK
+			|| vpnInfo.FindString(kNMFieldVPNPath, &path) != B_OK)
+			continue;
+		BString status = vpnInfo.GetString(kNMFieldVPNType, "VPN");
+		if (vpnInfo.GetBool(kNMFieldVPNConnected))
+			status << " \xC2\xB7 " << B_TRANSLATE("Connected");
+		else if (vpnInfo.GetBool(kNMFieldVPNActivating))
+			status << " \xC2\xB7 " << B_TRANSLATE("Connecting" B_UTF8_ELLIPSIS);
+		VPNListItem* item = new VPNListItem(name, path, status, vpnInfo);
+		fListView->AddUnder(item, fVPNItem);
+
+		if (!previousSelectionPath.IsEmpty() && previousSelectionPath == path)
+			matched = item;
+	}
+
+	return matched;
 }
 
 
 void
-NetworkWindow::_BroadcastSettingsUpdate(uint32 type)
+NetworkWindow::_SelectItem(BListItem* item)
 {
-	for (int32 index = 0; index < fListView->FullListCountItems(); index++) {
-		BNetworkSettingsListener* listener
-			= dynamic_cast<BNetworkSettingsListener*>(
-				fListView->FullListItemAt(index));
-		if (listener != NULL)
-			listener->SettingsUpdated(type);
+	DeviceListItem* deviceItem = dynamic_cast<DeviceListItem*>(item);
+	VPNListItem* vpnItem = dynamic_cast<VPNListItem*>(item);
+
+	if (item != NULL && item == fProxyItem) {
+		// Session-wide proxy, not tied to a device or profile.
+		_ShowPane(fProxyView);
+		fProxyView->Reload();
+		_UpdateRevertButton();
+		return;
 	}
 
-	SettingsMap::const_iterator iterator = fSettingsMap.begin();
-	for (; iterator != fSettingsMap.end(); iterator++)
-		iterator->second->SettingsUpdated(type);
+	if (item != NULL && item == fMobileItem) {
+		_ShowPane(fMobileView);
+		_UpdateRevertButton();
+		return;
+	}
+
+	_ShowPane(fDetailView);
+
+	if (deviceItem != NULL) {
+		fDetailView->ShowEmpty(B_TRANSLATE("Loading" B_UTF8_ELLIPSIS));
+
+		NMBackend* backend = NMBackend::Instance();
+		if (backend != NULL) {
+			// Async: never block this window's thread on the backend.
+			backend->GetDeviceInfoAsync(deviceItem->DevicePath().String(),
+				BMessenger(this), kMsgDeviceInfoReady);
+		}
+	} else if (vpnItem != NULL) {
+		fDetailView->SetToVPN(vpnItem->Info());
+	} else if (item == fWirelessItem) {
+		BMessage adapters;
+		_WiFiAdapters(adapters);
+		fDetailView->ShowWiFiSection(adapters);
+	} else if (item == fVPNItem) {
+		BMessage vpns;
+		NMBackend* backend = NMBackend::Instance();
+		if (backend != NULL)
+			backend->GetVPNConnections(&vpns);
+		fDetailView->ShowVPNSection(vpns);
+	} else if (item != NULL && fListView->CountItemsUnder(item, true) == 0) {
+		// An empty section header: say what is missing.
+		if (item == fWirelessItem)
+			fDetailView->ShowEmpty(B_TRANSLATE("No Wi-Fi adapter found"));
+		else if (item == fWiredItem)
+			fDetailView->ShowEmpty(B_TRANSLATE("No wired adapter found"));
+		else
+			fDetailView->ShowEmpty(B_TRANSLATE("Select a device"));
+	} else {
+		fDetailView->ShowEmpty(B_TRANSLATE("Select a device"));
+	}
 
 	_UpdateRevertButton();
 }
 
 
 void
-NetworkWindow::_BroadcastConfigurationUpdate(const BMessage& message)
+NetworkWindow::_ShowPane(BView* pane)
 {
-	for (int32 index = 0; index < fListView->FullListCountItems(); index++) {
-		BNetworkConfigurationListener* listener
-			= dynamic_cast<BNetworkConfigurationListener*>(
-				fListView->FullListItemAt(index));
-		if (listener != NULL)
-			listener->ConfigurationUpdated(message);
-	}
-
-	SettingsMap::const_iterator iterator = fSettingsMap.begin();
-	for (; iterator != fSettingsMap.end(); iterator++)
-		iterator->second->ConfigurationUpdated(message);
-
-	// TODO: improve invalidated region to the one that matters
-	fListView->Invalidate();
-	_UpdateRevertButton();
+	int32 index = fCards->IndexOfView(pane);
+	if (index >= 0)
+		fCards->SetVisibleItem(index);
 }
 
 
+// Revert acts on the visible detail pane, and only when it is dirty.
 void
 NetworkWindow::_UpdateRevertButton()
 {
-	bool enabled = false;
-	SettingsMap::const_iterator iterator = fSettingsMap.begin();
-	for (; iterator != fSettingsMap.end(); iterator++) {
-		if (iterator->second->IsRevertable()) {
-			enabled = true;
-			break;
-		}
-	}
+	bool dirty = false;
+	if (fProxyView != NULL && !fProxyView->IsHidden())
+		dirty = fProxyView->IsDirty();
+	else if (fMobileView != NULL && !fMobileView->IsHidden())
+		dirty = fMobileView->IsDirty();
+	else if (fDetailView != NULL)
+		dirty = fDetailView->IsRevertable();
 
-	fRevertButton->SetEnabled(enabled);
+	fRevertButton->SetEnabled(dirty);
+	fRevertButton->SetToolTip(dirty
+		? B_TRANSLATE("Discard unapplied changes")
+		: B_TRANSLATE("No unapplied changes"));
 }
 
 
 void
-NetworkWindow::_ShowReplicant(bool show)
+NetworkWindow::_RevertSettings()
 {
-	if (show) {
-		const char* argv[] = {"--deskbar", NULL};
+	if (fProxyView != NULL && !fProxyView->IsHidden())
+		fProxyView->Revert();
+	else if (fMobileView != NULL && !fMobileView->IsHidden())
+		fMobileView->Revert();
+	else if (fDetailView != NULL)
+		fDetailView->Revert();
+	_UpdateRevertButton();
+}
 
-		status_t status = be_roster->Launch(kNetworkStatusSignature, 1, argv);
-		if (status != B_OK && status != B_ALREADY_RUNNING) {
-			BString errorMessage;
-			errorMessage.SetToFormat(
-				B_TRANSLATE("Installing NetworkStatus in Deskbar failed: %s"),
-				strerror(status));
-			BAlert* alert = new BAlert(B_TRANSLATE("launch error"),
-				errorMessage, B_TRANSLATE("OK"));
-			alert->Go(NULL);
+
+// Name the NetworkStatusView archives itself under (see
+// NetworkStatusView.cpp's BView constructor) -- BDeskbar's item-lookup
+// API here works by that name rather than by entry_ref/signature.
+static const char* kNetworkStatusDeskbarItemName = "NetworkStatus";
+
+
+void
+NetworkWindow::_ToggleReplicant()
+{
+	BDeskbar deskbar;
+	status_t status = B_OK;
+
+	if (_IsReplicantInstalled()) {
+		status = deskbar.RemoveItem(kNetworkStatusDeskbarItemName);
+		if (status != B_OK) {
+			BAlert* alert = new BAlert(B_TRANSLATE("Error"),
+				B_TRANSLATE("Couldn't remove the network status item from "
+					"the Deskbar."),
+				B_TRANSLATE("OK"), NULL, NULL, B_WIDTH_AS_USUAL,
+				B_WARNING_ALERT);
+			alert->Go();
 		}
 	} else {
-		BDeskbar deskbar;
-		deskbar.RemoveItem("NetworkStatus");
+		entry_ref ref;
+		status = be_roster->FindApp(kNetworkStatusSignature, &ref);
+		if (status == B_OK)
+			status = deskbar.AddItem(&ref);
+
+		if (status != B_OK) {
+			BString text(B_TRANSLATE("Couldn't add the network status item "
+				"to the Deskbar: %error%"));
+			text.ReplaceFirst("%error%", strerror(status));
+			BAlert* alert = new BAlert(B_TRANSLATE("Error"), text,
+				B_TRANSLATE("OK"), NULL, NULL, B_WIDTH_AS_USUAL,
+				B_WARNING_ALERT);
+			alert->Go();
+		}
 	}
+
+	// Re-sync regardless of outcome -- don't let the checkbox show
+	// "checked" when the add/remove actually failed. The checkbox isn't a
+	// stored member, so look it up by the name it was constructed with.
+	BCheckBox* checkBox
+		= dynamic_cast<BCheckBox*>(FindView("showReplicantCheckBox"));
+	if (checkBox != NULL)
+		checkBox->SetValue(_IsReplicantInstalled());
 }
 
 
@@ -617,73 +892,122 @@ bool
 NetworkWindow::_IsReplicantInstalled()
 {
 	BDeskbar deskbar;
-	return deskbar.HasItem("NetworkStatus");
+	return deskbar.HasItem(kNetworkStatusDeskbarItemName);
 }
 
 
-/*static*/ const char*
-NetworkWindow::_ItemName(const BListItem* item)
+void
+NetworkWindow::_ImportVPNRequested()
 {
-	if (const BNetworkInterfaceListItem* listItem = dynamic_cast<
-			const BNetworkInterfaceListItem*>(item))
-		return listItem->Label();
+	NMBackend* backend = NMBackend::Instance();
+	if (backend == NULL)
+		return;
 
-	if (const ServiceListItem* listItem = dynamic_cast<
-			const ServiceListItem*>(item))
-		return listItem->Label();
-
-	if (const BStringItem* stringItem = dynamic_cast<const BStringItem*>(item))
-		return stringItem->Text();
-
-	return NULL;
+	if (fImportVPNPanel == NULL) {
+		BMessenger target(this);
+		BMessage message(kMsgImportVPNRefs);
+		fImportVPNPanel = new BFilePanel(B_OPEN_PANEL, &target, NULL,
+			B_FILE_NODE, false, &message);
+		fImportVPNPanel->Window()->SetTitle(B_TRANSLATE("Import VPN"));
+	}
+	fImportVPNPanel->Show();
 }
 
 
-/*static*/ int
-NetworkWindow::_CompareTopLevelListItems(const BListItem* a, const BListItem* b)
+void
+NetworkWindow::_ImportVPNRefs(BMessage* message)
 {
-	if (a == b)
-		return 0;
+	entry_ref ref;
+	if (message->FindRef("refs", &ref) != B_OK)
+		return;
 
-	if (const InterfaceListItem* itemA
-			= dynamic_cast<const InterfaceListItem*>(a)) {
-		if (const InterfaceListItem* itemB
-				= dynamic_cast<const InterfaceListItem*>(b)) {
-			return strcasecmp(itemA->Name(), itemB->Name());
+	BPath path(&ref);
+	NMBackend* backend = NMBackend::Instance();
+	if (backend == NULL)
+		return;
+
+	if (backend->ImportVPNAsync(path.Path(), BMessenger(this),
+			kMsgImportVPNResult) != B_OK) {
+		BAlert* alert = new BAlert(B_TRANSLATE("Import VPN"),
+			B_TRANSLATE("Could not start the import."),
+			B_TRANSLATE("OK"));
+		alert->Go(NULL);
+	}
+}
+
+
+void
+NetworkWindow::_ImportVPNResult(BMessage* message)
+{
+	int32 status = B_ERROR;
+	message->FindInt32("status", &status);
+	if (status == B_OK) {
+		message->FindString(kNMFieldProfilePath, &fPendingVPNImportPath);
+		_RequestDeviceScan();
+		return;
+	}
+
+	BString reason;
+	message->FindString("reason", &reason);
+	BString text(B_TRANSLATE("Could not import the VPN connection."));
+	if (!reason.IsEmpty())
+		text << "\n" << reason;
+
+	BMessage formats;
+	if (message->FindMessage("supported_formats", &formats) == B_OK) {
+		text << "\n\n" << B_TRANSLATE("Supported formats:") << "\n";
+		for (int32 i = 0; formats.FindString("format", i, &reason) == B_OK;
+				i++) {
+			text << "  " << reason << "\n";
 		}
-		return -1;
-	} else if (dynamic_cast<const InterfaceListItem*>(b) != NULL)
-		return 1;
-/*
-	if (a == fDialUpItem)
-		return -1;
-	if (b == fDialUpItem)
-		return 1;
+	}
 
-	if (a == fServicesItem)
-		return -1;
-	if (b == fServicesItem)
-		return 1;
-*/
-	return _CompareListItems(a, b);
+	BAlert* alert = new BAlert(B_TRANSLATE("Import VPN"), text,
+		B_TRANSLATE("OK"));
+	alert->Go(NULL);
 }
 
 
-/*static*/ int
-NetworkWindow::_CompareListItems(const BListItem* a, const BListItem* b)
+void
+NetworkWindow::_WiFiAdapters(BMessage& adapters)
 {
-	if (a == b)
-		return 0;
+	if (fWirelessItem == NULL)
+		return;
+	int32 count = fListView->CountItemsUnder(fWirelessItem, true);
+	for (int32 i = 0; i < count; i++) {
+		DeviceListItem* item = dynamic_cast<DeviceListItem*>(
+			fListView->ItemUnderAt(fWirelessItem, true, i));
+		if (item == NULL)
+			continue;
+		adapters.AddString("name", item->Text());
+		adapters.AddString("path", item->DevicePath());
+		adapters.AddString("status", item->StatusText());
+	}
+}
 
-	const char* nameA = _ItemName(a);
-	const char* nameB = _ItemName(b);
 
-	if (nameA != NULL && nameB != NULL)
-		return strcasecmp(nameA, nameB);
-	if (nameA != NULL)
-		return 1;
-	if (nameB != NULL)
-		return -1;
+void
+NetworkWindow::_JoinOtherWiFi(BMessage* message)
+{
+	BMessage adapters;
+	_WiFiAdapters(adapters);
+	JoinWiFiWindow* window = new JoinWiFiWindow(BMessenger(this), adapters,
+		message->GetString("device", NULL));
+	window->Show();
+}
 
-	return (addr_t)a > (addr_t)b ? 1 : -1;
+
+void
+NetworkWindow::_JoinHiddenWiFi(BMessage* message)
+{
+	NMBackend* backend = NMBackend::Instance();
+	if (backend == NULL)
+		return;
+	// password is NULL: a hidden join declares key-mgmt only and the
+	// SecretAgent collects the secret, same as a scanned join.
+	backend->ConnectToWiFiAsync(message->GetString("device", ""),
+		message->GetString("ssid", ""), NULL,
+		message->GetString("security", "wpa"),
+		message->GetBool("remember", true), BMessenger(this),
+		kMsgJoinHiddenResult, true);
 }

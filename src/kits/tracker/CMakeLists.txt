@@ -68,9 +68,11 @@ AddOn(
 	TrackerSettings.cpp
 	TrackerSettingsWindow.cpp
 	TrackerString.cpp
+	TrashInfo.cpp
 	TrashWatcher.cpp
 	Utilities.cpp
 	ViewState.cpp
+	DisksWindow.cpp
 	VirtualDirectoryEntryList.cpp
 	VirtualDirectoryManager.cpp
 	VirtualDirectoryPoseView.cpp
@@ -103,9 +105,10 @@ AddOn(
 	RDEF TrackerIcons.rdef libtracker.rdef
 )
 
-UsePrivateHeaders(tracker interface shared tracker mount storage system support)
+UsePrivateHeaders(tracker interface shared tracker mount storage system support print)
 
 target_compile_definitions(tracker PRIVATE
 	_BUILDING_tracker=1
 	_SUPPORTS_RESOURCES=1
 )
+DoCatalogs("x-vnd.Haiku-libtracker" kits/tracker)

@@ -4,6 +4,7 @@
  */
 
 #include "Team.h"
+#include "InterruptedWait.h"
 #include "KernelDebug.h"
 
 #include "../kernel/nexus/nexus/nexus.h"
@@ -23,15 +24,16 @@ create_port(int32 queueLength, const char* name)
 	if (nexus < 0)
 		return B_BAD_PORT_ID;
 
-	struct nexus_port_exchange exchange;
+	struct nexus_port_create exchange;
 	memset(&exchange, 0, sizeof(exchange));
-	exchange.buffer = (char*)name;
+	exchange.name = name;
 	exchange.size = (uint32_t)(strlen(name) + 1);
-	exchange.cookie = queueLength;
+	exchange.capacity = queueLength;
 
-	int ret = nexus_io(nexus, NEXUS_PORT_CREATE, &exchange);
-	if (ret != B_OK)
-		return ret;
+	if (nexus_io(nexus, NEXUS_PORT_CREATE, &exchange) < 0)
+		return B_ERROR;
+	if (exchange.ret != B_OK)
+		return exchange.ret;
 
 	return exchange.id;
 }
@@ -45,15 +47,17 @@ close_port(port_id id)
 	if (id < 0)
 		return B_BAD_PORT_ID;
 
-	struct nexus_port_exchange exchange;
-	exchange.op = NEXUS_PORT_CLOSE;
+	struct nexus_port_id exchange;
+	memset(&exchange, 0, sizeof(exchange));
 	exchange.id = id;
 
 	int nexus = BKernelPrivate::Team::GetNexusDescriptor();
 	if (nexus < 0)
 		return B_BAD_PORT_ID;
 
-	return nexus_io(nexus, NEXUS_PORT_OP, &exchange);
+	if (nexus_io(nexus, NEXUS_PORT_CLOSE, &exchange) < 0)
+		return B_ERROR;
+	return exchange.ret;
 }
 
 
@@ -69,11 +73,13 @@ delete_port(port_id id)
 	if (nexus < 0)
 		return B_BAD_PORT_ID;
 
-	struct nexus_port_exchange exchange;
-	exchange.op = NEXUS_PORT_DELETE;
+	struct nexus_port_id exchange;
+	memset(&exchange, 0, sizeof(exchange));
 	exchange.id = id;
 
-	return nexus_io(nexus, NEXUS_PORT_OP, &exchange);
+	if (nexus_io(nexus, NEXUS_PORT_DELETE, &exchange) < 0)
+		return B_ERROR;
+	return exchange.ret;
 }
 
 
@@ -87,13 +93,15 @@ find_port(const char* name)
 	if (nexus < 0)
 		return B_BAD_PORT_ID;
 
-	struct nexus_port_exchange exchange;
-	exchange.buffer = name;
+	struct nexus_port_find_req exchange;
+	memset(&exchange, 0, sizeof(exchange));
+	exchange.name = name;
 	exchange.size = strlen(name)+1;
 
-	int ret = nexus_io(nexus, NEXUS_PORT_FIND, &exchange);
-	if (ret != B_OK)
-		return ret;
+	if (nexus_io(nexus, NEXUS_PORT_FIND, &exchange) < 0)
+		return B_ERROR;
+	if (exchange.ret != B_OK)
+		return exchange.ret;
 
 	return exchange.id;
 }
@@ -103,9 +111,40 @@ status_t
 _kern_get_next_port_info(team_id team, int32* _cookie,
 	struct port_info* info)
 {
-	UNIMPLEMENTED();
-	// Maybe this could be read from proc
-	return B_ERROR;
+	if (_cookie == NULL || info == NULL)
+		return B_BAD_VALUE;
+
+	int nexus = BKernelPrivate::Team::GetNexusDescriptor();
+	if (nexus < 0)
+		return B_BAD_PORT_ID;
+
+	struct nexus_get_next_port req;
+	memset(&req, 0, sizeof(req));
+	req.team   = (pid_t)team;
+	req.cookie = *_cookie;
+
+	if (nexus_io(nexus, NEXUS_GET_NEXT_PORT_FOR_TEAM, &req) < 0)
+		return B_ERROR;
+	if (req.ret != B_OK)
+		return req.ret;
+
+	info->port        = req.info.port;
+	info->team        = req.info.team;
+	info->capacity    = req.info.capacity;
+	info->queue_count = req.info.queue_count;
+	info->total_count = req.info.total_count;
+	strlcpy(info->name, req.info.name, sizeof(info->name));
+
+	// Advance cookie to the port id we just returned
+	*_cookie = req.info.port;
+	return B_OK;
+}
+
+
+status_t
+_get_next_port_info(team_id team, int32* cookie, port_info* info, size_t size)
+{
+	return _kern_get_next_port_info(team, cookie, info);
 }
 
 
@@ -124,16 +163,17 @@ _get_port_info(port_id id, port_info* out_info, size_t size)
 	if (nexus < 0)
 		return B_BAD_PORT_ID;
 
-	struct nexus_port_exchange exchange;
-	nexus_port_info info;
+	struct nexus_port_get_info exchange;
+	struct nexus_port_info info;
+	memset(&info, 0, sizeof(info));
 
-	exchange.op = NEXUS_PORT_INFO;
 	exchange.id = id;
-	exchange.buffer = (void*)&info;
+	exchange.info = &info;
 
-	int ret = nexus_io(nexus, NEXUS_PORT_OP, &exchange);
-	if (ret != B_OK)
-		return ret;
+	if (nexus_io(nexus, NEXUS_PORT_INFO, &exchange) < 0)
+		return B_ERROR;
+	if (exchange.ret != B_OK)
+		return exchange.ret;
 
 	out_info->port = info.port;
 	out_info->team = info.team;
@@ -205,19 +245,24 @@ _get_port_message_info_etc(port_id id, port_message_info* info,
 	if (nexus < 0)
 		return B_BAD_PORT_ID;
 
-	struct nexus_port_exchange exchange;
-	exchange.op = NEXUS_PORT_MESSAGE_INFO;
-	exchange.id = id;
-	exchange.flags = flags;
-	exchange.timeout = timeout;
+	struct nexus_port_get_message_info exchange;
+	struct nexus_port_message_info privateInfo;
+	bigtime_t deadline = BKernelPrivate::wait_deadline(&flags, &timeout);
+	do {
+		memset(&privateInfo, 0, sizeof(privateInfo));
+		memset(&exchange, 0, sizeof(exchange));
+		exchange.id = id;
+		exchange.flags = flags;
+		exchange.timeout = timeout;
+		exchange.size = sizeof(privateInfo);
+		exchange.info = &privateInfo;
 
-	nexus_port_message_info privateInfo;
-	exchange.buffer = &privateInfo;
-	exchange.size = sizeof(privateInfo);
-
-	int ret = nexus_io(nexus, NEXUS_PORT_OP, &exchange);
-	if (ret != B_OK)
-		return ret;
+		if (nexus_io(nexus, NEXUS_PORT_MESSAGE_INFO, &exchange) < 0)
+			return B_ERROR;
+	} while (BKernelPrivate::wait_again(&exchange.ret, flags, deadline,
+		&timeout));
+	if (exchange.ret != B_OK)
+		return exchange.ret;
 
 	info->size = privateInfo.size;
 	info->sender = privateInfo.sender;
@@ -246,18 +291,23 @@ read_port_etc(port_id id, int32* msgCode, void* msgBuffer,
 	if (nexus < 0)
 		return B_BAD_PORT_ID;
 
-	struct nexus_port_exchange exchange;
-	exchange.op = NEXUS_PORT_READ;
-	exchange.id = id;
-	exchange.code = msgCode;
-	exchange.buffer = msgBuffer;
-	exchange.size = bufferSize;
-	exchange.flags = flags;
-	exchange.timeout = timeout;
+	struct nexus_port_read exchange;
+	bigtime_t deadline = BKernelPrivate::wait_deadline(&flags, &timeout);
+	do {
+		memset(&exchange, 0, sizeof(exchange));
+		exchange.id = id;
+		exchange.code = msgCode;
+		exchange.buffer = msgBuffer;
+		exchange.size = bufferSize;
+		exchange.flags = flags;
+		exchange.timeout = timeout;
 
-	int ret = nexus_io(nexus, NEXUS_PORT_OP, &exchange);
-	if (ret != B_OK)
-		return ret;
+		if (nexus_io(nexus, NEXUS_PORT_READ, &exchange) < 0)
+			return B_ERROR;
+	} while (BKernelPrivate::wait_again(&exchange.ret, flags, deadline,
+		&timeout));
+	if (exchange.ret != B_OK)
+		return exchange.ret;
 
 	return exchange.size;
 }
@@ -289,16 +339,22 @@ write_port_etc(port_id id, int32 msgCode, const void* msgBuffer,
 	if (nexus < 0)
 		return B_BAD_PORT_ID;
 
-	struct nexus_port_exchange exchange;
-	exchange.op = NEXUS_PORT_WRITE;
-	exchange.id = id;
-	exchange.code = &msgCode;
-	exchange.buffer = msgBuffer;
-	exchange.size = bufferSize;
-	exchange.flags = flags;
-	exchange.timeout = timeout;
+	struct nexus_port_write exchange;
+	bigtime_t deadline = BKernelPrivate::wait_deadline(&flags, &timeout);
+	do {
+		memset(&exchange, 0, sizeof(exchange));
+		exchange.id = id;
+		exchange.code = &msgCode;
+		exchange.buffer = msgBuffer;
+		exchange.size = bufferSize;
+		exchange.flags = flags;
+		exchange.timeout = timeout;
 
-	return nexus_io(nexus, NEXUS_PORT_OP, &exchange);
+		if (nexus_io(nexus, NEXUS_PORT_WRITE, &exchange) < 0)
+			return B_ERROR;
+	} while (BKernelPrivate::wait_again(&exchange.ret, flags, deadline,
+		&timeout));
+	return exchange.ret;
 }
 
 
@@ -308,6 +364,127 @@ write_port(port_id id, int32 msgCode,
 {
 	CALLED();
 	return write_port_etc(id, msgCode, msgBuffer, bufferSize, 0, 0);
+}
+
+
+status_t
+write_port_with_caps(port_id id, int32 msgCode,
+	const void* msgBuffer, size_t bufferSize,
+	const port_cap_in* caps, size_t capsCount,
+	uint32 flags, bigtime_t timeout)
+{
+	CALLED();
+
+	if (id < 0)
+		return B_BAD_PORT_ID;
+
+	if ((msgBuffer == NULL && bufferSize > 0)
+			|| bufferSize > PORT_MAX_MESSAGE_SIZE) {
+		return B_BAD_VALUE;
+	}
+
+	if (caps == NULL && capsCount > 0)
+		return B_BAD_VALUE;
+
+	int nexus = BKernelPrivate::Team::GetNexusDescriptor();
+	if (nexus < 0)
+		return B_BAD_PORT_ID;
+
+	// Userland `port_cap_in` matches `nexus_port_cap_in` byte-for-byte.
+	struct nexus_port_write_caps exchange;
+	bigtime_t deadline = BKernelPrivate::wait_deadline(&flags, &timeout);
+	do {
+		memset(&exchange, 0, sizeof(exchange));
+		exchange.id = id;
+		exchange.code = &msgCode;
+		exchange.buffer = msgBuffer;
+		exchange.size = bufferSize;
+		exchange.caps = (const struct nexus_port_cap_in*)caps;
+		exchange.caps_count = capsCount;
+		exchange.flags = flags;
+		exchange.timeout = timeout;
+
+		if (nexus_io(nexus, NEXUS_PORT_WRITE_CAPS, &exchange) < 0)
+			return B_ERROR;
+	} while (BKernelPrivate::wait_again(&exchange.ret, flags, deadline,
+		&timeout));
+	return exchange.ret;
+}
+
+
+ssize_t
+read_port_with_caps_etc(port_id id, int32* msgCode,
+	void* msgBuffer, size_t* bufferSize,
+	port_cap_out* caps, size_t* capsCount,
+	uint32 flags, bigtime_t timeout,
+	port_message_info* senderInfo)
+{
+	CALLED();
+
+	if (id < 0)
+		return B_BAD_PORT_ID;
+
+	if (bufferSize == NULL || capsCount == NULL)
+		return B_BAD_VALUE;
+
+	if ((msgBuffer == NULL && *bufferSize > 0)
+			|| *bufferSize > PORT_MAX_MESSAGE_SIZE) {
+		return B_BAD_VALUE;
+	}
+
+	if (caps == NULL && *capsCount > 0)
+		return B_BAD_VALUE;
+
+	int nexus = BKernelPrivate::Team::GetNexusDescriptor();
+	if (nexus < 0)
+		return B_BAD_PORT_ID;
+
+	// Userland `port_cap_out` matches `nexus_port_cap_out` byte-for-byte.
+	struct nexus_port_read_caps exchange;
+	bigtime_t deadline = BKernelPrivate::wait_deadline(&flags, &timeout);
+	do {
+		memset(&exchange, 0, sizeof(exchange));
+		exchange.id = id;
+		exchange.code = msgCode;
+		exchange.buffer = msgBuffer;
+		exchange.size = *bufferSize;
+		exchange.caps = (struct nexus_port_cap_out*)caps;
+		exchange.caps_count = *capsCount;
+		exchange.flags = flags;
+		exchange.timeout = timeout;
+
+		if (nexus_io(nexus, NEXUS_PORT_READ_CAPS, &exchange) < 0)
+			return B_ERROR;
+	} while (BKernelPrivate::wait_again(&exchange.ret, flags, deadline,
+		&timeout));
+
+	// Kernel writes back actual size and caps_count, even on overflow,
+	// so the caller can re-size and retry.
+	*bufferSize = exchange.size;
+	*capsCount = exchange.caps_count;
+
+	if (senderInfo != NULL) {
+		senderInfo->size = exchange.size;
+		senderInfo->sender = (uid_t)exchange.sender_uid;
+		senderInfo->sender_group = (gid_t)exchange.sender_gid;
+		senderInfo->sender_team = (team_id)exchange.sender_team;
+	}
+
+	if (exchange.ret != B_OK)
+		return exchange.ret;
+
+	return (ssize_t)exchange.size;
+}
+
+
+ssize_t
+read_port_with_caps(port_id id, int32* msgCode,
+	void* msgBuffer, size_t* bufferSize,
+	port_cap_out* caps, size_t* capsCount,
+	uint32 flags, bigtime_t timeout)
+{
+	return read_port_with_caps_etc(id, msgCode, msgBuffer, bufferSize,
+		caps, capsCount, flags, timeout, NULL);
 }
 
 
@@ -330,10 +507,12 @@ set_port_owner(port_id id, team_id team)
 	if (nexus < 0)
 		return B_BAD_PORT_ID;
 
-	struct nexus_port_exchange exchange;
-	exchange.op = NEXUS_SET_PORT_OWNER;
+	struct nexus_port_set_owner exchange;
+	memset(&exchange, 0, sizeof(exchange));
 	exchange.id = id;
-	exchange.cookie = team;
+	exchange.team = team;
 
-	return nexus_io(nexus, NEXUS_PORT_OP, &exchange);
+	if (nexus_io(nexus, NEXUS_SET_PORT_OWNER, &exchange) < 0)
+		return B_ERROR;
+	return exchange.ret;
 }

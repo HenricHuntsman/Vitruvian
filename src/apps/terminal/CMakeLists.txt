@@ -1,4 +1,4 @@
-Application(
+RunnableAddOn(
 	Terminal
 
 	SOURCES
@@ -37,8 +37,9 @@ Application(
 	VTKeyTbl.c
 	VTPrsTbl.c
 
-	LIBS be localestub shared tracker translation textencoding pthread
+	LIBS localestub shared tracker translation textencoding pthread
 	RDEF Terminal.rdef
 )
 
 UsePrivateHeaders(Terminal textencoding kernel libroot system)
+DoCatalogs("x-vnd.Haiku-Terminal" apps/terminal)

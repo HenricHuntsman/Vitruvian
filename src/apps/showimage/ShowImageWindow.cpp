@@ -51,7 +51,7 @@
 #include <TranslationUtils.h>
 #include <TranslatorRoster.h>
 
-#include <posix/locale.h>
+#include <locale.h>
 
 #include "ImageCache.h"
 #include "ProgressWindow.h"

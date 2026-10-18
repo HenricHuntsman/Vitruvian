@@ -7,7 +7,7 @@ Server(
 	NotificationWindow.cpp
 
 	INCLUDES 
-	LIBS be translation notification localestub
+	LIBS translation notification localestub
 	RDEF notification_server.rdef
 )
 
@@ -24,3 +24,4 @@ AddOn(
 )
 
 UsePrivateHeaders(notification notification)
+DoCatalogs("x-vnd.Haiku-notification_server" servers/notification)

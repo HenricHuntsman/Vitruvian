@@ -238,6 +238,12 @@ BDeskWindow::~BDeskWindow()
 		// prevent double-saving, this would slow down quitting
 	PoseView()->StopSettingsWatch();
 	stop_watching(this);
+	// ApplyShortcutPreferences() registers a BPathMonitor watch on the
+	// settings directory targeting "this". stop_watching() only tears
+	// down direct watch_node() registrations, not BPathMonitor's, so
+	// without this the messenger stays registered and the looper keeps
+	// dispatching to a deleted window.
+	BPathMonitor::StopWatching(this);
 }
 
 
@@ -591,7 +597,7 @@ BDeskWindow::MessageReceived(BMessage* message)
 				node_ref node;
 				if (fNodeRef == NULL
 					|| message->FindNodeRef("virtual:node", &node) != B_OK
-					|| node != fNodeRef->node)
+					|| node != *fNodeRef)
 					break;
 			}
 			ApplyShortcutPreferences(true);

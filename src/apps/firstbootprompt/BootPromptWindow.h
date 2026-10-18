@@ -1,6 +1,7 @@
 /*
  * Copyright 2010, Stephan Aßmus <superstippi@gmx.de>.
  * Copyright 2020, Panagiotis "Ivory" Vasilopoulos <git@n0toose.net>
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * All rights reserved. Distributed under the terms of the MIT License.
  */
 #ifndef BOOT_PROMPT_WINDOW_H
@@ -43,6 +44,9 @@ private:
 			BMenuItem*			_KeymapItemForLanguage(
 									BLanguage& language) const;
 
+			void				_ApplyLocaleToSession();
+			void				_LaunchInstaller();
+
 private:
 			BTextView*			fInfoTextView;
 			BStringView*		fLanguagesLabelView;
@@ -50,8 +54,8 @@ private:
 			BListView*			fLanguagesListView;
 			BMenuField*			fKeymapsMenuField;
 			BMenuItem*			fDefaultKeymapItem;
-			BButton*			fDesktopButton;
-			BButton*			fInstallerButton;
+			BButton*			fTryItButton;
+			BButton*			fInstallButton;
 };
 
 

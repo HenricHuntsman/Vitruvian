@@ -1,6 +1,6 @@
 
-Application(
-	TIFFTranslator
+TranslatorAddOn(
+	TIFFTranslator SHARED
 
 	SOURCES
 	TIFFMain.cpp	
@@ -14,3 +14,4 @@ Application(
 
 	RDEF TIFFTranslator.rdef
 )
+DoCatalogs("x-vnd.Haiku-TIFFTranslator" add-ons/translators/tiff)

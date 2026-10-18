@@ -1,6 +1,6 @@
 
-Application(
-	ICOTranslator
+TranslatorAddOn(
+	ICOTranslator SHARED
 
 	SOURCES
 	ConfigView.cpp
@@ -15,3 +15,4 @@ Application(
 
 	RDEF ICOTranslator.rdef
 )
+DoCatalogs("x-vnd.Haiku-ICOTranslator" add-ons/translators/ico)

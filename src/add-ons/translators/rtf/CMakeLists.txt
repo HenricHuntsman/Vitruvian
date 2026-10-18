@@ -1,5 +1,6 @@
-Application(
-	RTFTranslator
+
+TranslatorAddOn(
+	RTFTranslator SHARED
 
 	SOURCES
 	ConfigView.cpp
@@ -15,3 +16,4 @@ Application(
 
 	RDEF RTFTranslator.rdef
 )
+DoCatalogs("x-vnd.Haiku-RTFTranslator" add-ons/translators/rtf)

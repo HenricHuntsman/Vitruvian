@@ -25,9 +25,13 @@
 #include <ToolTipManager.h>
 #include <View.h>
 
+#include <VRefCache.h>
+
 #include <new>
 #include <stdio.h>
 #include <string.h>
+#include <utility>
+#include <vector>
 
 
 //#define TRACE_EVENTS
@@ -246,6 +250,7 @@ EventDispatcher::EventDispatcher()
 	fNextLatestMouseMoved(NULL),
 	fLastButtons(0),
 	fLastUpdate(system_time()),
+	fDisplayAsleep(0),
 	fDraggingMessage(false),
 	fCursorLock("cursor loop lock"),
 	fHWInterface(NULL),
@@ -628,6 +633,33 @@ EventDispatcher::SetDragMessage(BMessage& message,
 
 
 void
+EventDispatcher::SetDragMessage(BMessage& message,
+	std::vector<std::pair<vref_id, BPrivate::vref_ticket>>&& tickets,
+	ServerBitmap* bitmap, const BPoint& offsetFromCursor)
+{
+	ETRACE(("EventDispatcher::SetDragMessage() [with tickets]\n"));
+
+	BAutolock _(this);
+
+	if (fLastButtons == 0) {
+		for (auto& kv : tickets)
+			BPrivate::VRefCache::Release(kv.first, kv.second);
+		return;
+	}
+
+	for (auto& kv : fDragTickets)
+		BPrivate::VRefCache::Release(kv.first, kv.second);
+	fDragTickets = std::move(tickets);
+
+	fHWInterface->SetDragBitmap(bitmap, offsetFromCursor);
+
+	fDragMessage = message;
+	fDraggingMessage = true;
+	fDragOffset = offsetFromCursor;
+}
+
+
+void
 EventDispatcher::SetDesktop(Desktop* desktop)
 {
 	fDesktop = desktop;
@@ -744,6 +776,10 @@ EventDispatcher::_DeliverDragMessage()
 			&fDragMessage, 100.0);
 	}
 
+	for (auto& kv : fDragTickets)
+		BPrivate::VRefCache::Release(kv.first, kv.second);
+	fDragTickets.clear();
+
 	fDragMessage.MakeEmpty();
 	fDragMessage.what = 0;
 	fDraggingMessage = false;
@@ -762,6 +798,8 @@ EventDispatcher::_EventLoop()
 	while (fStream->GetNextEvent(&event)) {
 		BAutolock _(this);
 		fLastUpdate = system_time();
+		if (atomic_get_and_set(&fDisplayAsleep, 0) != 0 && fHWInterface != NULL)
+			fHWInterface->SetDPMSMode(B_DPMS_ON);
 
 		EventTarget* current = NULL;
 		EventTarget* previous = NULL;

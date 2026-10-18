@@ -69,7 +69,7 @@ class BList;
 	size_t
 	operator()(node_ref ref) const
 	{
-		return ref.ino();
+		return ref.vnode();
 	}
 };*/
 
@@ -437,6 +437,13 @@ public:
 	void UpdateDateColumns(BMessage*);
 	virtual void AdaptToVolumeChange(BMessage*);
 	virtual void AdaptToDesktopIntegrationChange(BMessage*);
+	virtual void AdaptToSnapToGridChange(BMessage*);
+
+	void SnapPoseToGrid(BPose* pose, BRect& viewBounds);
+		// snap the pose to the icon grid, moving it to the next free
+		// slot when the nearest grid cell is taken; does nothing in
+		// list mode or unless the "SnapToGrid" setting is on
+	void SnapAllPosesToGrid();
 
 	void SetTextWidgetToCheck(BTextWidget*, BTextWidget* = NULL);
 
@@ -692,31 +699,37 @@ private:
 
 protected:
 	struct node_ref_key {
-		node_ref_key() {}
-		node_ref_key(const node_ref& value) : value(value) {}
+		node_ref_key() : device(-1), node(-1) {}
+		node_ref_key(const node_ref& value)
+		{
+			device = value.device();
+			node = value.node();
+		}
 
 		uint32 GetHashCode() const
 		{
-			return (uint32)value.device ^ (uint32)value.node;
+			return (uint32)device ^ (uint32)node;
 		}
 
 		node_ref_key operator=(const node_ref_key& other)
 		{
-			value = other.value;
+			device = other.device;
+			node = other.node;
 			return *this;
 		}
 
 		bool operator==(const node_ref_key& other) const
 		{
-			return (value == other.value);
+			return device == other.device && node == other.node;
 		}
 
 		bool operator!=(const node_ref_key& other) const
 		{
-			return (value != other.value);
+			return !(*this == other);
 		}
 
-		node_ref	value;
+		dev_t	device;
+		ino_t	node;
 	};
 
 protected:
@@ -746,6 +759,7 @@ private:
 	BObjectList<BColumn, true>* fColumnList;
 	BStringList fMimeTypeList;
 	BObjectList<Model>* fBrokenLinks;
+	HashSet<node_ref_key> fWatchedBrokenParents;
 	BCountView* fCountView;
 	float fListElemHeight;
 	float fListOffset;

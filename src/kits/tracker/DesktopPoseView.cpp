@@ -221,6 +221,7 @@ DesktopPoseView::StartSettingsWatch()
 		tracker->StartWatching(this, kShowDisksIconChanged);
 		tracker->StartWatching(this, kVolumesOnDesktopChanged);
 		tracker->StartWatching(this, kDesktopIntegrationChanged);
+		tracker->StartWatching(this, kSnapToGridChanged);
 		tracker->UnlockLooper();
 	}
 }
@@ -234,6 +235,7 @@ DesktopPoseView::StopSettingsWatch()
 		tracker->StopWatching(this, kShowDisksIconChanged);
 		tracker->StopWatching(this, kVolumesOnDesktopChanged);
 		tracker->StopWatching(this, kDesktopIntegrationChanged);
+		tracker->StopWatching(this, kSnapToGridChanged);
 		tracker->UnlockLooper();
 	}
 }
@@ -251,6 +253,11 @@ DesktopPoseView::AdaptToVolumeChange(BMessage* message)
 	bool showDisksIcon = kDefaultShowDisksIcon;
 	message->FindBool("ShowDisksIcon", &showDisksIcon);
 
+#ifndef __VOS__
+	// On Haiku, "/" is a virtual Disks pseudo-node that needs a synthetic
+	// B_ENTRY_CREATED/REMOVED to add/remove the Disks icon pose.
+	// On Vitruvian, "/" is the real boot fs and ToggleDisksVolumes handles
+	// the pose swap directly — the synthetic message causes a double-add/remove.
 	BEntry entry("/");
 	Model model(&entry);
 	if (model.InitCheck() == B_OK) {
@@ -277,6 +284,7 @@ DesktopPoseView::AdaptToVolumeChange(BMessage* message)
 
 		Window()->PostMessage(&entryMessage, this);
 	}
+#endif
 
 	ToggleDisksVolumes();
 }

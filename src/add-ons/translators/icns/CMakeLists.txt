@@ -1,6 +1,6 @@
 
-Application(
-	ICNSTranslator
+TranslatorAddOn(
+	ICNSTranslator SHARED
 
 	SOURCES
 	ConfigView.cpp
@@ -15,3 +15,4 @@ Application(
 
 	RDEF ICNSTranslator.rdef
 )
+DoCatalogs("x-vnd.Haiku-ICNSTranslator" add-ons/translators/icns)

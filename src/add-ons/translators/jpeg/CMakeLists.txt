@@ -1,6 +1,6 @@
 
-Application(
-	JPEGTranslator
+TranslatorAddOn(
+	JPEGTranslator SHARED
 
 	SOURCES
 	be_jdatadst.cpp
@@ -17,3 +17,4 @@ Application(
 
 	RDEF JPEGTranslator.rdef
 )
+DoCatalogs("x-vnd.Haiku-JPEGTranslator" add-ons/translators/jpeg)
