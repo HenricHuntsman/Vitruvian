@@ -15,7 +15,7 @@ jobs:
       - name: Install VM tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 zstd
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 zstd ovmf
       - name: Download pinned candidate
         env:
           GH_TOKEN: ${{ github.token }}
@@ -35,7 +35,7 @@ jobs:
               raise SystemExit("Expected exactly one raw image")
           out = pathlib.Path("evidence")
           log = open(out / "qemu.log", "wb")
-          cmd = ["qemu-system-x86_64", "-accel", "tcg", "-m", "2048",
+          cmd = ["qemu-system-x86_64", "-accel", "tcg", "-bios", "/usr/share/OVMF/OVMF_CODE_4M.fd", "-m", "2048",
                  "-smp", "2", "-drive", "file=" + images[0] + ",format=raw,if=ide",
                  "-snapshot", "-nic", "none", "-display", "none", "-vga", "std",
                  "-monitor", "unix:/tmp/vitruvian-monitor,server=on,wait=off",
@@ -51,12 +51,16 @@ jobs:
                   monitor.settimeout(5)
                   monitor.connect("/tmp/vitruvian-monitor")
                   monitor.recv(4096)
-                  for seconds in (30, 60, 90):
+                  for seconds in (30, 60, 90, 120):
                       time.sleep(30)
                       if proc.poll() is not None: raise RuntimeError("QEMU exited during boot")
                       target = str((out / ("boot-" + str(seconds) + "s.ppm")).resolve())
                       monitor.sendall(("screendump " + target + "\n").encode())
                       reply = monitor.recv(8192)
+                      for _ in range(100):
+                          if pathlib.Path(target).exists(): break
+                          time.sleep(.1)
+                      if not pathlib.Path(target).exists(): raise RuntimeError("Screenshot missing")
                       (out / ("monitor-" + str(seconds) + ".txt")).write_bytes(reply)
                   monitor.sendall(b"info status\n")
                   (out / "vm-status.txt").write_bytes(monitor.recv(8192))
