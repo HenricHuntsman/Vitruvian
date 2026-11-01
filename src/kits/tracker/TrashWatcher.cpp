@@ -1,4 +1,7 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
+ */
+/*
 Open Tracker License
 
 Terms and Conditions
@@ -39,6 +42,7 @@ All rights reserved.
 
 #include <Debug.h>
 #include <Directory.h>
+#include <Entry.h>
 #include <NodeMonitor.h>
 #include <Path.h>
 #include <Volume.h>
@@ -47,7 +51,29 @@ All rights reserved.
 #include "Attributes.h"
 #include "Bitmaps.h"
 #include "FSUtils.h"
+#include "IconCache.h"
 #include "Tracker.h"
+
+
+// Resolve the sibling info/ dir for a given Trash files/ dir.
+// Returns the dir path in *outPath; does not require it to exist.
+static status_t
+_trash_info_dir_for_files(const BDirectory& filesDir, BPath* outPath)
+{
+	BEntry entry;
+	status_t r = filesDir.GetEntry(&entry);
+	if (r != B_OK)
+		return r;
+	BPath filesPath;
+	r = entry.GetPath(&filesPath);
+	if (r != B_OK)
+		return r;
+	BPath trashRoot;
+	r = filesPath.GetParent(&trashRoot);
+	if (r != B_OK)
+		return r;
+	return outPath->SetTo(trashRoot.Path(), "info");
+}
 
 
 //	 #pragma mark - BTrashWatcher
@@ -61,10 +87,28 @@ BTrashWatcher::BTrashWatcher()
 	FSCreateTrashDirs();
 	WatchTrashDirs();
 	fTrashFull = CheckTrashDirs();
-	UpdateTrashIcons();
+	UpdateTrashIcon();
 
 	// watch volumes
 	TTracker::WatchNode(0, B_WATCH_MOUNT, this);
+}
+
+
+thread_id
+BTrashWatcher::Run()
+{
+	// refresh Trash icon cache
+	BPath path;
+	if (find_directory(B_TRASH_DIRECTORY, &path) == B_OK) {
+		BDirectory trashDir(path.Path());
+		BEntry entry;
+		if (trashDir.GetEntry(&entry) == B_OK) {
+			Model trashModel(&entry);
+			IconCache::sIconCache->IconChanged(&trashModel);
+		}
+	}
+
+	return BLooper::Run();
 }
 
 
@@ -80,7 +124,7 @@ BTrashWatcher::IsTrashNode(const node_ref* testNode) const
 	int32 count = fTrashNodeList.CountItems();
 	for (int32 index = 0; index < count; index++) {
 		node_ref* nref = fTrashNodeList.ItemAt(index);
-		if (nref->dereference().ino() == testNode->dereference().ino() && nref->dereference().dev() == testNode->dereference().dev())
+		if (nref->node() == testNode->node() && nref->device() == testNode->device())
 			return true;
 	}
 
@@ -100,7 +144,7 @@ BTrashWatcher::MessageReceived(BMessage* message)
 		case B_ENTRY_CREATED:
 			if (!fTrashFull) {
 				fTrashFull = true;
-				UpdateTrashIcons();
+				UpdateTrashIcon();
 			}
 			break;
 
@@ -112,17 +156,18 @@ BTrashWatcher::MessageReceived(BMessage* message)
 			entry_ref fromDir;
 			message->FindRef("virtual:from directory", &fromDir);
 			message->FindRef("virtual:to directory", &toDir);
-			if (fromDir == toDir)
+			if (fromDir.vdevice() == toDir.vdevice() && fromDir.vdirectory() == toDir.vdirectory())
 				break;
 		}
 		// fall-through
 		case B_DEVICE_UNMOUNTED:
 		case B_ENTRY_REMOVED:
 		{
+			ReconcileTrashDirs();
 			bool full = CheckTrashDirs();
 			if (fTrashFull != full) {
 				fTrashFull = full;
-				UpdateTrashIcons();
+				UpdateTrashIcon();
 			}
 			break;
 		}
@@ -142,7 +187,7 @@ BTrashWatcher::MessageReceived(BMessage* message)
 				// Check if the new volume has anything trashed.
 				if (CheckTrashDirs() && !fTrashFull) {
 					fTrashFull = true;
-					UpdateTrashIcons();
+					UpdateTrashIcon();
 				}
 			}
 			break;
@@ -152,31 +197,33 @@ BTrashWatcher::MessageReceived(BMessage* message)
 
 
 void
-BTrashWatcher::UpdateTrashIcons()
+BTrashWatcher::UpdateTrashIcon()
 {
 	// only update Trash icon attributes on boot volume
-	BVolume boot;
-	BDirectory trashDir;
-	if (BVolumeRoster().GetBootVolume(&boot) == B_OK
-		&& FSGetTrashDir(&trashDir, boot.Device()) == B_OK) {
-		// pull out the icons for the current trash state from resources
-		// and apply them onto the trash directory node
-		int32 id = fTrashFull ? R_TrashFullIcon : R_TrashIcon;
-		size_t size = 0;
-		const void* data = GetTrackerResources()->LoadResource(B_VECTOR_ICON_TYPE, id, &size);
-		if (data != NULL && size > 0) {
-			// write vector icon attribute
-			trashDir.WriteAttr(kAttrIcon, B_VECTOR_ICON_TYPE, 0, data, size);
-		} else {
-			// write large and mini icon attributes
-			data = GetTrackerResources()->LoadResource('ICON', id, &size);
-			if (data != NULL && size > 0)
-				trashDir.WriteAttr(kAttrLargeIcon, 'ICON', 0, data, size);
+	BPath path;
+	if (find_directory(B_TRASH_DIRECTORY, &path) != B_OK)
+		return;
 
-			data = GetTrackerResources()->LoadResource('MICN', id, &size);
-			if (data != NULL && size > 0)
-				trashDir.WriteAttr(kAttrMiniIcon, 'MICN', 0, data, size);
-		}
+	BDirectory trashDir(path.Path());
+
+	// pull out the icons for the current trash state from resources
+	// and apply them onto the trash directory node
+	int32 id = fTrashFull ? R_TrashFullIcon : R_TrashIcon;
+	size_t size = 0;
+	const void* data = GetTrackerResources()->LoadResource(B_VECTOR_ICON_TYPE, id, &size);
+
+	if (data != NULL && size > 0) {
+		// write vector icon attribute
+		trashDir.WriteAttr(kAttrIcon, B_VECTOR_ICON_TYPE, 0, data, size);
+	} else {
+		// write large and mini icon attributes
+		data = GetTrackerResources()->LoadResource('ICON', id, &size);
+		if (data != NULL && size > 0)
+			trashDir.WriteAttr(kAttrLargeIcon, 'ICON', 0, data, size);
+
+		data = GetTrackerResources()->LoadResource('MICN', id, &size);
+		if (data != NULL && size > 0)
+			trashDir.WriteAttr(kAttrMiniIcon, 'MICN', 0, data, size);
 	}
 }
 
@@ -188,15 +235,74 @@ BTrashWatcher::WatchTrashDirs()
 	volRoster.Rewind();
 	BVolume	volume;
 	while (volRoster.GetNextVolume(&volume) == B_OK) {
-		if (volume.IsReadOnly() || !volume.IsPersistent())
+		// IsPersistent dropped: overlayfs reports non-persistent.
+		if (volume.IsReadOnly() || volume.Capacity() == 0)
 			continue;
 
 		BDirectory trashDir;
-		if (FSGetTrashDir(&trashDir, volume.Device()) == B_OK) {
+		if (FSGetTrashDir(&trashDir, volume.Device()) == B_OK
+			&& FSRecordTrashDir(&fTrashNodeList, &trashDir)) {
 			node_ref trash_node;
 			trashDir.GetNodeRef(&trash_node);
 			watch_node(&trash_node, B_WATCH_DIRECTORY, this);
-			fTrashNodeList.AddItem(new node_ref(trash_node));
+
+			// Also watch the sibling info/ dir so out-of-band tools
+			// (e.g. `gio trash`, manual rm) trigger reconciliation.
+			BPath infoPath;
+			if (_trash_info_dir_for_files(trashDir, &infoPath) == B_OK) {
+				BDirectory infoDir(infoPath.Path());
+				if (infoDir.InitCheck() == B_OK) {
+					node_ref info_node;
+					infoDir.GetNodeRef(&info_node);
+					watch_node(&info_node, B_WATCH_DIRECTORY, this);
+				}
+			}
+		}
+	}
+}
+
+
+void
+BTrashWatcher::ReconcileTrashDirs()
+{
+	// Prune orphan .trashinfo entries (a .trashinfo whose paired entry
+	// under files/ has gone away — typically because someone deleted
+	// from files/ out of band, or because a previous move-to-trash
+	// failed between the rename and the trashinfo write).
+	BVolumeRoster volRoster;
+	volRoster.Rewind();
+	BVolume volume;
+	while (volRoster.GetNextVolume(&volume) == B_OK) {
+		if (volume.IsReadOnly())
+			continue;
+
+		BDirectory filesDir;
+		if (FSGetTrashDir(&filesDir, volume.Device()) != B_OK)
+			continue;
+		BPath infoPath;
+		if (_trash_info_dir_for_files(filesDir, &infoPath) != B_OK)
+			continue;
+
+		BDirectory infoDir(infoPath.Path());
+		if (infoDir.InitCheck() != B_OK)
+			continue;
+
+		infoDir.Rewind();
+		BEntry infoEntry;
+		while (infoDir.GetNextEntry(&infoEntry) == B_OK) {
+			char name[B_FILE_NAME_LENGTH];
+			if (infoEntry.GetName(name) != B_OK)
+				continue;
+			size_t len = strlen(name);
+			static const char kSuffix[] = ".trashinfo";
+			const size_t kSuffixLen = sizeof(kSuffix) - 1;
+			if (len <= kSuffixLen
+				|| strcmp(name + len - kSuffixLen, kSuffix) != 0) {
+				continue;
+			}
+			BString base(name, len - kSuffixLen);
+			if (!filesDir.Contains(base.String()))
+				infoEntry.Remove();
 		}
 	}
 }
@@ -209,15 +315,17 @@ BTrashWatcher::CheckTrashDirs()
 	volRoster.Rewind();
 	BVolume	volume;
 	while (volRoster.GetNextVolume(&volume) == B_OK) {
-		if (volume.IsReadOnly() || !volume.IsPersistent() || volume.Capacity() == 0)
+		if (volume.IsReadOnly() || volume.Capacity() == 0)
 			continue;
 
 		BDirectory trashDir;
-		FSGetTrashDir(&trashDir, volume.Device());
-		trashDir.Rewind();
-		BEntry entry;
-		if (trashDir.GetNextEntry(&entry) == B_OK)
-			return true;
+		if (FSGetTrashDir(&trashDir, volume.Device()) == B_OK) {
+			trashDir.Rewind();
+			// GetNextRef() is a bit faster than GetNextEntry()
+			entry_ref ref;
+			if (trashDir.GetNextRef(&ref) == B_OK)
+				return true;
+		}
 	}
 
 	return false;

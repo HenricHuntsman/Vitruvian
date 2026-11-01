@@ -11,7 +11,7 @@
 #include <stdlib.h>
 #include <vector>
 
-#ifdef __HAIKU__
+#if defined(__VOS__)
 #	include <AboutWindow.h>
 #	include <AbstractLayoutItem.h>
 #	include <ControlLook.h>
@@ -127,7 +127,7 @@ struct data_item {
 	int64		value;
 };
 
-#ifdef __HAIKU__
+#if defined(__VOS__)
 class ActivityView::HistoryLayoutItem : public BAbstractLayoutItem {
 public:
 							HistoryLayoutItem(ActivityView* parent);
@@ -140,6 +140,7 @@ public:
 
 	virtual	BView*			View();
 
+	virtual BSize			BaseMinSize();
 	virtual	BSize			BasePreferredSize();
 
 private:
@@ -405,7 +406,7 @@ DataHistory::SetScale(Scale* scale)
 //	#pragma mark -
 
 
-#ifdef __HAIKU__
+#if defined(__VOS__)
 ActivityView::HistoryLayoutItem::HistoryLayoutItem(ActivityView* parent)
 	:
 	fParent(parent),
@@ -451,10 +452,16 @@ ActivityView::HistoryLayoutItem::View()
 
 
 BSize
+ActivityView::HistoryLayoutItem::BaseMinSize()
+{
+	return BSize(B_SIZE_UNSET, be_control_look->DefaultLabelSpacing() * 5.0f);
+}
+
+
+BSize
 ActivityView::HistoryLayoutItem::BasePreferredSize()
 {
-	BSize size(BaseMaxSize());
-	return size;
+	return BSize(B_SIZE_UNSET, be_control_look->DefaultLabelSpacing() * 8.0f);
 }
 
 
@@ -510,7 +517,7 @@ ActivityView::LegendLayoutItem::BaseMinSize()
 {
 	// TODO: Cache the info. Might be too expensive for this call.
 	BSize size;
-	size.width = 80;
+	size.width = fParent->StringWidth("W") * 16;
 	size.height = fParent->_LegendHeight();
 
 	return size;
@@ -568,7 +575,7 @@ ActivityView::ActivityView(BRect frame, const char* name,
 
 
 ActivityView::ActivityView(const char* name, const BMessage* settings)
-#ifdef __HAIKU__
+#if defined(__VOS__)
 	: BView(name, B_WILL_DRAW | B_FULL_UPDATE_ON_RESIZE | B_FRAME_EVENTS),
 #else
 	: BView(BRect(0, 0, 300, 200), name, B_FOLLOW_NONE,
@@ -610,7 +617,7 @@ ActivityView::_Init(const BMessage* settings)
 	fLegendBackgroundColor = LowColor();
 		// the low color is restored by the BView unarchiving
 	fOffscreen = NULL;
-#ifdef __HAIKU__
+#if defined(__VOS__)
 	fHistoryLayoutItem = NULL;
 	fLegendLayoutItem = NULL;
 #endif
@@ -730,7 +737,7 @@ ActivityView::_ScaleFor(scale_type type)
 }
 
 
-#ifdef __HAIKU__
+#if defined(__VOS__)
 BLayoutItem*
 ActivityView::CreateHistoryLayoutItem()
 {
@@ -837,7 +844,7 @@ ActivityView::AddDataSource(const DataSource* source, const BMessage* state)
 		insert++;
 	}
 
-#ifdef __HAIKU__
+#if defined(__VOS__)
 	InvalidateLayout();
 #endif
 	return B_OK;
@@ -870,7 +877,7 @@ ActivityView::RemoveDataSource(const DataSource* remove)
 		removed = true;
 	}
 
-#ifdef __HAIKU__
+#if defined(__VOS__)
 	InvalidateLayout();
 #endif
 	return B_OK;
@@ -913,7 +920,7 @@ ActivityView::DetachedFromWindow()
 }
 
 
-#ifdef __HAIKU__
+#if defined(__VOS__)
 BSize
 ActivityView::MinSize()
 {
@@ -1195,7 +1202,7 @@ ActivityView::MessageReceived(BMessage* message)
 void
 ActivityView::_UpdateFrame()
 {
-#ifdef __HAIKU__
+#if defined(__VOS__)
 	if (fLegendLayoutItem == NULL || fHistoryLayoutItem == NULL)
 		return;
 
@@ -1251,7 +1258,7 @@ BRect
 ActivityView::_LegendFrame() const
 {
 	float height;
-#ifdef __HAIKU__
+#if defined(__VOS__)
 	if (fLegendLayoutItem != NULL)
 		height = fLegendLayoutItem->Frame().Height();
 	else

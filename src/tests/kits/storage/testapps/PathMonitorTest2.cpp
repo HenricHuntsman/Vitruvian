@@ -115,8 +115,8 @@ test_path(const BString& maybeRelativePath)
 static BString
 node_ref_to_string(const node_ref& nodeRef)
 {
-	return BString().SetToFormat("%" B_PRIdDEV ":%" B_PRIdINO, nodeRef.device,
-		nodeRef.node);
+	return BString().SetToFormat("%" B_PRIdDEV ":%" B_PRIdINO, nodeRef.vdevice(),
+		nodeRef.vnode());
 }
 
 
@@ -124,7 +124,7 @@ static BString
 entry_ref_to_string(const entry_ref& entryRef)
 {
 	return BString().SetToFormat("%" B_PRIdDEV ":%" B_PRIdINO ":\"%s\"",
-		entryRef.device, entryRef.directory, entryRef.name);
+		entryRef.vdevice(), entryRef.vdirectory(), entryRef.name);
 }
 
 
@@ -357,43 +357,30 @@ struct MonitoringInfo {
 			case B_ENTRY_CREATED:
 			case B_ENTRY_REMOVED:
 			{
-				NotOwningEntryRef entryRef;
+				entry_ref entryRef;
 				node_ref nodeRef;
 
-				if (message.FindInt64("device", (int64*)&nodeRef.device) != B_OK
-					|| message.FindInt64("node", (int64*)&nodeRef.node) != B_OK
-					|| message.FindInt64("directory", (int64*)&entryRef.directory)
-						!= B_OK
-					|| message.FindString("name", (const char**)&entryRef.name)
-						!= B_OK) {
+				if (message.FindRef("virtual:directory", &entryRef) != B_OK
+					|| message.FindNodeRef("virtual:node", &nodeRef) != B_OK) {
 					return false;
 				}
-				entryRef.device = nodeRef.device;
 
 				return nodeRef == fNodeRef && entryRef == fEntryRef;
 			}
 
 			case B_ENTRY_MOVED:
 			{
-				NotOwningEntryRef fromEntryRef;
-				NotOwningEntryRef toEntryRef;
+				entry_ref fromEntryRef;
+				entry_ref toEntryRef;
 				node_ref nodeRef;
 
-				if (message.FindInt64("node device", (int64*)&nodeRef.device) != B_OK
-					|| message.FindInt64("node", (int64*)&nodeRef.node) != B_OK
-					|| message.FindInt64("device", (int64*)&fromEntryRef.device)
+				if (message.FindRef("virtual:from directory", &fromEntryRef)
 						!= B_OK
-					|| message.FindInt64("from directory",
-						(int64*)&fromEntryRef.directory) != B_OK
-					|| message.FindInt64("to directory", (int64*)&toEntryRef.directory)
+					|| message.FindRef("virtual:to directory", &toEntryRef)
 						!= B_OK
-					|| message.FindString("from name",
-						(const char**)&fromEntryRef.name) != B_OK
-					|| message.FindString("name",
-						(const char**)&toEntryRef.name) != B_OK) {
+					|| message.FindNodeRef("virtual:node", &nodeRef) != B_OK) {
 					return false;
 				}
-				toEntryRef.device = fromEntryRef.device;
 
 				return nodeRef == fNodeRef && toEntryRef == fEntryRef
 					&& fromEntryRef == fFromEntryRef;
@@ -403,11 +390,8 @@ struct MonitoringInfo {
 			case B_ATTR_CHANGED:
 			{
 				node_ref nodeRef;
-
-				if (message.FindInt64("device", (int64*)&nodeRef.device) != B_OK
-					|| message.FindInt64("node", (int64*)&nodeRef.node) != B_OK) {
+				if (message.FindNodeRef("virtual:node", &nodeRef) != B_OK)
 					return false;
-				}
 
 				return nodeRef == fNodeRef;
 			}

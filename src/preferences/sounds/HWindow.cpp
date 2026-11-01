@@ -12,6 +12,8 @@
 #include "HWindow.h"
 #include "HEventList.h"
 
+#include <SystemBeep.h>
+
 #include <stdio.h>
 
 #include <Alert.h>
@@ -34,7 +36,9 @@
 #include <PathFinder.h>
 #include <Roster.h>
 #include <ScrollView.h>
-#include <Sound.h>
+// <Sound.h> was a haiku-latest kitchen-sink include — unused here, and on
+// media2 it pulls in media2/MediaDefs.h which collides with legacy
+// <MediaFiles.h>'s transitive include of media/MediaDefs.h. Dropped.
 #include <StringView.h>
 
 #include <fs_attr.h>
@@ -307,6 +311,7 @@ void
 HWindow::_InitGUI()
 {
 	fEventList = new HEventList();
+	vos_system_beep_ensure_events();
 	fEventList->SetType(BMediaFiles::B_SOUNDS);
 	fEventList->SetSelectionMode(B_SINGLE_SELECTION_LIST);
 

@@ -1,4 +1,7 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
+ */
+/*
 Open Tracker License
 
 Terms and Conditions
@@ -44,6 +47,7 @@ All rights reserved.
 #include <Menu.h>
 #include <MenuItem.h>
 #include <Roster.h>
+#include <RosterPrivate.h>
 
 #include "BarApp.h"
 #include "BarView.h"
@@ -240,19 +244,8 @@ TDeskbarMenu::AddStandardDeskbarMenuItems()
 
 	BMenuItem* item;
 
-// One of them is used if HAIKU_DISTRO_COMPATIBILITY_OFFICIAL, and the other if
-// not. However, we want both of them to end up in the catalog, so we have to
-// make them visible to collectcatkeys in either case.
-B_TRANSLATE_MARK_VOID("About Haiku")
-B_TRANSLATE_MARK_VOID("About this system")
-
-	item = new BMenuItem(
-#ifdef HAIKU_DISTRO_COMPATIBILITY_OFFICIAL
-	B_TRANSLATE_NOCOLLECT("About Haiku")
-#else
-	B_TRANSLATE_NOCOLLECT("About this system")
-#endif
-		, new BMessage(kShowSplash));
+	item = new BMenuItem(B_TRANSLATE("About this system"),
+		new BMessage(kShowSplash));
 	item->SetEnabled(!dragging);
 	AddItem(item);
 
@@ -293,6 +286,20 @@ B_TRANSLATE_MARK_VOID("About this system")
 
 	AddSeparatorItem();
 
+	B_TRANSLATE_MARK_VOID("Lock screen");
+
+	item = new BMenuItem(B_TRANSLATE_NOCOLLECT("Lock screen"),
+		new BMessage(kLockScreen));
+	item->SetEnabled(!dragging);
+	item->SetTarget(be_app);
+	AddItem(item);
+
+	item = new BMenuItem(B_TRANSLATE("Log out"),
+		new BMessage(kLogOutUser));
+	item->SetEnabled(!dragging);
+	item->SetTarget(be_app);
+	AddItem(item);
+
 	BMenu* shutdownMenu = new BMenu(B_TRANSLATE("Shutdown" B_UTF8_ELLIPSIS));
 
 	item = new BMenuItem(B_TRANSLATE("Power off"),
@@ -305,16 +312,31 @@ B_TRANSLATE_MARK_VOID("About this system")
 	item->SetEnabled(!dragging);
 	shutdownMenu->AddItem(item);
 
-	B_TRANSLATE_MARK_VOID("Suspend");
+	// Suspend/Hibernate only when logind can actually do them.
+	// No confirmation; nothing in the session quits.
+	BRoster roster;
+	BRoster::Private rosterPrivate(roster);
+	bool canSuspend = false;
+	bool canHibernate = false;
+	rosterPrivate.CanSuspend(&canSuspend);
+	rosterPrivate.CanHibernate(&canHibernate);
 
-#ifdef APM_SUPPORT
-	if (_kapm_control_(APM_CHECK_ENABLED) == B_OK) {
+	B_TRANSLATE_MARK_VOID("Suspend");
+	B_TRANSLATE_MARK_VOID("Hibernate");
+
+	if (canSuspend) {
 		item = new BMenuItem(B_TRANSLATE_NOCOLLECT("Suspend"),
 			new BMessage(kSuspendSystem));
 		item->SetEnabled(!dragging);
 		shutdownMenu->AddItem(item);
 	}
-#endif
+
+	if (canHibernate) {
+		item = new BMenuItem(B_TRANSLATE_NOCOLLECT("Hibernate"),
+			new BMessage(kHibernateSystem));
+		item->SetEnabled(!dragging);
+		shutdownMenu->AddItem(item);
+	}
 
 	shutdownMenu->SetTargetForItems(be_app);
 
@@ -377,8 +399,11 @@ TDeskbarMenu::ResetTargets()
 				case kResizeTeamIcons:
 				case kSortRunningApps:
 				case kTrackerFirst:
+				case kLockScreen:
+				case kLogOutUser:
 				case kRebootSystem:
 				case kSuspendSystem:
+				case kHibernateSystem:
 				case kShutdownSystem:
 				case kRealignReplicants:
 				case kShowHideTime:

@@ -1,5 +1,6 @@
 /*
  * Copyright 2001-2009 Haiku, Inc. All rights reserved.
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Distributed under the terms of the MIT license.
  *
  * Authors:
@@ -113,10 +114,6 @@ BLocker::LockWithTimeout(bigtime_t timeout)
 void
 BLocker::Unlock()
 {
-	// If nobody holds the lock at all, Unlock is a no-op.
-	if (fRecursiveCount <= 0)
-		return;
-
 	// The Be Book explicitly allows any thread, not just the lock owner, to
 	// unlock. This is bad practice, but we must allow it for compatibility
 	// reasons. We can at least warn the developer that something is probably

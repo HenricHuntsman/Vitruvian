@@ -9,9 +9,16 @@
 
 #include <image.h>
 
+#include <signal.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <sys/prctl.h>
+#include <unistd.h>
+
+
+// Caps the process tree (about 2 * fib(n) loaded images).
+static const int kMaxNumber = 8;
 
 
 static void
@@ -29,6 +36,11 @@ main(int argc, char *argv[])
 	int num = 0;
 	int result;
 
+	pid_t parent = getppid();
+	prctl(PR_SET_PDEATHSIG, SIGKILL);
+	if (getppid() != parent)
+		return -1;
+
 	switch (argc) {
 		case 2:
 			num = atoi(argv[1]);
@@ -45,6 +57,9 @@ main(int argc, char *argv[])
 			usage(argv[0]);
 			break;
 	}
+
+	if (num > kMaxNumber)
+		num = kMaxNumber;
 
 	if (num < 2) {
 		result = num;

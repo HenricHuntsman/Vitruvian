@@ -9,10 +9,11 @@
 
 
 #include <Application.h>
-#include <Locker.h>
 
 #include <ApplicationPrivate.h>
 #include <AppServerLink.h>
+
+#include <Locker.h>
 
 
 /**	AppServerLink provides proxied access to the application's
@@ -28,12 +29,12 @@ static BLocker sLock("AppServerLink_sLock");
 
 namespace BPrivate {
 
-AppServerLink::AppServerLink(void)
+AppServerLink::AppServerLink()
 {
 	sLock.Lock();
 
 	// if there is no be_app, we can't do a whole lot, anyway
-	if (be_app) {
+	if (be_app != NULL) {
 		fReceiver = &BApplication::Private::ServerLink()->Receiver();
 		fSender = &BApplication::Private::ServerLink()->Sender();
 	} else {

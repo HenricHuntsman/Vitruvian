@@ -23,7 +23,7 @@
 #define B_TRANSLATION_CONTEXT "Screen"
 
 
-static const char* kAppSignature = "application/x-vnd.Haiku-Screen";
+static const char* kAppSignature = "application/x-vnd.vos-Screen";
 
 
 ScreenApplication::ScreenApplication()
@@ -38,7 +38,7 @@ void
 ScreenApplication::AboutRequested()
 {
 	BAlert *aboutAlert = new BAlert(B_TRANSLATE("About"),
-		B_TRANSLATE("Screen preferences by the Haiku team"), B_TRANSLATE("OK"),
+		B_TRANSLATE("Screen preferences"), B_TRANSLATE("OK"),
 		NULL, NULL, B_WIDTH_AS_USUAL, B_OFFSET_SPACING, B_INFO_ALERT);
 	aboutAlert->SetFlags(aboutAlert->Flags() | B_CLOSE_ON_ESCAPE);
 	aboutAlert->Go();

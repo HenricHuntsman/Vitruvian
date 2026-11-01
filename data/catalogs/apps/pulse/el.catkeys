@@ -1,4 +1,4 @@
-1	greek, modern (1453-)	x-vnd.Haiku-Pulse	3032132277
+1	greek, modern (1453-)	x-vnd.vos-Pulse	3118820593
 Normal mode	DeskbarPulseView		Κανονική λειτουργία
 Info	CPUButton		Πληροφορίες
 Quit	DeskbarPulseView		Έξοδος
@@ -14,6 +14,7 @@ Mini mode	PrefsWindow		Μίνι λειτουργία
 CPU progress bar	NormalPulseView		Μπάρα προόδου ΚΜΕ
 Fade colors	ConfigView		Αχνά χρώματα
 Deskbar mode	NormalPulseView		Λειτουργία Γραμμής Εργασιών
+About %appname%…	PulseView		Σχετικά με την εφαρμογή %appname%…
 Pulse settings	PulseApp		Ρυθμίσεις Pulse
 Remove replicant	CPUButton		Αφαίρεση ρεπλίκας
 You can't disable the last active CPU.	PulseView		Δεν μπορείτε να απενεργοποιήσετε την τελευταία ενεργή ΚΜΕ.
@@ -26,6 +27,7 @@ Removing from Deskbar failed.\n%s	DeskbarPulseView		Η αφαίρεση από �
 OK	PulseApp		Εντάξει
 Deskbar mode	PrefsWindow		Λειτουργία Γραμμής Εργασιών
 Mini mode	DeskbarPulseView		Μίνι λειτουργία
+About %appname%…	CPUButton		Σχετικά με την εφαρμογή %appname%…
 You can't disable the last active CPU.	CPUButton		Δεν μπορείτε να απενεργοποιήσετε την τελευταία ενεργή ΚΜΕ.
 OK	CPUButton		Εντάξει
 Deskbar	CPUButton		Γραμμή Εργασιών

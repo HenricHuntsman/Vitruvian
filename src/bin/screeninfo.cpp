@@ -74,7 +74,7 @@ ColorSpace table[] =
 void
 print_supported_overlays()
 {
-	for (int32 i = 0; i < sizeof(table) / sizeof(table[0]); i++)
+	for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++)
 	{
 		uint32 supportFlags = 0;
 
@@ -89,12 +89,11 @@ int
 main()
 {
 	// BScreen usage requires BApplication for AppServerLink
-	BApplication app("application/x-vnd.Haiku-screen_info");
+	BApplication app("application/x-vnd.vos-screen_info");
 
 	BScreen screen(B_MAIN_SCREEN_ID);
 
 	do {
-		screen_id screenIndex = screen.ID();
 		accelerant_device_info info;
 
 		// At the moment, screen.ID() is always 0;

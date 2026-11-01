@@ -1,5 +1,6 @@
 /*
  * Copyright 2001-2013 Haiku, Inc. All rights reserved.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  */
 #ifndef INPUT_SERVER_APP_H
@@ -237,6 +238,11 @@ class InputServer : public BApplication {
 
 		BScreen			fScreen;
 		BRect			fFrame;
+		int32			fScreenOrientation;
+		int32			fScreenReflection;
+		// True once app_server has sent IS_SCREEN_BOUNDS_UPDATED;
+		// late-registered pointing devices need the same orientation.
+		bool			fScreenBoundsValid;
 
 		BLocker			fEventQueueLock;
 		EventList 		fEventQueue;
@@ -251,6 +257,7 @@ class InputServer : public BApplication {
 		port_id			fAppServerPort;
 		team_id			fAppServerTeam;
 		area_id			fCursorArea;
+		bool			fRegistrationPending;
 		shared_cursor*	fCursorBuffer;
 };
 

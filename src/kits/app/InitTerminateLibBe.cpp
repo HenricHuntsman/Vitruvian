@@ -15,6 +15,7 @@
 #include <pthread.h>
 #endif
 
+#include <Application.h>
 #include <AppMisc.h>
 #include <LooperList.h>
 #include <MessagePrivate.h>
@@ -31,6 +32,9 @@ extern void __initialize_locale_kit();
 #define OUT	printf
 
 
+// TODO maybe it would be good to just centralize libraries init
+// so we initialize from a single constructor (maybe with a subscription
+// mechanism. E.g. see locale kit.
 static void
 initialize_forked_child()
 {
@@ -38,14 +42,20 @@ initialize_forked_child()
 
 	BMessage::Private::StaticReInitForkedChild();
 	BPrivate::gLooperList.InitAfterFork();
-	BPrivate::gDefaultTokens.InitAfterFork();
 	BPrivate::init_team_after_fork();
+
+	// Continuing to use BApplication after forking is not supported.
+	if (be_app != NULL)
+		be_app = (BApplication*)-1;
 
 	DBG(OUT("initialize_forked_child() done\n"));
 }
 
 
-extern "C" void __attribute__ ((constructor(2)))
+// Priority <100 is reserved: libroot must init before user constructors.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wprio-ctor-dtor"
+extern "C" void __attribute__ ((constructor(99)))
 initialize_before(image_id)
 {
 	DBG(OUT("initialize_before()\n"));
@@ -63,7 +73,10 @@ initialize_before(image_id)
 }
 
 
-extern "C" void __attribute__ ((constructor(3)))
+#pragma GCC diagnostic pop
+
+
+extern "C" void __attribute__ ((constructor(200)))
 initialize_after(image_id)
 {
 	DBG(OUT("initialize_after()\n"));
@@ -74,10 +87,13 @@ initialize_after(image_id)
 }
 
 
-extern "C" void __attribute__ ((destructor(3)))
+extern "C" void __attribute__ ((destructor))
 terminate_after(image_id)
 {
 	DBG(OUT("terminate_after()\n"));
+
+	if (be_app == (BApplication*)-1)
+		debugger("exit() called after fork from a BApplication");
 
 	BRoster::Private::DeleteBeRoster();
 	BMessage::Private::StaticCleanup();
@@ -85,4 +101,3 @@ terminate_after(image_id)
 
 	DBG(OUT("terminate_after() done\n"));
 }
-

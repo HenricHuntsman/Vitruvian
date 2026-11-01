@@ -43,10 +43,13 @@ class ProcessController : public BView {
 		AutoIcon		fTrackerIcon;
 		AutoIcon		fDeskbarIcon;
 		AutoIcon		fTerminalIcon;
+		AutoIcon		fKernelIcon;
 
 	private:
 		void			Init();
 		void			_HandleDebugRequest(team_id team, thread_id thread);
+		void			_LoadSettings();
+		void			_SaveSettings();
 
 		const int32		kCPUCount;
 		bool			fTemp;

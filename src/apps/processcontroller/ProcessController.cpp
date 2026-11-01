@@ -39,6 +39,7 @@
 #include "PCWorld.h"
 #include "Preferences.h"
 #include "QuitMenu.h"
+#include "KernelTeamBarMenuItem.h"
 #include "TeamBarMenu.h"
 #include "TeamBarMenuItem.h"
 #include "ThreadBarMenu.h"
@@ -57,7 +58,7 @@ const char* kIdleColorPref = "deskbar_idle_color";
 const char* kActiveColorPref = "deskbar_active_color";
 
 static const char* const kDebuggerSignature
-	= "application/x-vnd.Haiku-Debugger";
+	= "application/x-vnd.vos-Debugger";
 
 const rgb_color kKernelBlue = {20, 20, 231,	255};
 const rgb_color kIdleGreen = {110, 190,110,	255};
@@ -170,6 +171,7 @@ ProcessController::ProcessController(BRect frame, bool temp)
 	fTrackerIcon(kTrackerSig),
 	fDeskbarIcon(kDeskbarSig),
 	fTerminalIcon(kTerminalSig),
+	fKernelIcon(kKernelIconName, kResourceIcon),
 	kCPUCount(sysconf(_SC_NPROCESSORS_CONF)),
 	fTemp(temp),
 	fLastBarHeight(new float[kCPUCount]),
@@ -194,6 +196,7 @@ ProcessController::ProcessController(BMessage *data)
 	fTrackerIcon(kTrackerSig),
 	fDeskbarIcon(kDeskbarSig),
 	fTerminalIcon(kTerminalSig),
+	fKernelIcon(kKernelIconName, kResourceIcon),
 	kCPUCount(sysconf(_SC_NPROCESSORS_CONF)),
 	fTemp(false),
 	fLastBarHeight(new float[kCPUCount]),
@@ -213,6 +216,7 @@ ProcessController::ProcessController(BSize size)
 	fTrackerIcon(kTrackerSig),
 	fDeskbarIcon(kDeskbarSig),
 	fTerminalIcon(kTerminalSig),
+	fKernelIcon(kKernelIconName, kResourceIcon),
 	kCPUCount(sysconf(_SC_NPROCESSORS_CONF)),
 	fTemp(false),
 	fLastBarHeight(new float[kCPUCount]),
@@ -328,6 +332,7 @@ ProcessController::MessageReceived(BMessage *message)
 						B_TRANSLATE("Kill this team!"), B_WIDTH_AS_USUAL,
 						B_STOP_ALERT);
 					alert->SetShortcut(0, B_ESCAPE);
+					alert->SetFeel(B_FLOATING_ALL_WINDOW_FEEL);
 					int result = alert->Go();
 					switch (result) {
 						case 1:
@@ -345,6 +350,7 @@ ProcessController::MessageReceived(BMessage *message)
 						B_TRANSLATE("Ok!"), NULL, NULL, B_WIDTH_AS_USUAL,
 						B_STOP_ALERT);
 					alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
+					alert->SetFeel(B_FLOATING_ALL_WINDOW_FEEL);
 					alert->Go();
 				}
 			}
@@ -376,6 +382,7 @@ ProcessController::MessageReceived(BMessage *message)
 					#define KILL 1
 					#endif
 					alert->SetShortcut(0, B_ESCAPE);
+					alert->SetFeel(B_FLOATING_ALL_WINDOW_FEEL);
 					int r = alert->Go();
 					if (r == KILL)
 						kill_thread(thread);
@@ -389,6 +396,7 @@ ProcessController::MessageReceived(BMessage *message)
 						B_TRANSLATE("Ok!"),	NULL, NULL,
 						B_WIDTH_AS_USUAL, B_STOP_ALERT);
 					alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
+					alert->SetFeel(B_FLOATING_ALL_WINDOW_FEEL);
 					alert->Go();
 				}
 			}
@@ -451,6 +459,7 @@ ProcessController::MessageReceived(BMessage *message)
 
 		case 'CPU ':
 		{
+#ifndef __VOS__
 			uint32 cpu;
 			if (message->FindInt32("cpu", (int32*)&cpu) == B_OK) {
 				bool last = true;
@@ -468,15 +477,18 @@ ProcessController::MessageReceived(BMessage *message)
 						B_TRANSLATE("That's no Fun!"), NULL, NULL,
 						B_WIDTH_AS_USUAL, B_WARNING_ALERT);
 					alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
+					alert->SetFeel(B_FLOATING_ALL_WINDOW_FEEL);
 					alert->Go();
 				} else
 					_kern_set_cpu_enabled(cpu, !_kern_cpu_enabled(cpu));
 			}
+#endif
 			break;
 		}
 
 		case 'Schd':
 		{
+#ifndef __VOS__
 			BMenuItem* source;
 			if (message->FindPointer("source", (void**)&source) != B_OK)
 				break;
@@ -486,6 +498,7 @@ ProcessController::MessageReceived(BMessage *message)
 				set_scheduler_mode(SCHEDULER_MODE_LOW_LATENCY);
 			Preferences preferences(kPreferencesFileName);
 			preferences.SaveInt32(get_scheduler_mode(), "scheduler_mode");
+#endif
 			break;
 		}
 
@@ -599,6 +612,11 @@ ProcessController::MouseDown(BPoint where)
 
 	gPopupThreadID = spawn_thread(thread_popup, "Popup holder thread",
 		B_URGENT_DISPLAY_PRIORITY, param);
+	if (gPopupThreadID < 0) {
+		delete param;
+		atomic_add(&gPopupFlag, -1);
+		return;
+	}
 	resume_thread(gPopupThreadID);
 }
 
@@ -807,7 +825,8 @@ thread_popup(void *arg)
 	infos, systemInfo);
 	int64 committedMemory = (int64)systemInfo.used_pages * B_PAGE_SIZE / 1024;
 	for (m = 0; m < systemInfo.used_teams; m++) {
-		if (infos[m].team_info.team >= 0) {
+		if (infos[m].team_info.team >= 0
+			&& !is_kernel_thread(infos[m].team_info.team)) {
 			MemoryBarMenuItem* memoryItem =
 				new MemoryBarMenuItem(infos[m].team_name,
 					infos[m].team_info.team, infos[m].team_icon, false, NULL);
@@ -821,8 +840,18 @@ thread_popup(void *arg)
 	// CPU Load section
 	TeamBarMenu* CPUPopup = new TeamBarMenu(B_TRANSLATE("Threads and CPU "
 	"usage"), infos, systemInfo.used_teams);
+
+	TeamBarMenu* KernelTeamPopup = new TeamBarMenu(B_TRANSLATE("Kernel Team"),
+		infos, systemInfo.used_teams, true);
+	KernelTeamPopup->SetFont(be_plain_font);
+	CPUPopup->AddItem(new KernelTeamBarMenuItem(KernelTeamPopup,
+		gPCView->fKernelIcon), 1);
+
 	for (m = 0; m < systemInfo.used_teams; m++) {
 		if (infos[m].team_info.team >= 0) {
+			bool kernel = is_kernel_thread(infos[m].team_info.team);
+			TeamBarMenu* targetMenu = kernel ? KernelTeamPopup : CPUPopup;
+
 			ThreadBarMenu* TeamPopup = new ThreadBarMenu(infos[m].team_name,
 				infos[m].team_info.team, infos[m].team_info.thread_count);
 			BMessage* kill_team = new BMessage('KlTm');
@@ -830,7 +859,7 @@ thread_popup(void *arg)
 			TeamBarMenuItem* item = new TeamBarMenuItem(TeamPopup, kill_team,
 				infos[m].team_info.team, infos[m].team_icon, false);
 			item->SetTarget(gPCView);
-			CPUPopup->AddItem(item);
+			targetMenu->AddItem(item);
 		}
 	}
 
@@ -845,8 +874,12 @@ thread_popup(void *arg)
 			BMessage* m = new BMessage('CPU ');
 			m->AddInt32("cpu", i);
 			item = new IconMenuItem (gPCView->fProcessorIcon, itemName, m);
+#ifndef __VOS__
 			if (_kern_cpu_enabled(i))
 				item->SetMarked(true);
+#else
+			item->SetMarked(true);
+#endif
 			item->SetTarget(gPCView);
 			addtopbottom(item);
 		}
@@ -854,6 +887,7 @@ thread_popup(void *arg)
 	}
 
 	// Scheduler modes
+#ifndef __VOS__
 	int32 currentMode = get_scheduler_mode();
 	Preferences preferences(kPreferencesFileName, NULL, false);
 	int32 savedMode;
@@ -868,6 +902,7 @@ thread_popup(void *arg)
 	item->SetTarget(gPCView);
 	addtopbottom(item);
 	addtopbottom(new BSeparatorItem());
+#endif
 
 	if (!be_roster->IsRunning(kTrackerSig)) {
 		item = new IconMenuItem(gPCView->fTrackerIcon,

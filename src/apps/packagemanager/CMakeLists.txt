@@ -1,0 +1,20 @@
+Application(PackageManager
+	SOURCES
+	AptBackend.cpp
+	AptLogView.cpp
+	ChangeSummaryWindow.cpp
+	FilterView.cpp
+	MainWindow.cpp
+	PackageInfo.cpp
+	PackageInfoView.cpp
+	PackageListView.cpp
+	PackageManagerApp.cpp
+	PackageRow.cpp
+	PackageWorker.cpp
+	RepositoriesWindow.cpp
+	WorkStatusView.cpp
+	LIBS shared tracker localestub vpackage apt-pkg
+	RDEF PackageManager.rdef
+)
+UsePrivateHeaders(PackageManager app interface shared storage tracker)
+DoCatalogs("application/x-vnd.vos-PackageManager" apps/packagemanager)

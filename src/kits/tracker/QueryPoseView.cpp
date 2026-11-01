@@ -107,6 +107,10 @@ BQueryPoseView::MessageReceived(BMessage* message)
 			break;
 		}
 
+		case kIconMode:
+		case kMiniIconMode:
+			break;
+
 		default:
 			_inherited::MessageReceived(message);
 			break;
@@ -241,11 +245,7 @@ BQueryPoseView::AddPosesCompleted()
 EntryListBase*
 BQueryPoseView::InitDirentIterator(const entry_ref* ref)
 {
-	BEntry entry(ref);
-	if (entry.InitCheck() != B_OK)
-		return NULL;
-
-	Model sourceModel(&entry, true);
+	Model sourceModel(ref, false, true);
 	if (sourceModel.InitCheck() != B_OK)
 		return NULL;
 
@@ -259,8 +259,7 @@ BQueryPoseView::InitDirentIterator(const entry_ref* ref)
 		oldPoseList->AddList(fPoseList);
 	}
 
-	fQueryListContainer = new QueryEntryListCollection(&sourceModel, this,
-		oldPoseList);
+	fQueryListContainer = new QueryEntryListCollection(&sourceModel, this, oldPoseList);
 	if (fQueryListContainer->InitCheck() != B_OK) {
 		delete fQueryListContainer;
 		fQueryListContainer = NULL;
@@ -715,19 +714,21 @@ int32
 QueryEntryListCollection::GetNextDirents(struct dirent* buffer, size_t length,
 	int32 count)
 {
-	int32 result = 0; // vos mod
+	if (count <= 0)
+		return 0;
 
-	for (int32 queryCount = fQueryListRep->fQueryList.CountItems();
-			fQueryListRep->fQueryListIndex < queryCount;
-			fQueryListRep->fQueryListIndex++) {
-		result = fQueryListRep->fQueryList.
-			ItemAt(fQueryListRep->fQueryListIndex)->
-				GetNextDirents(buffer, length, count);
-		if (result > 0)
-			break;
-	}
+	entry_ref ref;
+	if (GetNextRef(&ref) != B_OK)
+		return 0;
 
-	return result; // end mod
+	size_t recordLength = strlen(ref.name) + sizeof(dirent);
+	if (recordLength > length)
+		return 0;
+
+	buffer->d_reclen = static_cast<ushort>(recordLength);
+	buffer->d_ino = ref.vdirectory();
+	strcpy(buffer->d_name, ref.name);
+	return 1;
 }
 
 
@@ -772,11 +773,11 @@ QueryEntryListCollection::PathFilter(const entry_ref* ref) const
 	BPath path(ref);
 	if (path.InitCheck() != B_OK)
 		return false;
-	const char* pathStr = path.Path();
 
+	const char* pathString = path.Path();
 	for (int32 i = 0; i < fQueryListRep->fPathFilters.CountStrings(); i++) {
 		BString filterPath = fQueryListRep->fPathFilters.StringAt(i);
-		if (strncmp(filterPath.String(), pathStr, filterPath.Length()) == 0)
+		if (strncmp(filterPath.String(), pathString, filterPath.Length()) == 0)
 			return true;
 	}
 

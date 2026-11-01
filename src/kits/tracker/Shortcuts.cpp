@@ -496,8 +496,17 @@ TShortcuts::MoveToLabel()
 BMenuItem*
 TShortcuts::MoveToTrashItem()
 {
-	return new BMenuItem(MoveToTrashLabel(), new BMessage(kMoveSelectionToTrash), B_DELETE,
-		B_NO_COMMAND_KEY);
+	BMenuItem* item = new(std::nothrow) BMenuItem(MoveToTrashLabel(),
+		new BMessage(kMoveSelectionToTrash), B_DELETE, B_NO_COMMAND_KEY);
+	if (item == NULL)
+		return NULL;
+
+	// We have to set the target here because B_NO_COMMAND_KEY shortcut
+	// items don't get registered in MenusBeginning(). This wouldn't work
+	// if "Move to Trash" were created dynamically, luckily it is not.
+	UpdateMoveToTrashItem(item);
+
+	return item;
 }
 
 
@@ -921,7 +930,8 @@ TShortcuts::UpdateCleanupItem(BMenuItem* item)
 	item->SetShortcut(item->Shortcut(), B_COMMAND_KEY | (modifiers() & B_SHIFT_KEY));
 
 	if (fInWindow) {
-		item->SetEnabled(true);
+		item->SetEnabled(!(PoseView()->IsDesktopView()
+			&& TrackerSettings().SnapToGrid()));
 		item->SetTarget(PoseView());
 	}
 }
@@ -998,7 +1008,7 @@ TShortcuts::UpdateCreateLinkItem(BMenuItem* item)
 
 	if (fInWindow) {
 		item->SetEnabled(HasSelection());
-		item->SetTarget(PoseView());
+		item->SetTarget(fContainerWindow);
 	}
 }
 
@@ -1014,7 +1024,7 @@ TShortcuts::UpdateCreateLinkHereItem(BMenuItem* item)
 
 	if (fInWindow) {
 		item->SetEnabled(HasSelection());
-		item->SetTarget(PoseView());
+		item->SetTarget(fContainerWindow);
 	}
 }
 
@@ -1190,7 +1200,7 @@ TShortcuts::UpdateMoveToItem(BMenuItem* item)
 
 	if (fInWindow) {
 		item->SetEnabled(HasSelection() && !SelectionIsReadOnly());
-		item->SetTarget(PoseView());
+		item->SetTarget(fContainerWindow);
 	}
 }
 
@@ -1296,7 +1306,8 @@ TShortcuts::UpdatePasteItem(BMenuItem* item)
 	item->SetShortcut(item->Shortcut(), B_COMMAND_KEY | (modifiers() & B_SHIFT_KEY));
 
 	if (fInWindow) {
-		bool isPastable = FSClipboardHasRefs() && !SelectionIsReadOnly() && !IsTrash();
+		bool isPastable = FSClipboardHasRefs() && TargetIsReadOnly() == false
+			&& !(IsPrintersDir() || IsRoot() || IsTrash() || InTrash() || IsVirtualDirectory());
 		item->SetEnabled(IsCurrentFocusOnTextView() || isPastable);
 
 		item->SetTarget(fContainerWindow);
@@ -1417,7 +1428,14 @@ TShortcuts::IsCurrentFocusOnTextView() const
 bool
 TShortcuts::IsDesktop() const
 {
-	return fInWindow && PoseView()->TargetModel()->IsDesktop();
+	return fInWindow && PoseView()->IsDesktopView();
+}
+
+
+bool
+TShortcuts::IsPrintersDir() const
+{
+	return fInWindow && PoseView()->TargetModel()->IsPrintersDir();
 }
 
 

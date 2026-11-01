@@ -1,5 +1,6 @@
 /*
  * Copyright 2001-2016, Haiku.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -368,6 +369,24 @@ enum {
 	// New clipping: cumulative, transformed
 	AS_VIEW_CLIP_TO_RECT,
 	AS_VIEW_CLIP_TO_SHAPE,
+
+	// Appended at the end: inserting mid-enum renumbers later codes.
+	AS_SCREEN_SET_ROTATION,
+	AS_SCREEN_GET_ROTATION,
+	AS_SCREEN_SET_REFLECTION,
+	AS_SCREEN_GET_REFLECTION,
+
+	AS_SCREEN_SET_TEMPERATURE,
+	AS_SCREEN_GET_TEMPERATURE,
+
+	// Appended at the end: inserting mid-enum renumbers later codes.
+	AS_SCREEN_GET_CONNECTOR_NAME,
+
+	// Unconfirmed display change: app_server holds the deadline and
+	// reverts on its own if the client never confirms.
+	AS_SCREEN_BEGIN_CHANGE,
+	AS_SCREEN_CONFIRM_CHANGE,
+	AS_SCREEN_CANCEL_CHANGE,
 
 	AS_LAST_CODE
 };

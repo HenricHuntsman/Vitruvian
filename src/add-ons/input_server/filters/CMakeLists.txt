@@ -1,0 +1,5 @@
+add_subdirectory(shortcut_catcher)
+add_subdirectory(switch_workspace)
+add_subdirectory(minimize_all)
+add_subdirectory(screen_saver)
+add_subdirectory(brightness_hotkey)

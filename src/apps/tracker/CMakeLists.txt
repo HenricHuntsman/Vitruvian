@@ -4,8 +4,9 @@ Application(
 	SOURCES
 	main.cpp
 
-	LIBS be localestub shared tracker
+	LIBS localestub shared tracker
 	RDEF Tracker.rdef
 )
 
 UsePrivateHeaders(Tracker shared tracker)
+DoCatalogs("x-vnd.Be-TRAK" apps/tracker)

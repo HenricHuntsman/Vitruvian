@@ -3,22 +3,34 @@
  * Distributed under the terms of the LGPL License.
  */
 
+/* cc1plus predefines _GNU_SOURCE for C++. */
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 
 #include <KernelExport.h>
 #include <OS.h>
 
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <unistd.h>
 
 #include <map>
+#include <new>
 #include <string>
 
 #include "MutexLock.h"
 #include "../kernel/nexus/nexus/nexus.h"
 #include "Team.h"
+#include "proc_read.h"
 
 
 namespace BKernelPrivate {
@@ -119,6 +131,31 @@ private:
 };
 
 
+// smaps is a seq_file: seeking backward in it can force the kernel to
+// regenerate the output from the start, so slurp it once and walk an
+// in-memory offset instead of holding a FILE* across calls.
+enum AreaScanMode {
+	kAreaScanSmaps,	// per-mapping data, same-uid teams only
+	kAreaScanStatm	// whole-team totals synthesized into 2 records, any team
+};
+
+
+struct AreaScanState {
+	AreaScanMode	mode;
+	team_id			team;
+
+	// kAreaScanSmaps
+	char*			buffer;
+	size_t			length;
+	size_t			offset;
+
+	// kAreaScanStatm: precomputed at open time, handed out one per call.
+	uint64			privateBytes;
+	uint64			sharedBytes;
+	int				statmNext;	// 0 = private pending, 1 = shared pending, 2 = done
+};
+
+
 static int protection_to_prot(uint32_t prot)
 {
 	int p = 0;
@@ -188,11 +225,11 @@ create_area(const char* name, void** startAddr, uint32 addrSpec,
 	create.lock = lock;
 	create.protection = protection;
 
-	status_t ret = nexus_io(nexus, NEXUS_AREA_CREATE, &create);
-	if (ret != B_OK) {
+	if (nexus_io(nexus, NEXUS_AREA_CREATE, &create) < 0
+			|| create.ret != B_OK) {
 		munmap(address, size);
 		close(memfd);
-		return ret;
+		return create.ret != B_OK ? create.ret : B_ERROR;
 	}
 
 	BKernelPrivate::LocalArea local;
@@ -228,9 +265,10 @@ clone_area(const char* name, void** destAddr, uint32 addrSpec,
 	};
 	strncpy(clone.name, name, B_OS_NAME_LENGTH - 1);
 
-	status_t ret = nexus_io(nexus, NEXUS_AREA_CLONE, &clone);
-	if (ret != B_OK)
-		return ret;
+	if (nexus_io(nexus, NEXUS_AREA_CLONE, &clone) < 0)
+		return B_ERROR;
+	if (clone.ret != B_OK)
+		return clone.ret;
 
 	int prot = BKernelPrivate::protection_to_prot(protection);
 	int flags = MAP_SHARED;
@@ -294,8 +332,10 @@ delete_area(area_id id)
 	if (nexus < 0)
 		return B_ERROR;
 
-	struct nexus_area_delete del = { .area = id };
-	return nexus_io(nexus, NEXUS_AREA_DELETE, &del);
+	struct nexus_area_delete del = { .area = id, .ret = B_OK };
+	if (nexus_io(nexus, NEXUS_AREA_DELETE, &del) < 0)
+		return B_ERROR;
+	return del.ret;
 }
 
 
@@ -317,42 +357,19 @@ find_area(const char* name)
 	struct nexus_area_find find = {};
 	strncpy(find.name, name, B_OS_NAME_LENGTH - 1);
 
-	status_t ret = nexus_io(nexus, NEXUS_AREA_FIND, &find);
-	if (ret != B_OK)
-		return B_NAME_NOT_FOUND;
+	if (nexus_io(nexus, NEXUS_AREA_FIND, &find) < 0)
+		return B_ERROR;
+	if (find.ret != B_OK)
+		return find.ret;
 
 	return find.area;
 }
 
 
 status_t
-resize_area(area_id id, size_t newSize)
+resize_area(area_id /*id*/, size_t /*newSize*/)
 {
-	if (id < 0 || newSize == 0)
-		return B_BAD_VALUE;
-
-	BKernelPrivate::LocalArea local;
-	if (!BKernelPrivate::AreaPool::Get().Get(id, local))
-		return B_BAD_VALUE;
-
-	size_t pageSize = sysconf(_SC_PAGESIZE);
-	newSize = (newSize + pageSize - 1) & ~(pageSize - 1);
-
-	if (ftruncate(local.memfd, newSize) < 0)
-		return B_ERROR;
-
-	void* newAddr = mremap(local.address, local.size, newSize, MREMAP_MAYMOVE);
-	if (newAddr == MAP_FAILED)
-		return B_NO_MEMORY;
-
-	BKernelPrivate::AreaPool::Get().Update(id, newAddr, newSize);
-
-	int nexus = BKernelPrivate::Team::GetAreaDescriptor();
-	if (nexus < 0)
-		return B_ERROR;
-
-	struct nexus_area_resize resize = { .area = id, .new_size = newSize };
-	return nexus_io(nexus, NEXUS_AREA_RESIZE, &resize);
+	return B_NOT_SUPPORTED;
 }
 
 
@@ -376,10 +393,13 @@ set_area_protection(area_id id, uint32 protection)
 
 	struct nexus_area_set_protection sp = {
 		.area = id,
-		.protection = protection
+		.protection = protection,
+		.ret = B_OK
 	};
 
-	return nexus_io(nexus, NEXUS_AREA_SET_PROTECTION, &sp);
+	if (nexus_io(nexus, NEXUS_AREA_SET_PROTECTION, &sp) < 0)
+		return B_ERROR;
+	return sp.ret;
 }
 
 
@@ -401,9 +421,10 @@ _get_area_info(area_id id, area_info* info, size_t size)
 		return B_ERROR;
 
 	struct nexus_area_get_info gi = { .area = id };
-	status_t ret = nexus_io(nexus, NEXUS_AREA_GET_INFO, &gi);
-	if (ret != B_OK)
-		return B_BAD_VALUE;
+	if (nexus_io(nexus, NEXUS_AREA_GET_INFO, &gi) < 0)
+		return B_ERROR;
+	if (gi.ret != B_OK)
+		return gi.ret;
 
 	info->area = id;
 	strncpy(info->name, gi.name, B_OS_NAME_LENGTH);
@@ -423,43 +444,253 @@ _get_area_info(area_id id, area_info* info, size_t size)
 }
 
 
+// smaps needs PTRACE_MODE_READ_FSCREDS, so it only works for same-uid teams;
+// statm has no ptrace check and works for any team, at the cost of per-area
+// granularity. The caller must drain the enumeration or the state leaks.
 status_t
 _get_next_area_info(team_id team, ssize_t* cookie, area_info* areaInfo,
 	size_t size)
 {
-	if (cookie == NULL || areaInfo == NULL || size != sizeof(area_info))
+	if (cookie == NULL || *cookie < 0 || areaInfo == NULL
+		|| size != sizeof(area_info)) {
 		return B_BAD_VALUE;
+	}
 
-	int nexus = BKernelPrivate::Team::GetAreaDescriptor();
-	if (nexus < 0)
-		return B_ERROR;
+	if (team == 0)
+		team = getpid();
 
-	struct nexus_area_get_next gn;
-	memset(&gn, 0, sizeof(gn));
-	gn.team = (team == 0) ? getpid() : team;
-	gn.cookie = (int32_t)*cookie;
+	using namespace BKernelPrivate;
 
-	status_t ret = nexus_io(nexus, NEXUS_AREA_GET_NEXT, &gn);
-	if (ret != B_OK)
+	// Cap on the smaps slurp; over the cap the enumeration fails instead of
+	// growing an unbounded allocation.
+	static const size_t kMaxSmapsBytes = 64 * 1024 * 1024;
+
+	AreaScanState* state;
+	if (*cookie == 0) {
+		struct proc_dir dir;
+		if (!proc_dir_open_pid(&dir, (pid_t)team))
+			return B_BAD_TEAM_ID;
+
+		int fd = proc_dir_open_file(&dir, "smaps");
+		if (fd < 0) {
+			if (errno != EACCES && errno != EPERM) {
+				proc_dir_close(&dir);
+				return B_BAD_TEAM_ID;
+			}
+
+			// smaps is off-limits for this team; fall back to the
+			// world-readable statm whole-team totals.
+			int statmFd = proc_dir_open_file(&dir, "statm");
+			proc_dir_close(&dir);
+			if (statmFd < 0) {
+				if (errno == ENOENT)
+					return B_BAD_TEAM_ID;
+				return B_PERMISSION_DENIED;
+			}
+
+			char statmBuf[256];
+			ssize_t statmLen = proc_read_all(statmFd, statmBuf,
+				sizeof(statmBuf));
+			close(statmFd);
+			if (statmLen <= 0)
+				return B_PERMISSION_DENIED;
+
+			// proc(5): size resident shared text lib data dt (pages).
+			unsigned long long pages = 0, residentPages = 0;
+			unsigned long long sharedPages = 0;
+			if (sscanf(statmBuf, "%llu %llu %llu", &pages, &residentPages,
+					&sharedPages) < 3) {
+				return B_PERMISSION_DENIED;
+			}
+
+			unsigned long long privatePages =
+				(residentPages > sharedPages)
+					? residentPages - sharedPages : 0;
+
+			long pageSize = proc_page_size();
+
+			state = new (std::nothrow) AreaScanState();
+			if (state == NULL)
+				return B_NO_MEMORY;
+			state->mode = kAreaScanStatm;
+			state->team = team;
+			state->buffer = NULL;
+			state->length = 0;
+			state->offset = 0;
+			state->privateBytes = privatePages * (unsigned long long)pageSize;
+			state->sharedBytes = sharedPages * (unsigned long long)pageSize;
+			state->statmNext = 0;
+		} else {
+			char* buffer = NULL;
+			size_t length = 0;
+			if (!proc_slurp(fd, &buffer, &length, kMaxSmapsBytes)) {
+				int error = errno;
+				close(fd);
+				proc_dir_close(&dir);
+				return error == EOVERFLOW ? B_NO_MEMORY : B_ERROR;
+			}
+			close(fd);
+			proc_dir_close(&dir);
+
+			state = new (std::nothrow) AreaScanState();
+			if (state == NULL) {
+				free(buffer);
+				return B_NO_MEMORY;
+			}
+			state->mode = kAreaScanSmaps;
+			state->buffer = buffer;
+			state->length = length;
+			state->offset = 0;
+			state->team = team;
+		}
+
+		*cookie = (ssize_t)proc_enum_alloc(state);
+		if (*cookie == 0) {
+			free(state->buffer);
+			delete state;
+			return B_NO_MEMORY;
+		}
+	} else {
+		state = (AreaScanState*)proc_enum_state((int32)*cookie);
+		if (state == NULL)
+			return B_BAD_VALUE;
+	}
+
+	if (state->mode == kAreaScanStatm) {
+		while (state->statmNext < 2) {
+			int which = state->statmNext++;
+			uint64 bytes = (which == 0) ? state->privateBytes
+				: state->sharedBytes;
+			if (bytes == 0)
+				continue;
+
+			memset(areaInfo, 0, sizeof(area_info));
+			areaInfo->area = B_ERROR;
+			strncpy(areaInfo->name, (which == 0) ? "[private]" : "[shared]",
+				B_OS_NAME_LENGTH - 1);
+			areaInfo->name[B_OS_NAME_LENGTH - 1] = '\0';
+			areaInfo->size = (size_t)bytes;
+			areaInfo->lock = B_NO_LOCK;
+			areaInfo->protection = (which == 0)
+				? (B_READ_AREA | B_WRITE_AREA) : B_READ_AREA;
+			areaInfo->team = state->team;
+			areaInfo->ram_size = (uint32)bytes;
+			areaInfo->address = NULL;
+
+			return B_OK;
+		}
+
+		delete (AreaScanState*)proc_enum_release((int32)*cookie);
+		*cookie = 0;
 		return B_BAD_VALUE;
+	}
 
-	areaInfo->area = gn.area;
-	strncpy(areaInfo->name, gn.name, B_OS_NAME_LENGTH);
-	areaInfo->name[B_OS_NAME_LENGTH - 1] = '\0';
-	areaInfo->size = gn.size;
-	areaInfo->lock = gn.lock;
-	areaInfo->protection = gn.protection;
-	areaInfo->team = gn.team;
-	areaInfo->ram_size = gn.size;
+	char line[ProcLineReader::kMaxLine];
+	unsigned long long start = 0, end = 0;
+	char perms[8] = {0};
+	char pathname[PATH_MAX] = {0};
+	unsigned long rssKb = 0;
+	bool haveRecord = false;
 
-	BKernelPrivate::LocalArea local;
-	if (BKernelPrivate::AreaPool::Get().Get(gn.area, local))
-		areaInfo->address = local.address;
-	else
-		areaInfo->address = NULL;
+	while (state->offset < state->length) {
+		size_t lineStart = state->offset;
+		size_t nl = lineStart;
+		while (nl < state->length && state->buffer[nl] != '\n')
+			nl++;
+		size_t nextOffset = (nl < state->length) ? nl + 1 : state->length;
 
-	*cookie = (ssize_t)gn.next_cookie;
+		size_t lineLen = nl - lineStart;
+		if (lineLen >= sizeof(line))
+			lineLen = sizeof(line) - 1;
+		memcpy(line, state->buffer + lineStart, lineLen);
+		line[lineLen] = '\0';
 
+		struct proc_map_line map;
+		bool isHeader = proc_parse_map_header(line, &map)
+			&& map.end > map.start;
+
+		if (isHeader && haveRecord)
+			break;
+
+		state->offset = nextOffset;
+
+		if (isHeader) {
+			haveRecord = true;
+			start = map.start;
+			end = map.end;
+			strlcpy(perms, map.perms, sizeof(perms));
+
+			if (map.pathLength > 0) {
+				size_t copyLength = map.pathLength;
+				if (copyLength >= sizeof(pathname))
+					copyLength = sizeof(pathname) - 1;
+				memcpy(pathname, map.path, copyLength);
+				pathname[copyLength] = '\0';
+			} else
+				pathname[0] = '\0';
+		} else if (haveRecord && strncmp(line, "Rss:", 4) == 0) {
+			sscanf(line + 4, "%lu", &rssKb);
+		}
+	}
+
+	if (!haveRecord) {
+		free(state->buffer);
+		delete (AreaScanState*)proc_enum_release((int32)*cookie);
+		*cookie = 0;
+		return B_BAD_VALUE;
+	}
+
+	char name[B_OS_NAME_LENGTH];
+	if (pathname[0] == '\0') {
+		strncpy(name, "[anon]", sizeof(name) - 1);
+		name[sizeof(name) - 1] = '\0';
+	} else if (strncmp(pathname, "/memfd:", 7) == 0) {
+		char* n = pathname + 7;
+		char* deleted = strstr(n, " (deleted)");
+		if (deleted != NULL)
+			*deleted = '\0';
+		strncpy(name, n, sizeof(name) - 1);
+		name[sizeof(name) - 1] = '\0';
+	} else if (pathname[0] == '[') {
+		// Pseudo mapping such as [heap], [stack], [vdso]: keep as-is.
+		strncpy(name, pathname, sizeof(name) - 1);
+		name[sizeof(name) - 1] = '\0';
+	} else {
+		const char* base = strrchr(pathname, '/');
+		base = (base != NULL) ? base + 1 : pathname;
+		strncpy(name, base, sizeof(name) - 1);
+		name[sizeof(name) - 1] = '\0';
+	}
+
+	uint32 protection = 0;
+	if (perms[0] == 'r')
+		protection |= B_READ_AREA;
+	if (perms[1] == 'w')
+		protection |= B_WRITE_AREA;
+	if (perms[2] == 'x')
+		protection |= B_EXECUTE_AREA;
+	if (perms[3] == 's')
+		protection |= B_CLONEABLE_AREA;
+
+	area_id areaId = B_ERROR;
+	if (team == getpid()) {
+		area_id local = BKernelPrivate::AreaPool::Get().FindByAddress(
+			(void*)(uintptr_t)start);
+		if (local != B_ERROR)
+			areaId = local;
+	}
+
+	memset(areaInfo, 0, sizeof(area_info));
+	areaInfo->area = areaId;
+	snprintf(areaInfo->name, sizeof(areaInfo->name), "%s", name);
+	areaInfo->size = (size_t)(end - start);
+	areaInfo->lock = B_NO_LOCK;
+	areaInfo->protection = protection;
+	areaInfo->team = team;
+	areaInfo->ram_size = (uint32)(rssKb * 1024);
+	areaInfo->address = (void*)(uintptr_t)start;
+
+	// The cookie keeps the enumeration handle assigned at open time.
 	return B_OK;
 }
 
@@ -482,7 +713,7 @@ _kern_reserve_address_range(unsigned long* address, uint32 addressSpec,
 		return B_NO_MEMORY;
 
 	if (addressSpec == B_EXACT_ADDRESS && hint && addr != hint) {
-		munmap(address, size);
+		munmap(addr, size);
 		return B_BAD_VALUE;
 	}
 
@@ -497,8 +728,35 @@ area_id
 _kern_transfer_area(area_id id, void** _address, uint32 addressSpec,
 	team_id target)
 {
-	// TODO
-	return B_ERROR;
+	if (id < 0)
+		return B_BAD_VALUE;
+
+	// You can't transfer an area to your team
+	if (target == (team_id)getpid())
+		return B_NOT_ALLOWED;
+
+	BKernelPrivate::LocalArea local;
+	if (!BKernelPrivate::AreaPool::Get().Get(id, local))
+		return B_BAD_VALUE;
+
+	int nexus = BKernelPrivate::Team::GetAreaDescriptor();
+	if (nexus < 0)
+		return B_ERROR;
+
+	struct nexus_area_transfer tr = {
+		.area   = id,
+		.target = target,
+	};
+
+	if (nexus_io(nexus, NEXUS_AREA_TRANSFER, &tr) < 0)
+		return B_ERROR;
+	if (tr.ret != B_OK)
+		return tr.ret;
+
+	if (_address)
+		*_address = local.address;
+
+	return tr.new_area;
 }
 
 

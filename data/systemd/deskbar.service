@@ -1,16 +1,18 @@
 [Unit]
-Description=Deskbar
-Conflicts=getty@tty1.service
-After=notification_server.service
+ConditionPathExists=!/var/lib/vos/greeter-enabled
+# Skipped in safe mode; minimal boot has no taskbar.
+ConditionKernelCommandLine=!vitruvian.safemode
+Description=Vitruvian Deskbar
+After=janus.service input_server.service notification_server.service
+Requires=janus.service
 
 [Service]
-ExecStartPre=/bin/sleep 1.5
-ExecStart=/system/Deskbar
-StandardInput=tty-force
+Type=forking
+PIDFile=/run/vos/Deskbar.pid
+ExecStart=/system/servers/janus_launch Deskbar
 StandardOutput=append:/var/log/deskbar.log
 StandardError=append:/var/log/deskbar.log
 Restart=no
-RestartSec=500ms
 
 [Install]
 WantedBy=graphical.target

@@ -41,7 +41,7 @@ namespace Mime {
 /*! \brief Creates a new MimeUpdateThread object.
 
 	If \a replyee is non-NULL and construction succeeds, the MimeThreadObject
-	assumes resposibility for its deletion.
+	assumes responsibility for its deletion.
 
 	Also, if \c non-NULL, \a replyee is expected to be a
 	\c B_REG_MIME_UPDATE_MIME_INFO or a \c B_REG_MIME_CREATE_APP_META_MIME
@@ -202,8 +202,8 @@ MimeUpdateThread::UpdateEntry(const entry_ref *ref)
 //printf("Updating '%s' (%s)... \n", path.Path(),
 //	(DeviceSupportsAttributes(ref->device) ? "yes" : "no"));
 
-	if (!err && (device_is_root_device(ref->dereference().dev())
-				|| DeviceSupportsAttributes(ref->dereference().dev()))) {
+	if (!err && (device_is_root_device(ref->device())
+				|| DeviceSupportsAttributes(ref->device()))) {
 		// Update this entry
 		if (!err) {
 			// R5 appears to ignore whether or not the update succeeds.

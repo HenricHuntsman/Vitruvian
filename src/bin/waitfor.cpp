@@ -21,7 +21,7 @@
 
 static int sExitValue = EXIT_FAILURE;
 static const char* kProgramName = "waitfor";
-static const char* kProgramSig = "application/x-vnd.haiku-waitfor";
+static const char* kProgramSig = "application/x-vnd.vos-waitfor";
 
 
 #define INTERVAL 100000 // 0.1sec
@@ -175,6 +175,9 @@ WaitforApp::_CheckNetworkConnection()
 	uint32 cookie = 0;
 	while (roster.GetNextInterface(&cookie, interface) == B_OK) {
 		uint32 flags = interface.Flags();
+#ifndef IFF_LINK
+#	define IFF_LINK 0x1000
+#endif
 		if ((flags & IFF_LOOPBACK) == 0 && (flags & (IFF_UP | IFF_LINK)) == (IFF_UP | IFF_LINK)) {
 			sExitValue = EXIT_SUCCESS;
 			return true;

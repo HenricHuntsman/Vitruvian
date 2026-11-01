@@ -1,4 +1,5 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2005-2009, Haiku, Inc. All Rights Reserved.
  * Distributed under the terms of the MIT License.
  *
@@ -25,9 +26,13 @@
 #include <ToolTipManager.h>
 #include <View.h>
 
+#include <VRefCache.h>
+
 #include <new>
 #include <stdio.h>
 #include <string.h>
+#include <utility>
+#include <vector>
 
 
 //#define TRACE_EVENTS
@@ -246,6 +251,7 @@ EventDispatcher::EventDispatcher()
 	fNextLatestMouseMoved(NULL),
 	fLastButtons(0),
 	fLastUpdate(system_time()),
+	fDisplayAsleep(0),
 	fDraggingMessage(false),
 	fCursorLock("cursor loop lock"),
 	fHWInterface(NULL),
@@ -297,8 +303,10 @@ EventDispatcher::_Unset()
 	fStream->SendQuit();
 
 	status_t status;
-	wait_for_thread(fThread, &status);
-	wait_for_thread(fCursorThread, &status);
+	if (fThread >= B_OK)
+		wait_for_thread(fThread, &status);
+	if (fCursorThread >= B_OK)
+		wait_for_thread(fCursorThread, &status);
 
 	fThread = fCursorThread = -1;
 
@@ -356,7 +364,7 @@ EventDispatcher::RemoveTarget(EventTarget& target)
 	\brief Adds the specified listener or updates its event mask and options
 		if already added.
 
-	It follows the BView semantics in that specifiying an event mask of zero
+	It follows the BView semantics in that specifying an event mask of zero
 	leaves the event mask untouched and just updates the options.
 */
 bool
@@ -628,6 +636,33 @@ EventDispatcher::SetDragMessage(BMessage& message,
 
 
 void
+EventDispatcher::SetDragMessage(BMessage& message,
+	std::vector<std::pair<vref_id, BPrivate::vref_ticket>>&& tickets,
+	ServerBitmap* bitmap, const BPoint& offsetFromCursor)
+{
+	ETRACE(("EventDispatcher::SetDragMessage() [with tickets]\n"));
+
+	BAutolock _(this);
+
+	if (fLastButtons == 0) {
+		for (auto& kv : tickets)
+			BPrivate::VRefCache::Release(kv.first, kv.second);
+		return;
+	}
+
+	for (auto& kv : fDragTickets)
+		BPrivate::VRefCache::Release(kv.first, kv.second);
+	fDragTickets = std::move(tickets);
+
+	fHWInterface->SetDragBitmap(bitmap, offsetFromCursor);
+
+	fDragMessage = message;
+	fDraggingMessage = true;
+	fDragOffset = offsetFromCursor;
+}
+
+
+void
 EventDispatcher::SetDesktop(Desktop* desktop)
 {
 	fDesktop = desktop;
@@ -744,6 +779,10 @@ EventDispatcher::_DeliverDragMessage()
 			&fDragMessage, 100.0);
 	}
 
+	for (auto& kv : fDragTickets)
+		BPrivate::VRefCache::Release(kv.first, kv.second);
+	fDragTickets.clear();
+
 	fDragMessage.MakeEmpty();
 	fDragMessage.what = 0;
 	fDraggingMessage = false;
@@ -762,6 +801,8 @@ EventDispatcher::_EventLoop()
 	while (fStream->GetNextEvent(&event)) {
 		BAutolock _(this);
 		fLastUpdate = system_time();
+		if (atomic_get_and_set(&fDisplayAsleep, 0) != 0 && fHWInterface != NULL)
+			fHWInterface->SetDPMSMode(B_DPMS_ON);
 
 		EventTarget* current = NULL;
 		EventTarget* previous = NULL;
@@ -907,7 +948,7 @@ EventDispatcher::_EventLoop()
 
 				if (fFocus != NULL && _AddTokens(event, fFocus,
 						B_KEYBOARD_EVENTS)) {
-					// if tokens were added, we need to explicetly suspend
+					// if tokens were added, we need to explicitly suspend
 					// focus in the event - if not, the event is simply not
 					// forwarded to the target
 					addedTokens = true;
@@ -1017,7 +1058,6 @@ EventDispatcher::_CursorLoop()
 		} else if (status == B_TIMED_OUT) {
 			mouseIdleSent = true;
 			BMessage* mouseIdle = new BMessage(B_MOUSE_IDLE);
-			mouseIdle->AddPoint("screen_where", fLastCursorPosition);
 			fStream->InsertEvent(mouseIdle);
 		}
 	}

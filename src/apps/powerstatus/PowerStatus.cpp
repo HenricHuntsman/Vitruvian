@@ -21,6 +21,7 @@
 
 #include "ACPIDriverInterface.h"
 #include "APMDriverInterface.h"
+#include "SysFSDriverInterface.h"
 #include "PowerStatusWindow.h"
 
 
@@ -42,7 +43,7 @@ class PowerStatus : public BApplication {
 };
 
 
-const char* kSignature = "application/x-vnd.Haiku-PowerStatus";
+const char* kSignature = "application/x-vnd.vos-PowerStatus";
 const char* kDeskbarSignature = "application/x-vnd.Be-TSKB";
 const char* kDeskbarItemName = "PowerStatus";
 
@@ -106,15 +107,17 @@ PowerStatus::ReadyToRun()
 
 	if (ACPIDriverInterface().Connect() != B_OK) {
 		if (APMDriverInterface().Connect() != B_OK) {
-			BString text(B_TRANSLATE("No supported battery detected. %appname% "
-				"cannot be used on your system."));
-			text.ReplaceFirst("%appname%", B_TRANSLATE_SYSTEM_NAME("PowerStatus"));
-			BAlert* alert = new BAlert("", text, B_TRANSLATE("Too bad!"),
-				NULL, NULL, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
-			if (!fAutoInstallInDeskbar)
-				alert->Go();
-			Quit();
-			return;
+			if (SysFSDriverInterface().Connect() != B_OK) {
+				BString text(B_TRANSLATE("No supported battery detected. %appname% "
+					"cannot be used on your system."));
+				text.ReplaceFirst("%appname%", B_TRANSLATE_SYSTEM_NAME("PowerStatus"));
+				BAlert* alert = new BAlert("", text, B_TRANSLATE("Too bad!"),
+					NULL, NULL, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+				if (!fAutoInstallInDeskbar)
+					alert->Go();
+				Quit();
+				return;
+			}
 		}
 	}
 

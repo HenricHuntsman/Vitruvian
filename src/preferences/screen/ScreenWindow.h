@@ -1,5 +1,6 @@
 /*
  * Copyright 2001-2014 Haiku, Inc. All rights reserved.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -14,6 +15,7 @@
 
 
 #include <Window.h>
+#include <CheckBox.h>
 
 #include "ScreenMode.h"
 
@@ -25,6 +27,7 @@ class BSlider;
 class BSpinner;
 class BStringView;
 
+class AlertWindow;
 class RefreshWindow;
 class MonitorView;
 class ScreenSettings;
@@ -48,20 +51,35 @@ private:
 			void			_CheckColorMenu();
 			void			_CheckRefreshMenu();
 
+			void			_MarkReflectionItem(int32 reflection);
 			void			_UpdateActiveMode();
 			void			_UpdateActiveMode(int32 workspace);
 			void			_UpdateWorkspaceButtons();
 			void			_UpdateRefreshControl();
 			void			_UpdateMonitorView();
 			void			_UpdateControls();
+			void			_UpdateTemperatureControls();
+			void			_MarkTemperaturePreset(float kelvin);
 			void			_UpdateOriginal();
 			void			_UpdateMonitor();
 			void			_UpdateColorLabel();
+			void			_UpdateOutputMenu();
+			void			_UpdateProfileMenu();
 
 			void			_Apply();
 
+			void			_BeginScreenChange();
+			void			_ShowChangeAlert();
+			void			_DropScreenChange();
+			void			_RevertScreenChange();
+			void			_KeepScreenChange();
+
 			status_t		_WriteVesaModeFile(const screen_mode& mode) const;
 			bool			_IsVesa() const { return fIsVesa; }
+
+			status_t		_SaveProfile(const char* name);
+			status_t		_DeleteProfile(const char* name);
+			status_t		_ApplyProfile(const char* name);
 
 private:
 			ScreenSettings*	fSettings;
@@ -89,6 +107,10 @@ private:
 
 			BPopUpMenu*		fCombineMenu;
 			BMenuField*		fCombineField;
+			BPopUpMenu*		fRotationMenu;
+			BMenuField*		fRotationField;
+			BPopUpMenu*		fReflectionMenu;
+			BMenuField*		fReflectionField;
 			BPopUpMenu*		fSwapDisplaysMenu;
 			BMenuField*		fSwapDisplaysField;
 			BPopUpMenu*		fUseLaptopPanelMenu;
@@ -97,6 +119,20 @@ private:
 			BMenuField*		fTVStandardField;
 
 			BSlider*		fBrightnessSlider;
+
+			BMenuField*		fTemperatureField;
+			BPopUpMenu*		fTemperatureMenu;
+			float			fTemperature;
+			bool			fTemperatureSupported;
+			float			fOriginalTemperature;
+
+			BPopUpMenu*		fOutputMenu;
+			BMenuField*		fOutputField;
+
+			BPopUpMenu*		fProfileMenu;
+			BMenuField*		fProfileField;
+			BButton*		fSaveProfileButton;
+			BButton*		fDeleteProfileButton;
 
 			BButton*		fDefaultsButton;
 			BButton*		fApplyButton;
@@ -112,7 +148,12 @@ private:
 			uint32			fOriginalWorkspacesColumns;
 			uint32			fOriginalWorkspacesRows;
 			float			fOriginalBrightness;
+			int32			fOriginalRotation;
+			int32			fOriginalReflection;
 			bool			fModified;
+
+			AlertWindow*	fAlertWindow;
+				// countdown for the pending change; NULL when none
 };
 
 #endif	/* SCREEN_WINDOW_H */

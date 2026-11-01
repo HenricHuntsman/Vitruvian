@@ -1,5 +1,6 @@
 /*
  * Copyright 2003-2014, Haiku.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -7,6 +8,7 @@
  *		Jérôme Duval, jerome.duval@free.fr
  *		Ryan Leavengood, leavengood@gmail.com
  *		Puck Meerburg, puck@puckipedia.nl
+ *		Dario Casalinuovo
  */
 
 
@@ -46,9 +48,10 @@ ScreenSaverFilter::Filter(BMessage* message, BHandler** target)
 			case B_KEY_DOWN:
 			{
 				// we ignore the Print-Screen key to make screen shots of
-				// screen savers possible
+				// screen savers possible (legacy Haiku keycode, hybrid space)
 				int32 key;
-				if (message->FindInt32("key", &key) == B_OK && key == 0xe)
+				if (message->FindInt32("key", &key) == B_OK
+					&& key == B_PRINT_KEY)
 					return B_DISPATCH_MESSAGE;
 
 				// Fall through
@@ -59,16 +62,6 @@ ScreenSaverFilter::Filter(BMessage* message, BHandler** target)
 				fEnabled = false;
 				be_app->PostMessage(B_QUIT_REQUESTED);
 				break;
-		}
-	} else if (message->what == B_KEY_DOWN) {
-		ScreenBlanker* app = dynamic_cast<ScreenBlanker*>(be_app);
-		if (app != NULL && app->IsPasswordWindowShown()) {
-			// Handle the escape key when the password window is showing
-			const char* string = NULL;
-			if (message->FindString("bytes", &string) == B_OK
-					&& string[0] == B_ESCAPE) {
-				be_app->PostMessage(kMsgResumeSaver);
-			}
 		}
 	}
 

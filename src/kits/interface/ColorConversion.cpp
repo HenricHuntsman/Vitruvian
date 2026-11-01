@@ -1,4 +1,5 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2001-2006, Haiku Inc.
  * Distributed under the terms of the MIT License.
  *
@@ -480,10 +481,17 @@ PaletteConverter::InitializeDefault(bool useServer)
 PaletteConverter::_InitializeDefaultAppServer()
 {
 	const color_map* colors = system_colors();
-	if (colors != NULL)
-		sPaletteConverter.SetTo(colors);
-	else
-		sPaletteConverter.SetTo(kSystemPalette);
+	if (colors != NULL) {
+		color_map* copy = new(nothrow) color_map;
+		if (copy != NULL) {
+			*copy = *colors;
+			sPaletteConverter.fOwnColorMap = copy;
+			sPaletteConverter.fColorMap = copy;
+			sPaletteConverter.fCStatus = B_OK;
+			return;
+		}
+	}
+	sPaletteConverter.SetTo(kSystemPalette);
 }
 
 
@@ -800,12 +808,12 @@ ConvertBits(const srcByte *srcBits, dstByte *dstBits, int32 srcBitsLength,
 
 			memcpy(dstBits, srcBits, copyCount);
 
-			srcBitsLength -= copyCount;
-			dstBitsLength -= copyCount;
+			srcBitsLength -= srcBytesPerRow;
+			dstBitsLength -= dstBytesPerRow;
 			srcBits = (srcByte*)((uint8*)srcBits + srcBytesPerRow);
 			dstBits = (dstByte*)((uint8*)dstBits + dstBytesPerRow);
 
-			if ((uint8 *)srcBits > srcBitsEnd || (uint8 *)dstBits > dstBitsEnd)
+			if ((uint8 *)srcBits >= srcBitsEnd || (uint8 *)dstBits >= dstBitsEnd)
 				return B_OK;
 		}
 

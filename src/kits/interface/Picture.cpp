@@ -24,16 +24,16 @@
 #include <Message.h>
 
 #include <AppServerLink.h>
-#include <Autolock.h>
 #include <ObjectList.h>
 #include <PicturePlayer.h>
 #include <ServerProtocol.h>
+#include <Autolock.h>
 
 #include "PicturePrivate.h"
 
 
 static BObjectList<BPicture> sPictureList;
-static BLocker sPictureListLock;
+static BLocker sPictureListLock("BPicture list");
 
 
 void

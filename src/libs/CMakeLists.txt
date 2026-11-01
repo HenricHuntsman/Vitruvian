@@ -1,4 +1,8 @@
 add_subdirectory(agg)
+add_subdirectory(backlight)
 add_subdirectory(icon)
 add_subdirectory(linprog)
+add_subdirectory(libscan)
 add_subdirectory(mapm)
+add_subdirectory(prefs)
+add_subdirectory(printcups)

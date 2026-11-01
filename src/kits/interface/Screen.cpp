@@ -351,6 +351,24 @@ BScreen::SetBrightness(float brightness)
 }
 
 
+status_t
+BScreen::GetTemperature(float* kelvin)
+{
+	if (fScreen != NULL)
+		return fScreen->GetTemperature(kelvin);
+	return B_ERROR;
+}
+
+
+status_t
+BScreen::SetTemperature(float kelvin)
+{
+	if (fScreen != NULL)
+		return fScreen->SetTemperature(kelvin);
+	return B_ERROR;
+}
+
+
 //	#pragma mark - Deprecated methods
 
 
@@ -372,9 +390,7 @@ BScreen::ProposeDisplayMode(display_mode* target, const display_mode* low,
 void*
 BScreen::BaseAddress()
 {
-	if (fScreen != NULL)
-		return fScreen->BaseAddress();
-
+	// deprecated
 	return NULL;
 }
 
@@ -382,8 +398,6 @@ BScreen::BaseAddress()
 uint32
 BScreen::BytesPerRow()
 {
-	if (fScreen != NULL)
-		return fScreen->BytesPerRow();
-
+	// deprecated
 	return 0;
 }

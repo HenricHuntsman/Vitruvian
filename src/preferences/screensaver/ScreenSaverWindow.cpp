@@ -333,7 +333,7 @@ FadeView::FadeView(const char* name, ScreenSaverSettings& settings)
 		kMsgPasswordSliderChanged, kMsgPasswordSliderUpdate);
 
 	fPasswordButton = new BButton("PasswordButton",
-		B_TRANSLATE("Password" B_UTF8_ELLIPSIS),
+		B_TRANSLATE("Unlock uses system password" B_UTF8_ELLIPSIS),
 		new BMessage(kMsgChangePassword));
 
 	// Bottom
@@ -542,6 +542,8 @@ FadeView::UpdateStatus()
 	fSettings.SetBlankCorner(fFadeNow->Corner());
 	fSettings.SetNeverBlankCorner(fFadeNever->Corner());
 	fSettings.SetLockEnable(fPasswordCheckBox->Value());
+	fSettings.SetLockMethod("system");
+	fSettings.SetPassword("");
 	fSettings.SetPasswordTime(fPasswordSlider->Time());
 
 	// TODO - Tell the password window to update its stuff
@@ -702,11 +704,11 @@ ModulesView::MessageReceived(BMessage* message)
 				case B_ENTRY_CREATED:
 				{
 					const char* name;
-					node_ref nodeRef;
+					entry_ref dirRef;
 
 					message->FindString("name", &name);
-					message->FindInt32("device", &nodeRef.device);
-					message->FindInt64("directory", &nodeRef.node);
+					message->FindRef("virtual:directory", &dirRef);
+					node_ref nodeRef(dirRef.vdevice(), dirRef.vdirectory());
 
 					BDirectory dir(&nodeRef);
 
@@ -893,7 +895,7 @@ ModulesView::_OpenSaver()
 	fCurrentName = fSettings.ModuleName();
 	fSaverRunner = new ScreenSaverRunner(view->Window(), view, fSettings);
 
-#ifdef __HAIKU__
+#ifdef __VOS__
 	BRect rect = fSettingsBox->InnerFrame().InsetByCopy(4, 4);
 #else
 	BRect rect = fSettingsBox->Bounds().InsetByCopy(4, 4);

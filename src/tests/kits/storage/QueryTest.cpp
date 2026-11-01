@@ -1308,10 +1308,10 @@ QueryTest::AddLiveEntries(QueryTestEntry **entries, int32 entryCount,
 		CPPUNIT_ASSERT( node.InitCheck() == B_OK );
 		node_ref nref;
 		CPPUNIT_ASSERT( node.GetNodeRef(&nref) == B_OK );
-		entry->node = nref.node;
+		entry->node = nref.vnode();
 		entry_ref ref;
 		CPPUNIT_ASSERT( get_ref_for_path(entry->cpath, &ref) == B_OK );
-		entry->directory = ref.directory;
+		entry->directory = ref.vdirectory();
 		entry->name = ref.name;
 	}
 	CheckUpdateMessages(B_ENTRY_CREATED, queryEntries, queryEntryCount);
@@ -1356,18 +1356,17 @@ QueryTest::CheckUpdateMessages(uint32 opcode, QueryTestEntry **entries,
 				CPPUNIT_ASSERT( message.FindInt32("opcode", (int32*)&msgOpcode)
 								== B_OK );
 				CPPUNIT_ASSERT( msgOpcode == opcode );
-				dev_t device;
-				CPPUNIT_ASSERT( message.FindInt64("device", (int64*)&device)
+				dev_t device = dev_for_path(testMountPoint);
+				entry_ref entryRef;
+				CPPUNIT_ASSERT( message.FindRef("virtual:directory", &entryRef)
 								== B_OK );
-				CPPUNIT_ASSERT( device == dev_for_path(testMountPoint) );
-				ino_t directory;
-				CPPUNIT_ASSERT( message.FindInt64("directory", (int64*)&directory)
+				CPPUNIT_ASSERT( node_ref(entryRef.vdevice(),
+									entryRef.vdirectory())
+								== node_ref(device, entry->directory) );
+				node_ref nodeRef;
+				CPPUNIT_ASSERT( message.FindNodeRef("virtual:node", &nodeRef)
 								== B_OK );
-				CPPUNIT_ASSERT( directory == entry->directory );
-				ino_t node;
-				CPPUNIT_ASSERT( message.FindInt64("node", (int64*)&node)
-								== B_OK );
-				CPPUNIT_ASSERT( node == entry->node );
+				CPPUNIT_ASSERT( nodeRef == node_ref(device, entry->node) );
 				if (opcode == B_ENTRY_CREATED) {
 					const char *name;
 					CPPUNIT_ASSERT( message.FindString("name", &name)

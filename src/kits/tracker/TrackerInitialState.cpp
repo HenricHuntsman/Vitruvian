@@ -225,7 +225,7 @@ mkColumnsBits(BMallocIO& stream, const ColumnData* src, int32 nelm,
 {
 	for (int32 i = 0; i < nelm; i++) {
 		BColumn c(
-			B_TRANSLATE_CONTEXT(src[i].title, context),
+			B_TRANSLATE_NOCOLLECT_CONTEXT(src[i].title, context),
 			src[i].width, src[i].align, src[i].attributeName,
 			src[i].attrType, src[i].statField, src[i].editable);
 		c.SetOffset(src[i].offset);
@@ -662,6 +662,10 @@ TTracker::InstallDefaultTemplates()
 	};
 
 
+#undef B_TRANSLATION_CONTEXT
+#define B_TRANSLATION_CONTEXT "TrackerInitialState"
+
+
 	BNode node;
 	BString query(kQueryTemplates);
 	query += "/application_octet-stream";
@@ -756,7 +760,7 @@ TTracker::InstallTemporaryBackgroundImages()
 	}
 	path.Append("artwork");
 
-	BString defaultBackgroundImage("/HAIKU logo - white on blue - big.png");
+	BString defaultBackgroundImage("/V_OS logo.png");
 
 	BDirectory dir;
 	if (FSGetBootDeskDir(&dir) == B_OK) {

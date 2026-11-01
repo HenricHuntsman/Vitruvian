@@ -98,6 +98,11 @@ namespace BPrivate {
 
 #define kAttrPoseInfo_be					"_trk/pinfo"
 #define kAttrPoseInfo_le					"_trk/pinfo_le"
+// Pose's parent-directory path, separate from the raw PoseInfo blob so it
+// survives a reboot (PoseInfo's vnode ids don't).
+#define kAttrPoseInfoDir					"_trk/pinfo_dir"
+
+#define kAttrHidden							"SYS:HIDDEN"
 #define kAttrDisksPoseInfo_be				"_trk/d_pinfo"
 #define kAttrDisksPoseInfo_le				"_trk/d_pinfo_le"
 #define kAttrTrashPoseInfo_be				"_trk/t_pinfo"
@@ -150,9 +155,9 @@ namespace BPrivate {
 #define kAttrQueryMoreOptions 				kAttrQueryMoreOptions_le
 #define kAttrQueryMoreOptionsForeign 		kAttrQueryMoreOptions_be
 #define kAttrExtendedPoseInfo				kAttrExtendedPoseInfo_le
-#define kAttrExtendedPoseInfoForegin		kAttrExtendedPoseInfo_be
+#define kAttrExtendedPoseInfoForeign		kAttrExtendedPoseInfo_be
 #define kAttrExtendedDisksPoseInfo			kAttrExtendedDisksPoseInfo_le
-#define kAttrExtendedDisksPoseInfoForegin	kAttrExtendedDisksPoseInfo_be
+#define kAttrExtendedDisksPoseInfoForeign	kAttrExtendedDisksPoseInfo_be
 
 #else
 
@@ -186,9 +191,9 @@ namespace BPrivate {
 #define kAttrQueryMoreOptions 				kAttrQueryMoreOptions_be
 #define kAttrQueryMoreOptionsForeign 		kAttrQueryMoreOptions_le
 #define kAttrExtendedPoseInfo				kAttrExtendedPoseInfo_be
-#define kAttrExtendedPoseInfoForegin		kAttrExtendedPoseInfo_le
+#define kAttrExtendedPoseInfoForeign		kAttrExtendedPoseInfo_le
 #define kAttrExtendedDisksPoseInfo			kAttrExtendedDisksPoseInfo_be
-#define kAttrExtendedDisksPoseInfoForegin	kAttrExtendedDisksPoseInfo_le
+#define kAttrExtendedDisksPoseInfoForeign	kAttrExtendedDisksPoseInfo_le
 
 #endif
 

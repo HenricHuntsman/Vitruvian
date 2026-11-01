@@ -23,10 +23,35 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
 endif()
 
 # Build flags
-set(CMAKE_CXX_FLAGS_DEBUG   "-O0 -ggdb")
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -g0")
+# Debug carries the runtime checks; fortify needs optimization, hence -Og.
+# Release is unchecked whatever the host compiler defaults to.
+set(CMAKE_CXX_FLAGS_DEBUG   "-Og -ggdb -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -g0 -U_FORTIFY_SOURCE")
 set(CMAKE_C_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
+
+# Sanitizer builds (configure --sanitize=thread|address). Opt-in only: the
+# instrumented tree is for stress runs, not shipping. -g survives Release so
+# reports carry symbols; frame pointers keep TSan/ASan stacks honest.
+set(VITRUVIAN_SANITIZE "" CACHE STRING
+	"Sanitizer instrumentation: empty, thread or address")
+if(VITRUVIAN_SANITIZE)
+	if(NOT VITRUVIAN_SANITIZE STREQUAL "thread"
+			AND NOT VITRUVIAN_SANITIZE STREQUAL "address")
+		message(FATAL_ERROR
+			"VITRUVIAN_SANITIZE must be thread or address, got '${VITRUVIAN_SANITIZE}'")
+	endif()
+	set(_vos_san_flags "-fsanitize=${VITRUVIAN_SANITIZE} -fno-omit-frame-pointer -g")
+	set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} ${_vos_san_flags}")
+	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${_vos_san_flags}")
+	set(CMAKE_EXE_LINKER_FLAGS
+		"${CMAKE_EXE_LINKER_FLAGS} -fsanitize=${VITRUVIAN_SANITIZE}")
+	set(CMAKE_SHARED_LINKER_FLAGS
+		"${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=${VITRUVIAN_SANITIZE}")
+	set(CMAKE_MODULE_LINKER_FLAGS
+		"${CMAKE_MODULE_LINKER_FLAGS} -fsanitize=${VITRUVIAN_SANITIZE}")
+	message(STATUS "Sanitizer: ${VITRUVIAN_SANITIZE}")
+endif()
 
 # Set common flags
 set(COMMON_FLAGS "-Wall \
@@ -44,13 +69,13 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${COMMON_FLAGS} \
 
 # V\OS Global defines
 set(GLOBAL_CFLAGS
-	#-DOPENSSL_ENABLED
+	-DOPENSSL_ENABLED
 )
 
 if(NOT BUILDTOOLS_MODE STREQUAL "1")
     # Target architecture
-    set(VITRUVIAN_TARGET_ARCH "x86_64" CACHE STRING "Target architecture (x86_64, arm64 = stub/unsupported)")
-    set_property(CACHE VITRUVIAN_TARGET_ARCH PROPERTY STRINGS "x86_64" "arm64")
+    set(VITRUVIAN_TARGET_ARCH "amd64" CACHE STRING "Target architecture (Debian arch name, e.g. amd64, arm64)")
+    set_property(CACHE VITRUVIAN_TARGET_ARCH PROPERTY STRINGS "amd64" "arm64")
     set(VITRUVIAN_EFFECTIVE_ARCH "${VITRUVIAN_TARGET_ARCH}")
     message(STATUS "Target architecture: ${VITRUVIAN_EFFECTIVE_ARCH}")
 

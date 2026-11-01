@@ -36,7 +36,7 @@ public:
 	virtual void ReadyToRun()
 	{
 		printf("TestApp::ReadyToRun()\n");
-//		PostMessage(B_QUIT_REQUESTED);
+		PostMessage(B_QUIT_REQUESTED);
 	}
 
 };
@@ -45,7 +45,7 @@ public:
 int
 main()
 {
-	TestApp* app = new TestApp("application/x-vnd.Haiku-TestApp1");
+	TestApp* app = new TestApp("application/x-vnd.vos-TestApp1");
 	app->Run();
 	delete app;
 

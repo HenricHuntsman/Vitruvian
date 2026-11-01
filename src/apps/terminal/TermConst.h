@@ -14,7 +14,7 @@
 #define TERMCONST_H_INCLUDED
 
 // Application signature (Must same in Terminal.rdef)
-#define TERM_SIGNATURE "application/x-vnd.Haiku-Terminal"
+#define TERM_SIGNATURE "application/x-vnd.vos-Terminal"
 #define PREFFILE_MIMETYPE "text/x-terminal-pref"
 #define THEMEFILE_MIMETYPE "text/x-terminal-theme"
 
@@ -160,6 +160,8 @@ extern const char* const kShellEscapeCharacters;
 extern const char* const kDefaultAdditionalWordCharacters;
 extern const char* const kURLAdditionalWordCharacters;
 
+struct UTF8Char;
+extern const UTF8Char kNonCharacter;
 
 // Cursor style
 enum {
@@ -238,5 +240,7 @@ enum {
 #define MODE_REPORT_BUTTON_MOUSE_EVENT	0x0080
 #define MODE_REPORT_ANY_MOUSE_EVENT		0x00c0
 #define MODE_EXTENDED_MOUSE_COORDINATES	0x0100
+#define MODE_APPLICATION_CURSOR_KEYS	0x0200
 
+#define MODE_LINEFEED_NEWLINE		0x0400
 #endif	// TERMCONST_H_INCLUDED
