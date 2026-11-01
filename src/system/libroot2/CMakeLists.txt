@@ -1,10 +1,13 @@
 target_sources(root PRIVATE
 	Team.cpp
+	exec_status.cpp
 
 	thread.cpp
 	port.cpp
 	sem.cpp
 	area.cpp
+
+	proc_read.cpp
 
 	byteorder.cpp
 	debug.cpp
@@ -15,7 +18,7 @@ target_sources(root PRIVATE
 	parsedate.cpp
 	real_time_clock.c
 	shutdown.cpp
-	system_info.c
+	system_info.cpp
 	system_revision.c
 
 	SystemWatcher.cpp

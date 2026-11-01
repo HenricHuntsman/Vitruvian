@@ -19,7 +19,7 @@
 namespace BPrivate {
 
 
-#define kLaunchDaemonSignature "application/x-vnd.Haiku-launch_daemon"
+#define kLaunchDaemonSignature "application/x-vnd.vos-launch_daemon"
 #ifdef TEST_MODE
 #	define B_LAUNCH_DAEMON_PORT_NAME "test:launch_daemon"
 #else
@@ -59,6 +59,9 @@ enum {
 	B_JANUS_LOCK_SESSION		= 'jnLS',
 	B_JANUS_UNLOCK_AUTH			= 'jnUA',
 	B_JANUS_LOCKER_DIED			= 'jnLD',
+	// Written to the port named "vos-polkit-agent:session-lock" after the
+	// screen locks; listeners drop session-scoped remembered grants.
+	B_JANUS_SESSION_LOCKED		= 'jnLK',
 
 	// input_server asks janus to switch VT ("vt" int32); relayed to the
 	// current janus_session's control port, since that owns the seat.
@@ -73,6 +76,9 @@ enum {
 	// janus_session -> supervisor when a child is reaped ("signature"
 	// string, "pid" int32): drops that row from the app registry.
 	B_JANUS_UNREGISTER_APP		= 'jnuA',
+	// janus_session -> supervisor after a supervised app_server relaunch
+	// became ready: replay the screen lock if one is active.
+	B_JANUS_APP_SERVER_RESTARTED	= 'jnar',
 };
 
 

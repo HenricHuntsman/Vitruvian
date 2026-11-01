@@ -1,6 +1,6 @@
 /*
  * Copyright 2025-2026, Dario Casalinuovo. All Rights Reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #include <MediaFiles.h>
@@ -233,12 +233,19 @@ BMediaFiles::GetRefFor(const char* type, const char* item, entry_ref* _ref)
 
 	BMessage store;
 	status_t err = load_store(store);
-	if (err != B_OK)
+	if (err != B_OK) {
+		*_ref = entry_ref();
 		return B_ENTRY_NOT_FOUND;
+	}
 	BMessage typeMsg;
-	if (store.FindMessage(type, &typeMsg) != B_OK)
+	if (store.FindMessage(type, &typeMsg) != B_OK) {
+		*_ref = entry_ref();
 		return B_ENTRY_NOT_FOUND;
-	return typeMsg.FindRef(make_ref_key(item).String(), _ref);
+	}
+	err = typeMsg.FindRef(make_ref_key(item).String(), _ref);
+	if (err != B_OK)
+		*_ref = entry_ref();
+	return err;
 }
 
 

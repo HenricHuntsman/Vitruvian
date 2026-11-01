@@ -339,7 +339,7 @@ ServerApp::InWorkspace(int32 index) const
 	BAutolock locker(fWindowListLock);
 
 	// we could cache this, but then we'd have to recompute the cached
-	// value everytime a window has closed or changed workspaces
+	// value every time a window has closed or changed workspaces
 
 	// TODO: support initial application workspace!
 
@@ -369,7 +369,7 @@ ServerApp::Workspaces() const
 	BAutolock locker(fWindowListLock);
 
 	// we could cache this, but then we'd have to recompute the cached
-	// value everytime a window has closed or changed workspaces
+	// value every time a window has closed or changed workspaces
 
 	for (int32 i = fWindowList.CountItems(); i-- > 0;) {
 		ServerWindow* serverWindow = fWindowList.ItemAt(i);
@@ -587,7 +587,7 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 			port_id clientReplyPort = -1;
 			status_t status = _CreateWindow(code, link, clientReplyPort);
 
-			// if sucessful, ServerWindow::Run() will already have replied
+			// if successful, ServerWindow::Run() will already have replied
 			if (status < B_OK) {
 				// window creation failed, we need to notify the client
 				BPrivate::LinkSender reply(clientReplyPort);
@@ -673,8 +673,6 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 			fLink.StartMessage(error);
 			fLink.Flush();
 
-			if (error == B_OK)
-				fDesktop->BroadcastToAllApps(AS_UPDATE_DECORATOR);
 			break;
 		}
 
@@ -769,7 +767,7 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 				fLink.Attach<uint8>(allocationFlags);
 
 				fLink.Attach<area_id>(bitmap->Area());
-				fLink.Attach<int32>(bitmap->AreaOffset());
+				fLink.Attach<ssize_t>(bitmap->AreaOffset());
 
 				if ((allocationFlags & kFramebuffer) != 0)
 					fLink.Attach<int32>(bitmap->BytesPerRow());
@@ -858,7 +856,7 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 			int32 bytesPerRow;
 			int32 screenID;
 			area_id clientArea;
-			int32 areaOffset;
+			size_t areaOffset;
 
 			link.Read<BRect>(&frame);
 			link.Read<color_space>(&colorSpace);
@@ -866,7 +864,7 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 			link.Read<int32>(&bytesPerRow);
 			link.Read<int32>(&screenID);
 			link.Read<int32>(&clientArea);
-			if (link.Read<int32>(&areaOffset) == B_OK) {
+			if (link.Read<size_t>(&areaOffset) == B_OK) {
 				// TODO: choose the right HWInterface with regards to the
 				// screenID
 				bitmap.SetTo(gBitmapManager->CloneFromClient(clientArea, areaOffset,
@@ -3255,27 +3253,6 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 			if (status == B_OK) {
 				fLink.StartMessage(B_OK);
 				fLink.Attach<monitor_info>(info);
-			} else
-				fLink.StartMessage(status);
-
-			fLink.Flush();
-			break;
-		}
-
-		case AS_GET_FRAME_BUFFER_CONFIG:
-		{
-			STRACE(("ServerApp %s: get frame buffer config\n", Signature()));
-
-			// We aren't using the screen_id for now...
-			int32 id;
-			link.Read<int32>(&id);
-
-			frame_buffer_config config;
-			// TODO: I wonder if there should be a "desktop" lock...
-			status_t status = fDesktop->HWInterface()->GetFrameBufferConfig(config);
-			if (status == B_OK) {
-				fLink.StartMessage(B_OK);
-				fLink.Attach<frame_buffer_config>(config);
 			} else
 				fLink.StartMessage(status);
 

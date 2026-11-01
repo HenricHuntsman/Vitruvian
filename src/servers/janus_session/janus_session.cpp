@@ -45,6 +45,8 @@ extern "C" {
 #include <RegistrarDefs.h>
 #include <syscalls.h>
 
+#include "supervision_rules.h"
+
 
 // The login's own fan-out, direct children of this process. Excludes
 // mount_server, which the supervisor owns instead.
@@ -52,20 +54,28 @@ struct KnownServer {
 	const char* name;
 	const char* signature;
 	bool        needs_drm;
+	bool        essential;
 };
 
 static const KnownServer kFanOutServers[] = {
-	{ "registrar",           B_REGISTRAR_SIGNATURE,                     false },
-	{ "app_server",          "application/x-vnd.Haiku-app_server",      true  },
-	{ "input_server",        "application/x-vnd.Be-input_server",       false },
-	{ "notification_server", "application/x-vnd.Haiku-notification_server", false },
-	{ "vos-polkit-agent",    "application/x-vnd.Vitruvian-polkit-agent", false },
-	{ "Deskbar",             "application/x-vnd.Be-TSKB",               false },
-	{ "Tracker",             "application/x-vnd.Be-TRAK",               false },
-	{ "vitruvian-login",     "application/x-vnd.Vitruvian-login",       false },
-	{ "FirstBootPrompt",     "application/x-vnd.Haiku-FirstBootPrompt", false },
-	{ NULL, NULL, false }
+	// A relaunched registrar keeps no roster: live apps never re-register
+	// with it, so only future launches show up until they restart.
+	{ "registrar",           B_REGISTRAR_SIGNATURE,                     false, true  },
+	{ "app_server",          "application/x-vnd.vos-app_server",      true,  true  },
+	// Relaunching input_server mid-session strands the pointer: it cannot
+	// re-attach the cursor channel it inherited from app_server at login.
+	{ "input_server",        "application/x-vnd.Be-input_server",       false, false },
+	{ "notification_server", "application/x-vnd.vos-notification_server", false, true },
+	{ "vos-polkit-agent",    "application/x-vnd.vos-polkit-agent", false, false },
+	{ "Deskbar",             "application/x-vnd.Be-TSKB",               false, true  },
+	{ "Tracker",             "application/x-vnd.Be-TRAK",               false, false },
+	{ "vitruvian-login",     "application/x-vnd.vos-login",       false, false },
+	{ "FirstBootPrompt",     "application/x-vnd.vos-FirstBootPrompt", false, false },
+	{ NULL, NULL, false, false }
 };
+
+#define JANUS_FANOUT_COUNT \
+	((int)(sizeof(kFanOutServers) / sizeof(kFanOutServers[0])) - 1)
 
 
 static char  sUserName[64]       = "";
@@ -281,10 +291,14 @@ struct PendingLaunch {
 	port_id   reply_port;
 	int32     reply_token;
 	bigtime_t deadline;
+	bool      restarted;
 };
 
 #define JANUS_MAX_PENDING 8
 static PendingLaunch sPending[JANUS_MAX_PENDING];
+// Relaunches run on the daemon loop thread while the launch thread drains
+// readiness; sPending[] needs a lock now that two threads claim slots.
+static pthread_mutex_t sPendingLock = PTHREAD_MUTEX_INITIALIZER;
 static const bigtime_t kLaunchReadinessTimeoutUsec = 10 * 1000000LL;
 
 static port_id sLaunchPort = -1;
@@ -363,14 +377,18 @@ find_app_by_sig(const char* sig)
 static void unregister_app_with_supervisor(const char* signature, pid_t pid);
 
 
-static void
-invalidate_app_by_pid(pid_t pid)
+// Clears the row for pid and copies the server name out, so the reaper
+// can decide on a supervised restart before the row is reusable.
+static bool
+invalidate_app_by_pid(pid_t pid, char* nameOut, size_t nameSize)
 {
 	char signature[256] = "";
+	nameOut[0] = '\0';
 
 	pthread_mutex_lock(&sAppsLock);
 	for (int i = 0; i < sAppCount; i++) {
 		if (sApps[i].pid == pid) {
+			strlcpy(nameOut, sApps[i].name, nameSize);
 			strlcpy(signature, sApps[i].signature, sizeof(signature));
 			sApps[i].pid  = -1;
 			sApps[i].port = -1;
@@ -381,6 +399,7 @@ invalidate_app_by_pid(pid_t pid)
 
 	if (signature[0] != '\0')
 		unregister_app_with_supervisor(signature, pid);
+	return nameOut[0] != '\0';
 }
 
 
@@ -490,40 +509,23 @@ wait_for_server_ready(const char* name, int timeout_ms)
 }
 
 
-// Fork+exec with privilege drop; this process never runs anything as root.
 static void
-handle_launch_job(BPrivate::KMessage& kmsg, uid_t sender_uid)
+launch_reply(port_id replyPort, int32 replyToken, status_t error)
 {
-	// Not a public port: only our own fork()ed children learn its name, so
-	// accepting uid 0 here is the actual trust boundary.
-	if (sender_uid != 0) {
-		fprintf(stderr, "janus_session: B_LAUNCH_JOB rejected from uid=%u\n",
-			(unsigned)sender_uid);
-		BPrivate::KMessage reply(B_NOT_ALLOWED);
-		kmsg.SendReply(&reply);
+	if (replyPort < 0)
 		return;
-	}
+	BPrivate::KMessage reply(error);
+	reply.SendTo(replyPort, replyToken);
+}
 
-	const char* name = NULL;
-	if (kmsg.FindString("name", &name) != B_OK || name == NULL) {
-		BPrivate::KMessage reply(B_BAD_VALUE);
-		kmsg.SendReply(&reply);
-		return;
-	}
 
-	const KnownServer* ks = NULL;
-	for (int i = 0; kFanOutServers[i].name != NULL; i++) {
-		if (strcmp(kFanOutServers[i].name, name) == 0) {
-			ks = &kFanOutServers[i];
-			break;
-		}
-	}
-	if (ks == NULL) {
-		fprintf(stderr, "janus_session: unknown server: %s\n", name);
-		BPrivate::KMessage reply(B_NAME_NOT_FOUND);
-		kmsg.SendReply(&reply);
-		return;
-	}
+// Fork+exec with privilege drop; this process never runs anything as root.
+// replyPort < 0 marks a supervised relaunch: nobody waits on a reply.
+static void
+launch_fanout_server(const KnownServer* ks, port_id replyPort, int32 replyToken,
+	bool restarted)
+{
+	const char* name = ks->name;
 
 	char path[256];
 	snprintf(path, sizeof(path), "/system/servers/%s", name);
@@ -533,8 +535,7 @@ handle_launch_job(BPrivate::KMessage& kmsg, uid_t sender_uid)
 			snprintf(path, sizeof(path), "/system/%s", name);
 			if (access(path, X_OK) != 0) {
 				fprintf(stderr, "janus_session: binary not found: %s\n", name);
-				BPrivate::KMessage reply(B_ERROR);
-				kmsg.SendReply(&reply);
+				launch_reply(replyPort, replyToken, B_ERROR);
 				return;
 			}
 		}
@@ -544,8 +545,7 @@ handle_launch_job(BPrivate::KMessage& kmsg, uid_t sender_uid)
 	int ngroups = 0;
 	if (!resolve_user_groups(&groups, &ngroups)) {
 		fprintf(stderr, "janus_session: cannot resolve groups for %s\n", sUserName);
-		BPrivate::KMessage reply(B_ERROR);
-		kmsg.SendReply(&reply);
+		launch_reply(replyPort, replyToken, B_ERROR);
 		return;
 	}
 
@@ -553,8 +553,7 @@ handle_launch_job(BPrivate::KMessage& kmsg, uid_t sender_uid)
 	if (pipe(fds) != 0) {
 		perror("janus_session: pipe");
 		free(groups);
-		BPrivate::KMessage reply(B_ERROR);
-		kmsg.SendReply(&reply);
+		launch_reply(replyPort, replyToken, B_ERROR);
 		return;
 	}
 	fcntl(fds[0], F_SETFD, FD_CLOEXEC);
@@ -565,8 +564,7 @@ handle_launch_job(BPrivate::KMessage& kmsg, uid_t sender_uid)
 		close(fds[0]);
 		close(fds[1]);
 		free(groups);
-		BPrivate::KMessage reply(B_ERROR);
-		kmsg.SendReply(&reply);
+		launch_reply(replyPort, replyToken, B_ERROR);
 		return;
 	}
 
@@ -694,14 +692,11 @@ handle_launch_job(BPrivate::KMessage& kmsg, uid_t sender_uid)
 	if (app_idx < 0) {
 		fprintf(stderr, "janus_session: sApps[] full\n");
 		close(fds[0]);
-		BPrivate::KMessage reply(B_NO_MEMORY);
-		kmsg.SendReply(&reply);
+		launch_reply(replyPort, replyToken, B_NO_MEMORY);
 		return;
 	}
 
-	port_id replyPort  = kmsg.ReplyPort();
-	int32   replyToken = kmsg.ReplyToken();
-
+	pthread_mutex_lock(&sPendingLock);
 	for (int i = 0; i < JANUS_MAX_PENDING; i++) {
 		if (!sPending[i].active) {
 			sPending[i].active      = true;
@@ -711,23 +706,84 @@ handle_launch_job(BPrivate::KMessage& kmsg, uid_t sender_uid)
 			sPending[i].reply_port  = replyPort;
 			sPending[i].reply_token = replyToken;
 			sPending[i].deadline    = system_time() + kLaunchReadinessTimeoutUsec;
+			sPending[i].restarted   = restarted;
+			pthread_mutex_unlock(&sPendingLock);
 			printf("janus_session: launched %s pid=%d, awaiting readiness\n",
 				name, (int)pid);
 			return;
 		}
 	}
+	pthread_mutex_unlock(&sPendingLock);
 
 	fprintf(stderr, "janus_session: sPending[] full for %s\n", name);
 	close(fds[0]);
-	BPrivate::KMessage reply(B_OK);
-	reply.AddInt32("pid", (int32)pid);
-	reply.SendTo(replyPort, replyToken);
+	if (replyPort >= 0) {
+		BPrivate::KMessage reply(B_OK);
+		reply.AddInt32("pid", (int32)pid);
+		reply.SendTo(replyPort, replyToken);
+	}
 }
+
+
+static void
+handle_launch_job(BPrivate::KMessage& kmsg, uid_t sender_uid)
+{
+	// Not a public port: only our own fork()ed children learn its name, so
+	// accepting uid 0 here is the actual trust boundary.
+	if (sender_uid != 0) {
+		fprintf(stderr, "janus_session: B_LAUNCH_JOB rejected from uid=%u\n",
+			(unsigned)sender_uid);
+		BPrivate::KMessage reply(B_NOT_ALLOWED);
+		kmsg.SendReply(&reply);
+		return;
+	}
+
+	const char* name = NULL;
+	if (kmsg.FindString("name", &name) != B_OK || name == NULL) {
+		BPrivate::KMessage reply(B_BAD_VALUE);
+		kmsg.SendReply(&reply);
+		return;
+	}
+
+	const KnownServer* ks = NULL;
+	for (int i = 0; kFanOutServers[i].name != NULL; i++) {
+		if (strcmp(kFanOutServers[i].name, name) == 0) {
+			ks = &kFanOutServers[i];
+			break;
+		}
+	}
+	if (ks == NULL) {
+		fprintf(stderr, "janus_session: unknown server: %s\n", name);
+		BPrivate::KMessage reply(B_NAME_NOT_FOUND);
+		kmsg.SendReply(&reply);
+		return;
+	}
+
+	launch_fanout_server(ks, kmsg.ReplyPort(), kmsg.ReplyToken(), false);
+}
+
+
+// Resolved slots are drained from sPending[] under the lock, then
+// replied to outside it: a port send can block on a full queue.
+struct ResolvedLaunch {
+	int       app_idx;
+	port_id   port;
+	pid_t     pid;
+	port_id   reply_port;
+	int32     reply_token;
+	bool      restarted;
+	char      name[64];
+	char      signature[256];
+};
 
 
 static void
 check_pending_launches()
 {
+	ResolvedLaunch done[JANUS_MAX_PENDING];
+	int nDone = 0;
+
+	pthread_mutex_lock(&sPendingLock);
 	for (int i = 0; i < JANUS_MAX_PENDING; i++) {
 		if (!sPending[i].active)
 			continue;
@@ -747,8 +803,13 @@ check_pending_launches()
 			if (n != (ssize_t)sizeof(port))
 				port = -1;
 		} else if (system_time() > sPending[i].deadline) {
-			int idx = sPending[i].app_idx;
-			fprintf(stderr, "janus_session: readiness timeout for %s\n", sApps[idx].name);
+			char name[64];
+			pthread_mutex_lock(&sAppsLock);
+			strlcpy(name, sApps[sPending[i].app_idx].name,
+				sizeof(name));
+			pthread_mutex_unlock(&sAppsLock);
+			fprintf(stderr, "janus_session: readiness timeout for %s\n",
+				name);
 			resolved = true;
 		}
 
@@ -756,40 +817,83 @@ check_pending_launches()
 			continue;
 
 		close(sPending[i].ready_fd);
-		int idx = sPending[i].app_idx;
 
-		if (port >= 0) {
+		ResolvedLaunch* r = &done[nDone++];
+		r->app_idx     = sPending[i].app_idx;
+		r->port        = port;
+		r->pid         = sPending[i].pid;
+		r->reply_port  = sPending[i].reply_port;
+		r->reply_token = sPending[i].reply_token;
+		r->restarted   = sPending[i].restarted;
+		r->name[0]      = '\0';
+		r->signature[0] = '\0';
+
+		sPending[i].active = false;
+	}
+	pthread_mutex_unlock(&sPendingLock);
+
+	for (int d = 0; d < nDone; d++) {
+		ResolvedLaunch* doneEntry = &done[d];
+		int idx = doneEntry->app_idx;
+
+		if (doneEntry->port >= 0) {
 			pthread_mutex_lock(&sAppsLock);
-			bool stale = sApps[idx].pid != sPending[i].pid;
-			if (!stale)
-				sApps[idx].port = port;
+			bool stale = sApps[idx].pid != doneEntry->pid;
+			if (!stale) {
+				sApps[idx].port = doneEntry->port;
+				strlcpy(doneEntry->name, sApps[idx].name,
+					sizeof(doneEntry->name));
+				strlcpy(doneEntry->signature, sApps[idx].signature,
+					sizeof(doneEntry->signature));
+			}
 			pthread_mutex_unlock(&sAppsLock);
 			if (stale)
-				port = -1;
+				doneEntry->port = -1;
 		}
 
-		if (port >= 0) {
+		if (doneEntry->port >= 0) {
 			printf("janus_session: %s ready, pid=%d port=%d\n",
-				sApps[idx].name, (int)sApps[idx].pid, (int)port);
+				doneEntry->name, (int)doneEntry->pid,
+				(int)doneEntry->port);
 
+	// Truncation only makes open() fail below.
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+#endif
 			char pidpath[128];
-			snprintf(pidpath, sizeof(pidpath), "%s/%s.pid", runtime_dir(), sApps[idx].name);
+			snprintf(pidpath, sizeof(pidpath), "%s/%s.pid",
+				runtime_dir(), doneEntry->name);
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 			FILE* f = fopen(pidpath, "w");
 			if (f != NULL) {
-				fprintf(f, "%d\n", (int)sApps[idx].pid);
+				fprintf(f, "%d\n", (int)doneEntry->pid);
 				fclose(f);
 			}
 
-			register_app_with_supervisor(sApps[idx].name, sApps[idx].signature,
-				sApps[idx].pid, port);
+			register_app_with_supervisor(doneEntry->name,
+				doneEntry->signature, doneEntry->pid,
+				doneEntry->port);
+
+			if (doneEntry->restarted
+					&& strcmp(doneEntry->name, "app_server") == 0) {
+				port_id supervisorPort = find_port(B_LAUNCH_DAEMON_PORT_NAME);
+				if (supervisorPort >= 0) {
+					BPrivate::KMessage msg(BPrivate::B_JANUS_APP_SERVER_RESTARTED);
+					msg.SendTo(supervisorPort, -1);
+				}
+			}
 		}
 
-		BPrivate::KMessage reply(port >= 0 ? B_OK : B_ERROR);
-		if (port >= 0)
-			reply.AddInt32("pid", (int32)sApps[idx].pid);
-		reply.SendTo(sPending[i].reply_port, sPending[i].reply_token);
+		if (doneEntry->reply_port < 0)
+			continue;
 
-		sPending[i].active = false;
+		BPrivate::KMessage reply(doneEntry->port >= 0 ? B_OK : B_ERROR);
+		if (doneEntry->port >= 0)
+			reply.AddInt32("pid", (int32)doneEntry->pid);
+		reply.SendTo(doneEntry->reply_port, doneEntry->reply_token);
 	}
 }
 
@@ -908,7 +1012,7 @@ static void
 janus_teardown_seat()
 {
 	send_seat_message("application/x-vnd.Be-input_server", B_SEAT_DISABLED, 2000000LL);
-	send_seat_message("application/x-vnd.Haiku-app_server", B_SEAT_DISABLED, 2000000LL);
+	send_seat_message("application/x-vnd.vos-app_server", B_SEAT_DISABLED, 2000000LL);
 
 	pthread_mutex_lock(&sAppsLock);
 	int count = sAppCount;
@@ -924,7 +1028,7 @@ janus_teardown_seat()
 		if (port < 0)
 			continue;
 		if (strcmp(sig, "application/x-vnd.Be-input_server") == 0
-				|| strcmp(sig, "application/x-vnd.Haiku-app_server") == 0)
+				|| strcmp(sig, "application/x-vnd.vos-app_server") == 0)
 			continue;
 
 		BMessenger app;
@@ -1455,6 +1559,58 @@ run_first_login_for_user_detached()
 }
 
 
+// Signature migration has its own marker so upgraded users, who already
+// carry the first_login marker, still get the one-shot rewrite.
+static void
+run_signature_migration_for_user()
+{
+	if (sUserUid == (uid_t)-1 || sUserHome[0] == '\0')
+		return;
+
+	char marker[PATH_MAX + 48];
+	snprintf(marker, sizeof(marker),
+		"%s/config/settings/vos-signature-migrated", sUserHome);
+	if (access(marker, F_OK) == 0)
+		return;
+
+	gid_t* groups = NULL;
+	int ngroups = 0;
+	if (!resolve_user_groups(&groups, &ngroups)) {
+		fprintf(stderr, "janus_session: signature-migrate: groups for %s\n",
+			sUserName);
+		return;
+	}
+
+	pid_t child = fork();
+	if (child < 0) {
+		free(groups);
+		return;
+	}
+	if (child == 0) {
+		setenv("HOME", sUserHome, 1);
+		setenv("USER", sUserName, 1);
+		setenv("LOGNAME", sUserName, 1);
+		if (!drop_to_user(groups, ngroups)) {
+			fprintf(stderr, "janus_session: signature-migrate setuid: %s\n",
+				strerror(errno));
+			_exit(1);
+		}
+		char* const argv[] = { (char*)"/bin/vos-signature-migrate", NULL };
+		execv(argv[0], argv);
+		fprintf(stderr, "janus_session: signature-migrate exec: %s\n",
+			strerror(errno));
+		_exit(127);
+	}
+	int status;
+	waitpid(child, &status, 0);
+	free(groups);
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+		fprintf(stderr, "janus_session: signature-migrate exited %d\n",
+			status);
+	}
+}
+
+
 // --- Teardown / main -----------------------------------------------------
 
 static void
@@ -1467,33 +1623,51 @@ sig_handler(int)
 // cgroup membership, not parentage, pins a logind session open: a
 // user-started app reparents to init on logout but stays in this cgroup,
 // keeping the session (and user@<uid>.service) alive unless swept here too.
+static char sSessionCgroup[PATH_MAX] = "";
+
+
+// This login's cgroup as /proc prints it; "-" marks an unresolvable
+// environment, resolved once and never retried.
+static void
+resolve_session_cgroup()
+{
+	if (sSessionCgroup[0] != '\0')
+		return;
+
+	char line[PATH_MAX];
+	FILE* f = fopen("/proc/self/cgroup", "r");
+	if (f != NULL) {
+		while (fgets(line, sizeof(line), f) != NULL) {
+			if (strncmp(line, "0::", 3) != 0)
+				continue;
+			strlcpy(sSessionCgroup, line + 3, sizeof(sSessionCgroup));
+			size_t len = strlen(sSessionCgroup);
+			while (len > 0 && (sSessionCgroup[len - 1] == '\n'
+					|| sSessionCgroup[len - 1] == '\r'))
+				sSessionCgroup[--len] = '\0';
+			break;
+		}
+		fclose(f);
+	}
+	if (sSessionCgroup[0] == '\0')
+		strlcpy(sSessionCgroup, "-", sizeof(sSessionCgroup));
+}
+
+
 static void
 kill_session_cgroup()
 {
-	char line[PATH_MAX];
-	FILE* f = fopen("/proc/self/cgroup", "r");
-	if (f == NULL)
-		return;
-	char relative[PATH_MAX] = "";
-	while (fgets(line, sizeof(line), f) != NULL) {
-		if (strncmp(line, "0::", 3) != 0)
-			continue;
-		strlcpy(relative, line + 3, sizeof(relative));
-		size_t len = strlen(relative);
-		while (len > 0 && (relative[len - 1] == '\n' || relative[len - 1] == '\r'))
-			relative[--len] = '\0';
-		break;
-	}
-	fclose(f);
-	if (relative[0] != '/')
+	resolve_session_cgroup();
+	if (sSessionCgroup[0] != '/')
 		return;
 
 	char procsPath[PATH_MAX + 64];
 	if (snprintf(procsPath, sizeof(procsPath), "/sys/fs/cgroup%s/cgroup.procs",
-			relative) >= (int)sizeof(procsPath)) {
+			sSessionCgroup) >= (int)sizeof(procsPath)) {
 		return;
 	}
 
+	char line[PATH_MAX];
 	pid_t self = getpid();
 	for (int round = 0; round < 2; round++) {
 		int sig = round == 0 ? SIGTERM : SIGKILL;
@@ -1582,6 +1756,185 @@ process_seat_request()
 }
 
 
+// Supervised restarts: an essential fan-out server is relaunched on
+// death, kRestartBudget times per name per kRestartWindowUsec, then
+// given up on.
+static const bigtime_t kRestartDelayUsec  = 1 * 1000000LL;
+static const bigtime_t kRestartWindowUsec = 60 * 1000000LL;
+static const int       kRestartBudget     = 3;
+
+static bigtime_t sRestartDue[JANUS_FANOUT_COUNT];
+static int       sRestartAttempts[JANUS_FANOUT_COUNT];
+static bigtime_t sRestartWindow[JANUS_FANOUT_COUNT];
+
+
+// /proc/<pid>/cgroup is world-readable; membership beats a bare uid here
+// because two logins can share one uid.
+static bool
+process_in_session(const char* pidName)
+{
+	char path[64];
+	snprintf(path, sizeof(path), "/proc/%s/cgroup", pidName);
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return false;
+
+	char buf[512];
+	ssize_t n = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (n <= 0)
+		return false;
+	buf[n] = '\0';
+
+	char* line = buf;
+	while (*line != '\0') {
+		char* nl = strchr(line, '\n');
+		if (nl != NULL)
+			*nl = '\0';
+		if (strncmp(line, "0::", 3) == 0)
+			return cgroup_in_session(line + 3, sSessionCgroup);
+		if (nl == NULL)
+			break;
+		line = nl + 1;
+	}
+	return false;
+}
+
+
+// Fallback when the cgroup cannot be resolved: uid at least separates
+// concurrent logins of different users.
+static bool
+process_is_session_user(const char* pidName)
+{
+	char path[64];
+	snprintf(path, sizeof(path), "/proc/%s/status", pidName);
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return false;
+
+	char buf[1024];
+	ssize_t n = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (n <= 0)
+		return false;
+	buf[n] = '\0';
+
+	const char* field = strstr(buf, "Uid:");
+	if (field == NULL)
+		return false;
+	return (uid_t)strtoul(field + 4, NULL, 10) == sUserUid;
+}
+
+
+// True when a process of this login's own carries name; used to avoid
+// double-launching a server somebody else already revived.
+static bool
+process_running(const char* name)
+{
+	resolve_session_cgroup();
+
+	DIR* dir = opendir("/proc");
+	if (dir == NULL)
+		return false;
+
+	bool found = false;
+	struct dirent* de;
+	while (!found && (de = readdir(dir)) != NULL) {
+		// Pids only; also keeps the path below in bounds.
+		if (de->d_name[0] < '1' || de->d_name[0] > '9'
+				|| strlen(de->d_name) > 10)
+			continue;
+		char path[64];
+		snprintf(path, sizeof(path), "/proc/%s/comm", de->d_name);
+		int fd = open(path, O_RDONLY | O_CLOEXEC);
+		if (fd < 0)
+			continue;
+		char comm[32] = "";
+		ssize_t n = read(fd, comm, sizeof(comm) - 1);
+		close(fd);
+		if (n <= 0)
+			continue;
+		comm[n] = '\0';
+		if (!comm_matches(comm, name))
+			continue;
+		// Another login's server with the same comm must not count
+		// against this one.
+		found = sSessionCgroup[0] == '-'
+			? process_is_session_user(de->d_name)
+			: process_in_session(de->d_name);
+	}
+	closedir(dir);
+	return found;
+}
+
+
+static void
+schedule_restart(const char* name)
+{
+	if (sShuttingDown)
+		return;
+
+	for (int i = 0; kFanOutServers[i].name != NULL; i++) {
+		if (strcmp(kFanOutServers[i].name, name) != 0)
+			continue;
+		if (!kFanOutServers[i].essential)
+			return;
+
+		bigtime_t now = system_time();
+		if (sRestartWindow[i] == 0
+				|| now - sRestartWindow[i] > kRestartWindowUsec) {
+			sRestartWindow[i]  = now;
+			sRestartAttempts[i] = 0;
+		}
+		if (sRestartAttempts[i] >= kRestartBudget) {
+			fprintf(stderr, "janus_session: %s died %d times within "
+				"%" B_PRId64 " s; giving up\n", name, kRestartBudget,
+				kRestartWindowUsec / 1000000);
+			// A login without its window server is not a session: end
+			// it deliberately instead of limping headless.
+			if (strcmp(name, "app_server") == 0)
+				teardown_and_exit();
+			return;
+		}
+
+		sRestartAttempts[i]++;
+		sRestartDue[i] = now + kRestartDelayUsec;
+		printf("janus_session: %s died; restart %d/%d in %" B_PRId64 " s\n",
+			name, sRestartAttempts[i], kRestartBudget,
+			kRestartDelayUsec / 1000000);
+		return;
+	}
+}
+
+
+// Runs on the daemon loop thread, which owns the seat; the wait is spread
+// over its poll ticks so libseat stays responsive.
+static void
+process_restarts()
+{
+	if (sShuttingDown)
+		return;
+
+	bigtime_t now = system_time();
+	for (int i = 0; kFanOutServers[i].name != NULL; i++) {
+		if (sRestartDue[i] == 0 || now < sRestartDue[i])
+			continue;
+		sRestartDue[i] = 0;
+
+		// app_server relaunches input_server itself on a dead event
+		// stream; a user can restart the Deskbar by hand.
+		if (process_running(kFanOutServers[i].name)) {
+			printf("janus_session: %s is running again; no restart\n",
+				kFanOutServers[i].name);
+			continue;
+		}
+
+		printf("janus_session: restarting %s\n", kFanOutServers[i].name);
+		launch_fanout_server(&kFanOutServers[i], -1, -1, true);
+	}
+}
+
+
 static void
 daemon_loop()
 {
@@ -1622,10 +1975,18 @@ daemon_loop()
 		}
 
 		process_seat_request();
+		process_restarts();
 
 		pid_t reaped;
-		while ((reaped = waitpid(-1, NULL, WNOHANG)) > 0)
-			invalidate_app_by_pid(reaped);
+		int status = 0;
+		char name[64];
+		while ((reaped = waitpid(-1, &status, WNOHANG)) > 0) {
+			// A zero exit is the registrar's logout quit dance; only
+			// deaths earn a supervised restart.
+			if (invalidate_app_by_pid(reaped, name, sizeof(name))
+					&& exit_warrants_restart(status))
+				schedule_restart(name);
+		}
 	}
 
 	pthread_mutex_lock(&sSeatReqLock);
@@ -1652,9 +2013,17 @@ apply_session_proxy_env()
 	if (sGreeterMode || sUserHome[0] == '\0')
 		return;
 
+	// Truncation only makes open() fail below.
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+#endif
 	char path[PATH_MAX];
 	snprintf(path, sizeof(path), "%s/config/settings/network_proxy",
 		sUserHome);
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 	BFile file(path, B_READ_ONLY);
 	if (file.InitCheck() != B_OK)
@@ -1785,6 +2154,10 @@ main(int argc, char** argv)
 			fprintf(stderr, "janus_session: supervisor port not found at startup\n");
 		}
 	}
+
+	// Rewrite settings before registrar, Tracker and Deskbar read them.
+	if (!sGreeterMode)
+		run_signature_migration_for_user();
 
 	// The registrar needs no display, so it starts during the wait. The wait
 	// precedes the seat, which switches the console to graphics.

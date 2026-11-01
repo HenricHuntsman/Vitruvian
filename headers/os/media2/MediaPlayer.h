@@ -1,7 +1,7 @@
 /*
  * Copyright 2025-2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2025-2026, The Vitruvian Project. All Rights Reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #ifndef _MEDIA2_MEDIA_PLAYER_H
@@ -10,6 +10,7 @@
 
 #include <Entry.h>
 #include <Messenger.h>
+#include <Url.h>
 
 #include <media2/MediaFormat.h>
 
@@ -31,7 +32,9 @@ public:
 		B_PLAYER_POSITION_CHANGED  = 'plpc',
 		B_PLAYER_DURATION_CHANGED  = 'pldc',
 		B_PLAYER_ERROR             = 'pler',
-		B_PLAYER_END_OF_STREAM     = 'pleo'
+		B_PLAYER_END_OF_STREAM     = 'pleo',
+		B_PLAYER_VIDEO_FRAME       = 'plvf',
+		B_PLAYER_PEAKS             = 'plpk'
 	};
 
 	enum sound_player_notification {
@@ -56,6 +59,7 @@ public:
 			status_t			InitCheck() const;
 
 			status_t			SetTo(const entry_ref* ref);
+			status_t			SetTo(const BUrl& url);
 
 			const BMediaFormat&	Format() const;
 			status_t			SetFormat(const BMediaFormat& format);
@@ -64,7 +68,7 @@ public:
 			status_t			Pause();
 			status_t			Stop();
 
-			status_t			SeekTo(bigtime_t position);
+			status_t			SeekTo(bigtime_t position, int32 flags = 0);
 			bigtime_t			Position() const;
 			bigtime_t			Duration() const;
 
@@ -76,6 +80,10 @@ public:
 
 			void				SetTarget(BMessenger target);
 
+			// B_PLAYER_VIDEO_FRAME to the view: width/height/stride (int32),
+			// start_time/audio_time (int64 us; -1 = no audio), frame (raw
+			// BGRx), delivered synchronously on the view's looper thread.
+			// Surface mode swaps the frame bytes for a dma-buf descriptor.
 			void				SetVideoView(BView* view);
 
 

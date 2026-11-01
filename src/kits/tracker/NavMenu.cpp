@@ -1,4 +1,7 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
+ */
+/*
 Open Tracker License
 
 Terms and Conditions
@@ -417,11 +420,10 @@ BNavMenu::StartBuildingItemList()
 
 	fIteratingDesktop = false;
 
-	BDirectory parent;
-	status_t status = entry.GetParent(&parent);
-
 	// if ref is the root item then build list of volume root dirs
 #ifndef __VOS__
+	BDirectory parent;
+	status_t status = entry.GetParent(&parent);
 	fFlags = uint8((fFlags & ~kVolumesOnly) | (status == B_ENTRY_NOT_FOUND ? kVolumesOnly : 0));
 	if ((fFlags & kVolumesOnly) != 0)
 		return true;
@@ -455,13 +457,15 @@ BNavMenu::StartBuildingItemList()
 		volRoster.Rewind();
 		BVolume volume;
 		fContainer = new EntryIteratorList();
+		BObjectList<node_ref, true> seen(4);
 
 		while (volRoster.GetNextVolume(&volume) == B_OK) {
 			if (volume.IsReadOnly() || !volume.IsPersistent() || volume.Capacity() == 0)
 				continue;
 
 			BDirectory trashDir;
-			if (FSGetTrashDir(&trashDir, volume.Device()) == B_OK) {
+			if (FSGetTrashDir(&trashDir, volume.Device()) == B_OK
+				&& FSRecordTrashDir(&seen, &trashDir)) {
 				EntryIteratorList* iteratorList = dynamic_cast<EntryIteratorList*>(fContainer);
 				ASSERT(iteratorList != NULL);
 				if (iteratorList != NULL)

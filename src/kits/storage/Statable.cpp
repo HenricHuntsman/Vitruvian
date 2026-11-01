@@ -1,4 +1,5 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2002-2014 Haiku, Inc. All rights reserved.
  * Distributed under the terms of the MIT License.
  *
@@ -294,18 +295,11 @@ BStatable::GetCreationTime(time_t* ctime) const
 }
 
 
-// Sets the node's creation time to ctime.
+// Creation time is read-only on Linux (statx btime): always B_NOT_SUPPORTED.
 status_t
-BStatable::SetCreationTime(time_t ctime)
+BStatable::SetCreationTime(time_t)
 {
-	struct stat stat;
-#ifndef __VOS__
-	stat.st_crtime = ctime;
-#else
-	UNIMPLEMENTED();
-#endif
-
-	return set_stat(stat, B_STAT_CREATION_TIME);
+	return B_NOT_SUPPORTED;
 }
 
 

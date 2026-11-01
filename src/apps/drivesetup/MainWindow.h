@@ -1,4 +1,5 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2002-2013 Haiku Inc. All rights reserved.
  * Distributed under the terms of the MIT license.
  *
@@ -98,6 +99,8 @@ private:
 									partition_id selectedPartition);
 			void				_CheckFilesystem(BDiskDevice* disk,
 									partition_id selectedPartition);
+			void				_Defragment(BDiskDevice* disk,
+									partition_id selectedPartition);
 			void				_Erase(BDiskDevice* disk,
 									partition_id selectedPartition);
 			void				_Wipe(BDiskDevice* disk,
@@ -143,6 +146,7 @@ private:
 			BMenuItem*			fResizeMenuItem;
 			BMenuItem*			fFlagsMenuItem;
 			BMenuItem*			fCheckMenuItem;
+			BMenuItem*			fDefragMenuItem;
 			BMenuItem*			fEraseMenuItem;
 			BMenuItem*			fRenameMenuItem;
 			BMenuItem*			fRenameGptMenuItem;

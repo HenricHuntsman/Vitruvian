@@ -1,4 +1,5 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2004-2019, Haiku, Inc. All rights reserved.
  * Copyright 2025-2026, The Vitruvian Project, All rights Reserved.
  * Distributed under the terms of the MIT License.
@@ -6,7 +7,6 @@
 #ifndef _OS_H
 #define _OS_H
 
-/** Kernel specific structures and functions */
 
 #include <stdarg.h>
 #include <sys/types.h>
@@ -408,7 +408,7 @@ extern bigtime_t	system_time(void);
 extern nanotime_t	system_time_nsecs(void);
 						/* time since booting in nanoseconds */
 
-					/* deprecated (is no-op) */
+					/* via systemd-timedated; B_NOT_ALLOWED if refused */
 extern status_t		set_timezone(const char *timezone);
 
 /* Alarm */
@@ -425,15 +425,6 @@ extern bigtime_t	set_alarm(bigtime_t when, uint32 flags);
 /* Debugger */
 
 extern void			debugger(const char *message);
-
-/*
-   calling this function with a non-zero value will cause your thread
-   to receive signals for any exceptional conditions that occur (i.e.
-   you'll get SIGSEGV for data access exceptions, SIGFPE for floating
-   point errors, SIGILL for illegal instructions, etc).
-
-   to re-enable the default debugger pass a zero.
-*/
 extern int			disable_debugger(int state);
 
 /* TODO: Remove. Temporary debug helper. */

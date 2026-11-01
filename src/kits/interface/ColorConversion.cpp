@@ -1,4 +1,5 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2001-2006, Haiku Inc.
  * Distributed under the terms of the MIT License.
  *
@@ -807,12 +808,12 @@ ConvertBits(const srcByte *srcBits, dstByte *dstBits, int32 srcBitsLength,
 
 			memcpy(dstBits, srcBits, copyCount);
 
-			srcBitsLength -= copyCount;
-			dstBitsLength -= copyCount;
+			srcBitsLength -= srcBytesPerRow;
+			dstBitsLength -= dstBytesPerRow;
 			srcBits = (srcByte*)((uint8*)srcBits + srcBytesPerRow);
 			dstBits = (dstByte*)((uint8*)dstBits + dstBytesPerRow);
 
-			if ((uint8 *)srcBits > srcBitsEnd || (uint8 *)dstBits > dstBitsEnd)
+			if ((uint8 *)srcBits >= srcBitsEnd || (uint8 *)dstBits >= dstBitsEnd)
 				return B_OK;
 		}
 

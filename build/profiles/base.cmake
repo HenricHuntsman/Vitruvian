@@ -44,10 +44,13 @@ ImageInclude("/system/add-ons/opengl" ${OPENGL_RENDERERS})
 set(SYSTEM_LIBS
 	root
 	be
+	web
 	game
 	media2
 	opengl
 	printcups
+	libscan
+	prefs
 	screensaver
 	textencoding
 	tracker
@@ -56,11 +59,14 @@ set(SYSTEM_LIBS
 	shared
 	vpackage
 	localestub
+	midi
+	midi2
 )
 ImageInclude("/lib" ${SYSTEM_LIBS})
 
 
 set(SYSTEM_TRANSLATORS
+	AVIFTranslator
 	BMPTranslator
 	GIFTranslator
 	HVIFTranslator
@@ -93,6 +99,18 @@ set(TRACKER_ADDONS
 #	mark_as: needs libmail (not ported); skipped
 )
 ImageInclude("/system/add-ons/Tracker" ${TRACKER_ADDONS})
+
+set(CATALOG_ADDONS
+	plaintext
+)
+ImageInclude("/system/add-ons/locale/catalogs" ${CATALOG_ADDONS})
+
+# media2 units and the LV2/LADSPA plugin adapter.
+set(MEDIA_ADDONS
+	equalizer
+	plugin_adapter
+)
+ImageInclude("/system/add-ons/media" ${MEDIA_ADDONS})
 
 set(DECORATORS
 	BeDecorator
@@ -214,7 +232,7 @@ list(APPEND _ARRANGE_CMDS
 
 add_custom_target(apps_attrs ALL
     ${_ARRANGE_CMDS}
-    DEPENDS ${SYSTEM_APPS} ${DESKBAR_DEMOS_TARGETS} ${DESKBAR_APPLETS} ${CORE_APPLICATIONS} ${SYSTEM_SERVERS} ${SYSTEM_PREFERENCES_TARGETS} ${TRACKER_ADDONS} ${SYSTEM_TRANSLATORS}
+    DEPENDS ${SYSTEM_APPS} ${DESKBAR_DEMOS_TARGETS} ${DESKBAR_APPLETS} ${CORE_APPLICATIONS} ${SYSTEM_SERVERS} ${SYSTEM_PREFERENCES_TARGETS} ${TRACKER_ADDONS} ${SYSTEM_TRANSLATORS} web
     COMMENT "Packaging app attrs"
 )
 

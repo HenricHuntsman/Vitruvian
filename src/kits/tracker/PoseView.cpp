@@ -1,4 +1,7 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
+ */
+/*
 Open Tracker License
 
 Terms and Conditions
@@ -89,6 +92,7 @@ All rights reserved.
 #include "DeskWindow.h"
 #include "DesktopPoseView.h"
 #include "FSClipboard.h"
+#include "FSUndoRedo.h"
 #include "FSUtils.h"
 #include "FilePanelPriv.h"
 #include "FunctionObject.h"
@@ -357,7 +361,7 @@ BPoseView::InitCommon()
 	// static - init just once
 	if (sFontHeight == -1) {
 		be_plain_font->GetHeight(&sFontInfo);
-		sFontHeight = sFontInfo.ascent + sFontInfo.descent + 1;
+		sFontHeight = ceilf(sFontInfo.ascent + sFontInfo.descent) + 1;
 	}
 
 	// init things related to laying out items
@@ -552,20 +556,15 @@ BPoseView::RestoreState(AttributeStreamNode* node)
 		const char* viewStateAttr;
 		const char* viewStateAttrForeign;
 
-		if (TargetModel() != NULL && TargetModel()->IsRoot()) {
-			viewStateAttr = kAttrDisksViewState;
-			viewStateAttrForeign = kAttrDisksViewStateForeign;
-		} else {
-			viewStateAttr = ViewStateAttributeName();
-			viewStateAttrForeign = ForeignViewStateAttributeName();
-		}
+		viewStateAttr = ViewStateAttributeName();
+		viewStateAttrForeign = ForeignViewStateAttributeName();
 
-		bool wrongEndianness = false;
+		bool wrongEndian = false;
 		const char* name = viewStateAttr;
 		size_t size = (size_t)node->Contains(name, B_RAW_TYPE);
 		if (!size) {
 			name = viewStateAttrForeign;
-			wrongEndianness = true;
+			wrongEndian = true;
 			size = (size_t)node->Contains(name, B_RAW_TYPE);
 		}
 
@@ -578,12 +577,10 @@ BPoseView::RestoreState(AttributeStreamNode* node)
 				BMallocIO stream;
 				stream.WriteAt(0, buffer, size);
 				stream.Seek(0, SEEK_SET);
-				BViewState* viewstate
-					= BViewState::InstantiateFromStream(&stream,
-						wrongEndianness);
-				if (viewstate) {
+				BViewState* state = BViewState::InstantiateFromStream(&stream, wrongEndian);
+				if (state != NULL) {
 					delete fViewState;
-					fViewState = viewstate;
+					fViewState = state;
 				}
 			}
 			delete[] buffer;
@@ -672,15 +669,24 @@ BPoseView::SetupDefaultColumnsIfNeeded()
 const char*
 BPoseView::ViewStateAttributeName() const
 {
-	return IsDesktopView() ? kAttrDesktopViewState : kAttrViewState;
+	if (IsDesktopView())
+		return kAttrDesktopViewState;
+	else if (TargetModel()->IsRoot())
+		return kAttrDisksViewState;
+	else
+		return kAttrViewState;
 }
 
 
 const char*
 BPoseView::ForeignViewStateAttributeName() const
 {
-	return IsDesktopView() ? kAttrDesktopViewStateForeign
-		: kAttrViewStateForeign;
+	if (IsDesktopView())
+		return kAttrDesktopViewStateForeign;
+	else if (TargetModel()->IsRoot())
+		return kAttrDisksViewStateForeign;
+	else
+		return kAttrViewStateForeign;
 }
 
 
@@ -736,13 +742,8 @@ BPoseView::SaveState(AttributeStreamNode* node)
 
 	const char* viewStateAttr;
 	const char* viewStateAttrForeign;
-	if (TargetModel() != NULL && TargetModel()->IsRoot()) {
-		viewStateAttr = kAttrDisksViewState;
-		viewStateAttrForeign = kAttrDisksViewStateForeign;
-	} else {
-		viewStateAttr = ViewStateAttributeName();
-		viewStateAttrForeign = ForeignViewStateAttributeName();
-	}
+	viewStateAttr = ViewStateAttributeName();
+	viewStateAttrForeign = ForeignViewStateAttributeName();
 
 	node->Write(viewStateAttr, viewStateAttrForeign, B_RAW_TYPE,
 		stream.Position(), stream.Buffer());
@@ -819,10 +820,15 @@ BPoseView::SavePoseLocations(BRect* frameIfDesktop)
 			Model* model = pose->TargetModel();
 			poseInfo.fInvisible = false;
 
-			if (model->IsRoot())
+			// Root and Trash pose are on the Desktop
+			if (model->IsRoot() || (model->IsTrash() && isDesktop))
 				poseInfo.fInitedDirectory = targetModel->NodeRef()->vnode();
 			else
 				poseInfo.fInitedDirectory = model->EntryRef()->vdirectory();
+
+			// Trash pose should be invisible except on the Desktop
+			if (model->IsTrash() && !IsVolumesRoot())
+				poseInfo.fInvisible = true;
 
 			poseInfo.fLocation = pose->Location(this);
 
@@ -881,7 +887,7 @@ BPoseView::SavePoseLocations(BRect* frameIfDesktop)
 						B_RAW_TYPE, 0, extendedPoseInfo, extendedPoseInfoSize)
 							== (ssize_t)extendedPoseInfoSize) {
 						// nuke opposite endianness
-						deskDir.RemoveAttr(kAttrExtendedDisksPoseInfoForegin);
+						deskDir.RemoveAttr(kAttrExtendedDisksPoseInfoForeign);
 					}
 				}
 			} else {
@@ -897,7 +903,7 @@ BPoseView::SavePoseLocations(BRect* frameIfDesktop)
 
 				if (isDesktop) {
 					model->WriteAttrKillForeign(kAttrExtendedPoseInfo,
-						kAttrExtendedPoseInfoForegin,
+						kAttrExtendedPoseInfoForeign,
 						B_RAW_TYPE, 0, extendedPoseInfo,
 						extendedPoseInfoSize);
 				}
@@ -1006,13 +1012,17 @@ BPoseView::Pulse()
 void
 BPoseView::ScrollTo(BPoint where)
 {
+	// never scroll Desktop
+	if (IsDesktopView())
+		return;
+
 	_inherited::ScrollTo(where);
 
 	// keep the view state in sync
 	if (ViewMode() == kListMode)
 		fViewState->SetListOrigin(LeftTop());
 	else
-		fViewState->SetIconOrigin(LeftTop());
+		fViewState->SetIconOrigin(Extent().LeftTop());
 }
 
 
@@ -1067,12 +1077,12 @@ BPoseView::SetIconPoseHeight()
 	switch (ViewMode()) {
 		case kIconMode:
 			// IconSize should already be set in MessageReceived()
-			fIconPoseHeight = IconSizeInt() + sFontHeight + 1;
+			fIconPoseHeight = IconSizeInt() + sFontHeight;
 			break;
 
 		case kMiniIconMode:
 			fViewState->SetIconSize(B_MINI_ICON);
-			fIconPoseHeight = std::max((float)IconSizeInt(), sFontHeight + 1);
+			fIconPoseHeight = std::max((float)IconSizeInt(), sFontHeight);
 			break;
 
 		case kListMode:
@@ -1282,6 +1292,17 @@ BPoseView::WatchNewNode(const node_ref* item, uint32 mask, BMessenger messenger)
 
 	return result;
 }
+
+
+status_t
+BPoseView::StopWatchingNode(const node_ref* item)
+{
+	if (WatchNewNodeMask() == 0)
+		return B_OK;
+
+	return watch_node(item, B_STOP_WATCHING, this);
+}
+
 
 
 struct AddPosesParams {
@@ -1714,7 +1735,7 @@ BPoseView::AddTrashPoses()
 	BVolume volume;
 	BObjectList<node_ref, true> seen(4);
 	while (volRoster.GetNextVolume(&volume) == B_OK) {
-		if (volume.IsReadOnly())
+		if (volume.IsReadOnly() || volume.Capacity() == 0)
 			continue;
 
 		BDirectory trashDir;
@@ -1891,22 +1912,25 @@ BPoseView::RemoveRootPose()
 void
 BPoseView::CreateTrashPose()
 {
-	BVolume boot;
-	if (BVolumeRoster().GetBootVolume(&boot) == B_OK) {
-		BDirectory trash;
-		BEntry entry;
-		node_ref nref;
-		if (FSGetTrashDir(&trash, boot.Device()) == B_OK
-			&& trash.GetEntry(&entry) == B_OK
-			&& entry.GetNodeRef(&nref) == B_OK) {
-			WatchNewNode(&nref, B_WATCH_ATTR, BMessenger(this));
-				// redraw Trash icon when attribute changes
-			Model* model = new Model(&entry);
-			PoseInfo info;
-			ReadPoseInfo(model, &info);
-			CreatePose(model, &info, false, NULL, NULL, true);
-		}
-	}
+	BPath path;
+	if (find_directory(B_TRASH_DIRECTORY, &path) != B_OK)
+		return;
+
+	BDirectory trashDir(path.Path());
+	BEntry entry;
+	if (trashDir.GetEntry(&entry) != B_OK)
+		return;
+
+	// redraw Trash icon when attribute changes
+	node_ref nref;
+	if (entry.GetNodeRef(&nref) == B_OK)
+		WatchNewNode(&nref, B_WATCH_ATTR, BMessenger(this));
+
+	Model* trashModel = new Model(&entry);
+	PoseInfo poseInfo;
+	ReadPoseInfo(trashModel, &poseInfo);
+
+	CreatePose(trashModel, &poseInfo, false, NULL, NULL, true);
 }
 
 
@@ -2086,7 +2110,7 @@ BPoseView::CreatePoses(Model** models, PoseInfo* poseInfoArray, int32 count,
 		// pose adopts model and deletes it when done
 		if (fInsertedNodes.Contains(*(model->NodeRef()))
 				|| FindZombie(model->NodeRef())) {
-			watch_node(model->NodeRef(), B_STOP_WATCHING, this);
+			StopWatchingNode(model->NodeRef());
 			delete model;
 			if (resultingPoses)
 				resultingPoses[modelIndex] = NULL;
@@ -2361,12 +2385,10 @@ BPoseView::MessageReceived(BMessage* message)
 			AddPosesCompleted();
 			break;
 
-		case kRestoreBackgroundImage:
-			ContainerWindow()->UpdateBackgroundImage();
-			break;
-
 		case B_META_MIME_CHANGED:
 			NoticeMetaMimeChanged(message);
+			if (Window() != NULL)
+				Window()->MessageReceived(message);
 			break;
 
 		case B_NODE_MONITOR:
@@ -3090,26 +3112,24 @@ BPoseView::ReadPoseInfo(Model* model, PoseInfo* poseInfo)
 		return;
 
 	ReadAttrResult result = kReadAttrFailed;
-	bool isTrash = model->IsTrash() && IsDesktopView();
 
 	// special case the "root" disks icon
-	// as well as the trash on desktop
-	if (model->IsRoot() || isTrash) {
-		BDirectory dir;
-		if (FSGetDeskDir(&dir) == B_OK) {
-			const char* poseInfoAttr = isTrash
-				? kAttrTrashPoseInfo
-				: kAttrDisksPoseInfo;
-			const char* poseInfoAttrForeign = isTrash
-				? kAttrTrashPoseInfoForeign
-				: kAttrDisksPoseInfoForeign;
-			result = ReadAttr(&dir, poseInfoAttr, poseInfoAttrForeign,
-				B_RAW_TYPE, 0, poseInfo, sizeof(*poseInfo),
-				&PoseInfo::EndianSwap);
+	// as well as the Trash on Desktop
+	if (model->IsRoot() || (model->IsTrash() && IsVolumesRoot())) {
+		BDirectory desktopDir;
+		if (FSGetDeskDir(&desktopDir) == B_OK) {
+			const char* poseInfoAttr = model->IsTrash()
+				? kAttrTrashPoseInfo : kAttrDisksPoseInfo;
+			const char* poseInfoAttrForeign = model->IsTrash()
+				? kAttrTrashPoseInfoForeign : kAttrDisksPoseInfoForeign;
+			result = ReadAttr(&desktopDir, poseInfoAttr, poseInfoAttrForeign,
+				B_RAW_TYPE, 0, poseInfo, sizeof(*poseInfo), &PoseInfo::EndianSwap);
 		}
 	} else {
 		ASSERT(model->IsNodeOpen());
 
+
+		time_t now = time(NULL);
 		for (int32 count = 10; count >= 0; count--) {
 			if (model->Node() == NULL)
 				break;
@@ -3129,19 +3149,14 @@ BPoseView::ReadPoseInfo(Model* model, PoseInfo* poseInfo)
 			if (ViewMode() == kListMode)
 				break;
 
-			#ifndef __VOS__
-			const StatStruct* stat = model->StatBuf();
-			if (stat->st_crtime < now - 5 || stat->st_crtime > now)
+			time_t created = model->CreationTime();
+			if (created < now - 5 || created > now)
 				break;
 
 			//PRINT(("retrying to read pose info for %s, %d\n",
 			//	model->Name(), count));
 
 			snooze(10000);
-			#else
-			// VOS doesn't have st_crtime, so don't retry
-			break;
-			#endif
 		}
 	}
 
@@ -3211,12 +3226,12 @@ BPoseView::ReadExtendedPoseInfo(Model* model)
 		BDirectory dir;
 		if (FSGetDeskDir(&dir) == B_OK) {
 			extendedPoseInfoAttrName = kAttrExtendedDisksPoseInfo;
-			extendedPoseInfoAttrForeignName = kAttrExtendedDisksPoseInfoForegin;
+			extendedPoseInfoAttrForeignName = kAttrExtendedDisksPoseInfoForeign;
 		} else
 			return NULL;
 	} else {
 		extendedPoseInfoAttrName = kAttrExtendedPoseInfo;
-		extendedPoseInfoAttrForeignName = kAttrExtendedPoseInfoForegin;
+		extendedPoseInfoAttrForeignName = kAttrExtendedPoseInfoForeign;
 	}
 
 	type_code type;
@@ -3261,7 +3276,7 @@ BPoseView::SetViewMode(uint32 newMode)
 	uint32 lastIconMode = fViewState->LastIconMode();
 	if (newMode != kListMode) {
 		fViewState->SetLastIconMode(newMode);
-		if (oldMode == kIconMode)
+		if (newMode == kIconMode)
 			fViewState->SetLastIconSize(fViewState->IconSize());
 	}
 
@@ -3581,7 +3596,9 @@ BPoseView::NewFileFromTemplate(const BMessage* message)
 	// TODO: Localise this
 	char fileName[B_FILE_NAME_LENGTH] = "New ";
 	strlcat(fileName, message->FindString("name"), sizeof(fileName));
-	FSMakeOriginalName(fileName, &destDir, " copy");
+	BString suffix(" ");
+	suffix << B_TRANSLATE_COMMENT("copy", "filename copy");
+	FSMakeOriginalName(fileName, &destDir, suffix);
 
 	entry_ref srcRef;
 	message->FindRef("refs_template", &srcRef);
@@ -3619,8 +3636,6 @@ BPoseView::NewFileFromTemplate(const BMessage* message)
 		delete[] buffer;
 	}
 
-	// todo: create an UndoItem
-
 	// copy the attributes from the template file
 	BNode srcNode(&srcRef);
 	BNode destNode(&destDir, fileName);
@@ -3628,6 +3643,9 @@ BPoseView::NewFileFromTemplate(const BMessage* message)
 
 	BEntry entry(&destDir, fileName);
 	entry.GetRef(&destEntryRef);
+
+	if (dir.InitCheck() != B_OK)
+		NewFileTemplateUndo undo(destEntryRef, srcRef);
 
 	// try to place new item at click point or under mouse if possible
 	PlaceFolder(&destEntryRef, message);
@@ -5400,7 +5418,8 @@ BPoseView::MoveSelectionInto(Model* destFolder, BContainerWindow* srcWindow,
 			moveMode = kCreateRelativeLink;
 		else if (createLink)
 			moveMode = kCreateLink;
-		else if (!CheckDevicesEqual(srcList->ItemAt(0), destFolder))
+		else if (!CheckDevicesEqual(srcList->ItemAt(0), destFolder)
+			|| IsSystemDragOutOfSystem(srcList, destFolder))
 			moveMode = kCopySelectionTo;
 		else
 			moveMode = kMoveSelectionTo;
@@ -5775,10 +5794,21 @@ BPoseView::FSNotification(const BMessage* message)
 					&& ((!volume.IsShared() || settings.MountSharedVolumesOntoDesktop())))) {
 				CreateVolumePose(&volume);
 			} else if (targetModel->IsTrash()) {
-				// add trash items from newly mounted volume
+				// add trash items from newly mounted volume, unless it
+				// falls back to the home trash already shown
 				BDirectory trashDir;
+				BDirectory homeTrashDir;
+				node_ref trashNode;
+				node_ref homeTrashNode;
 				BEntry entry;
+				const char* home = getenv("HOME");
 				if (FSGetTrashDir(&trashDir, volume.Device()) == B_OK
+					&& trashDir.GetNodeRef(&trashNode) == B_OK
+					&& (home == NULL
+						|| FSGetTrashDir(&homeTrashDir,
+							dev_for_path(home)) != B_OK
+						|| homeTrashDir.GetNodeRef(&homeTrashNode) != B_OK
+						|| trashNode != homeTrashNode)
 					&& trashDir.GetEntry(&entry) == B_OK) {
 					Model model(&entry);
 					if (model.InitCheck() == B_OK)
@@ -5834,17 +5864,23 @@ BPoseView::CreateSymlinkPoseTarget(Model* symlink)
 	// and stall on magic-link opens; /dev/disk/by-id/*, by-uuid/*, by-path/*
 	// all resolve to the same underlying device inode, causing duplicate
 	// fsnotify mark installs that trip the kernel's EEXIST race path.
-	// Skip resolution; the pose still appears with the generic symlink icon.
+	// Resolve them for the icon only, without watching the target.
 	const entry_ref* sref = symlink->EntryRef();
 	BPath symPath(sref);
-	if (symPath.InitCheck() == B_OK) {
+	BPath parentPath;
+	if (symPath.InitCheck() == B_OK && symPath.GetParent(&parentPath) == B_OK) {
 		struct statfs sfs;
-		if (statfs(symPath.Path(), &sfs) == 0) {
+		if (statfs(parentPath.Path(), &sfs) == 0) {
 			switch ((unsigned long)sfs.f_type) {
 				case PROC_SUPER_MAGIC:
 				case SYSFS_MAGIC:
 				case TMPFS_MAGIC:
+				{
+					BEntry entry(sref, true);
+					if (entry.InitCheck() == B_OK && entry.Exists())
+						symlink->SetLinkTo(new Model(&entry));
 					return true;
+				}
 			}
 		}
 	}
@@ -5902,7 +5938,7 @@ BPoseView::EntryCreated(const node_ref* dirNode, const node_ref* itemNode,
 	ReadPoseInfo(model, &poseInfo);
 
 	if (!PoseVisible(model, &poseInfo)) {
-		watch_node(model->NodeRef(), B_STOP_WATCHING, this);
+		StopWatchingNode(model->NodeRef());
 		delete model;
 		return NULL;
 	}
@@ -5910,7 +5946,7 @@ BPoseView::EntryCreated(const node_ref* dirNode, const node_ref* itemNode,
 	// model is a symlink, cache up the symlink target or scrap
 	// everything if target is invisible
 	if (model->IsSymLink() && !CreateSymlinkPoseTarget(model)) {
-		watch_node(model->NodeRef(), B_STOP_WATCHING, this);
+		StopWatchingNode(model->NodeRef());
 		delete model;
 		return NULL;
 	}
@@ -6024,6 +6060,14 @@ BPoseView::EntryMoved(const BMessage* message)
 	} else if (oldDir.directory() == thisDirNode.node()) {
 		int32 fallbackIndex;
 		BPose* fallbackPose = fPoseList->FindPose(&itemNode, &fallbackIndex);
+		// a renaming move (trash collision) still lists the old name
+		const char* fromName;
+		if (fallbackPose == NULL
+			&& message->FindString("from name", &fromName) == B_OK
+			&& fromName[0] != '\0') {
+			fallbackPose = fPoseList->FindPoseByFileName(fromName,
+				&fallbackIndex);
+		}
 		if (fallbackPose == NULL && name != NULL && name[0] != '\0')
 			fallbackPose = fPoseList->FindPoseByFileName(name, &fallbackIndex);
 		if (fallbackPose != NULL) {
@@ -6427,13 +6471,10 @@ BPoseView::MoveListToTrash(BObjectList<entry_ref, true>* list, bool selectNext,
 		// new owning list of tasks
 
 	// first move selection to trash,
-	if (deleteDirectly) {
-		taskList->AddItem(NewFunctionObject(FSDeleteRefList, list,
-			false, true));
-	} else {
-		taskList->AddItem(NewFunctionObject(FSMoveToTrash, list,
-			(BList*)NULL, false));
-	}
+	if (deleteDirectly)
+		taskList->AddItem(NewFunctionObject(FSDeleteRefList, list, false, true));
+	else
+		taskList->AddItem(NewFunctionObject(FSMoveToTrash, list, (BList*)NULL, false));
 
 	if (selectNext && ViewMode() == kListMode) {
 		// next, if in list view mode try selecting the next item after
@@ -6508,6 +6549,16 @@ CheckVolumeReadOnly(const entry_ref* ref)
 			B_TRANSLATE("Files cannot be moved or deleted from a read-only "
 			"volume."), B_TRANSLATE("Cancel"), NULL, NULL, B_WIDTH_AS_USUAL,
 			B_STOP_ALERT);
+		alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
+		alert->Go();
+		return false;
+	}
+
+	if (!FSParentIsWritable(ref)) {
+		BAlert* alert = new BAlert("",
+			B_TRANSLATE("You do not have permission to move or delete files "
+			"in this folder."), B_TRANSLATE("Cancel"), NULL, NULL,
+			B_WIDTH_AS_USUAL, B_STOP_ALERT);
 		alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
 		alert->Go();
 		return false;
@@ -7758,7 +7809,7 @@ BPoseView::MouseUp(BPoint where)
 		// we need lastButtons for right button mouse-up tracking,
 		// because there's currently no way to know wich buttons were
 		// released in BView::MouseUp (unlike BView::KeyUp)
-		pose->MouseUp(BPoint(0, index * fListElemHeight), this, where, index);
+		pose->DoMouseUp(this, BPoint(0, index * fListElemHeight), where);
 	}
 
 	// Showing the pose context menu is done on mouse up (or long click)
@@ -8322,7 +8373,7 @@ BPoseView::DeleteSymLinkPoseTarget(const node_ref* itemNode, BPose* pose, int32 
 bool
 BPoseView::DeletePose(const node_ref* itemNode, BPose* pose, int32 index)
 {
-	watch_node(itemNode, B_STOP_WATCHING, this);
+	StopWatchingNode(itemNode);
 
 	if (pose == NULL)
 		pose = fPoseList->FindPose(itemNode, &index);
@@ -9247,7 +9298,8 @@ BPoseView::CanMoveToTrashOrDuplicate() const
 	if (selectCount < 1)
 		return false;
 
-	if (SelectedVolumeIsReadOnly())
+	if (SelectedVolumeIsReadOnly()
+		|| !FSParentIsWritable(fSelectionList->FirstItem()->TargetModel()->EntryRef()))
 		return false;
 
 	BPose* pose;

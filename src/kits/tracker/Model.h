@@ -117,6 +117,7 @@ public:
 	const entry_ref* EntryRef() const;
 	const node_ref* NodeRef() const;
 	const StatStruct* StatBuf() const;
+	time_t CreationTime() const;
 
 	BNode* Node() const;
 		// returns NULL if not open
@@ -172,10 +173,12 @@ public:
 	// Node monitor update call
 	void UpdateEntryRef(const node_ref* dirRef, const char* name);
 	bool AttrChanged(const char* attrName);
-		// returns true if pose needs to update it's icon, etc.
+		// returns true if pose needs to update its icon, etc.
 		// pass null to force full update
+	bool IconAttrChanged(const char* attrName);
+		// returns true if pose needs to update its icon
 	bool StatChanged();
-		// returns true if pose needs to update it's icon
+		// returns true if pose needs to update its icon
 
 	status_t WatchVolumeAndMountPoint(uint32, BHandler*);
 		// correctly handles boot volume name watching
@@ -220,6 +223,8 @@ public:
 	bool HasLocalizedName() const;
 
 private:
+	status_t _ReadStat(const BStatable* node);
+	void _SetStat(const struct statx& stx);
 	status_t OpenNodeCommon(bool writable);
 	void SetupBaseType();
 	void FinishSettingUpType();
@@ -255,6 +260,7 @@ private:
 
 	entry_ref fEntryRef;
 	StatStruct fStatBuf;
+	time_t fCreationTime = 0;
 	node_ref fNodeRef;
 	BString fMimeType;
 		// should use string that may be shared for common types
@@ -361,6 +367,13 @@ inline const StatStruct*
 Model::StatBuf() const
 {
 	return &fStatBuf;
+}
+
+
+inline time_t
+Model::CreationTime() const
+{
+	return fCreationTime;
 }
 
 

@@ -1,7 +1,7 @@
 /*
  * Copyright 2015-2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2025-2026, The Vitruvian Project. All Rights Reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #ifndef _MEDIA2_SIMPLE_MEDIA_UNIT_H
@@ -38,6 +38,8 @@ public:
 			void					SetFormatHook(format_hook hook, void* cookie);
 
 			using BMediaUnit::BufferFor;
+
+	virtual	status_t				Start() override;
 
 protected:
 	virtual	void					HandleStart(bigtime_t performanceTime) override;

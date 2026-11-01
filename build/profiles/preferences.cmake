@@ -3,10 +3,12 @@ set(SYSTEM_PREFERENCES_TARGETS
 	Appearance
 	Backgrounds
 	Bluetooth
+	Camera_prefs
 	DataTranslations
 	Deskbar_prefs
 	FileTypes
 	Input
+	Joysticks
 	Keymap
 	Locale
 	Media
@@ -27,10 +29,12 @@ set(SYSTEM_PREFERENCES
 	Appearance
 	Backgrounds
 	Bluetooth
+	Camera
 	DataTranslations
 	Deskbar
 	FileTypes
 	Input
+	Joysticks
 	Keymap
 	Locale
 	Media

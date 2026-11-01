@@ -1,4 +1,5 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2001-2007, Haiku.
  * Distributed under the terms of the MIT License.
  *
@@ -15,9 +16,11 @@
 #include <LinkReceiver.h>
 #include <LinkSender.h>
 
+
 class BShape;
 class BString;
 class BGradient;
+
 
 /*
  * Error checking rules: (for if you don't want to check every return code)

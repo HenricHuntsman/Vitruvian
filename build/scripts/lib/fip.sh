@@ -24,8 +24,8 @@ _fip_die()  { printf '[fip] ERROR: %s\n' "$*" >&2; return 1; }
 _fip_apply_compat_patches() {
     _dir="$1"
 
-    # compiler-gcc{12,13,14}.h shims; the tree only ships gcc3/4.
-    for _ver in 12 13 14; do
+    # compiler-gcc{12..16}.h shims; the tree only ships gcc3/4. Must cover the builder's cross-GCC major.
+    for _ver in 12 13 14 15 16 17; do
         _h="$_dir/include/linux/compiler-gcc${_ver}.h"
         if [ ! -f "$_h" ]; then
             cat > "$_h" <<'SHIMEOF'
@@ -47,13 +47,8 @@ SHIMEOF
     find "$_dir" -name "Makefile" \
         -exec sed -i 's/-Wno-error-implicit-function-declaration/-Wno-error=implicit-function-declaration/g' {} \; 2>/dev/null || true
 
-    # 2b. GCC 14 promotes int-conversion (pointer -> integer in initializers)
-    #     to a hard error. Measured 2026-09-27 on the odroid-n2 proof builds:
-    #     attempts 1-3 all died at common/bootm.c:333/350 ("initialization of
-    #     'long long unsigned int' from 'void *'"). The old tree initializes
-    #     u64 fields from pointer values on purpose; -Wno-error above does NOT
-    #     neutralize GCC 14's promoted diagnostics, so disable the promoted
-    #     check explicitly on the KBUILD_CFLAGS line.
+    # GCC 14 makes int-conversion a hard error; the old tree initializes u64 from pointers on purpose,
+    # and -Wno-error does not cover promoted diagnostics, so disable it on KBUILD_CFLAGS.
     find "$_dir" -maxdepth 1 -name "Makefile" \
         -exec sed -i '/^KBUILD_CFLAGS.*:=/s/:=/:= -Wno-error=int-conversion /' {} \; 2>/dev/null || true
 
@@ -61,6 +56,44 @@ SHIMEOF
     # must keep its own arm-none-eabi- values.
     _scp_mk="$_dir/arch/arm/cpu/armv8/g12b/firmware/scp_task/Makefile"
     if [ -f "$_scp_mk" ]; then
+        # gcc-arm-none-eabi (>=12) ships no stdint.h and newlib is not installable; write a minimal
+        # freestanding one from GCC builtin macros on the scp_task -I path.
+        mkdir -p "$_dir/scp-shim"
+        [ -f "$_dir/scp-shim/stdint.h" ] || cat > "$_dir/scp-shim/stdint.h" <<'STDINT_EOF'
+/* Minimal freestanding stdint.h for BL301 scp_task. Debian's
+ * gcc-arm-none-eabi ships none and newlib is unavailable in the build
+ * image; types come from GCC builtin macros so they match the target.
+ * Written by the fip.sh compatibility path. */
+#ifndef VOS_SCP_STDINT_H
+#define VOS_SCP_STDINT_H
+typedef __INT8_TYPE__ int8_t;
+typedef __UINT8_TYPE__ uint8_t;
+typedef __INT16_TYPE__ int16_t;
+typedef __UINT16_TYPE__ uint16_t;
+typedef __INT32_TYPE__ int32_t;
+typedef __UINT32_TYPE__ uint32_t;
+typedef __INT64_TYPE__ int64_t;
+typedef __UINT64_TYPE__ uint64_t;
+typedef __INTPTR_TYPE__ intptr_t;
+typedef __UINTPTR_TYPE__ uintptr_t;
+typedef __INTMAX_TYPE__ intmax_t;
+typedef __UINTMAX_TYPE__ uintmax_t;
+#define INT8_MIN (-__INT8_MAX__ - 1)
+#define INT16_MIN (-__INT16_MAX__ - 1)
+#define INT32_MIN (-__INT32_MAX__ - 1)
+#define INT64_MIN (-__INT64_MAX__ - 1)
+#define INT8_MAX __INT8_MAX__
+#define INT16_MAX __INT16_MAX__
+#define INT32_MAX __INT32_MAX__
+#define INT64_MAX __INT64_MAX__
+#define UINT8_MAX (__UINT8_MAX__)
+#define UINT16_MAX (__UINT16_MAX__)
+#define UINT32_MAX (__UINT32_MAX__)
+#define UINT64_MAX (__UINT64_MAX__)
+#endif
+STDINT_EOF
+        grep -q 'scp-shim' "$_scp_mk" 2>/dev/null ||
+            printf '\nCFLAGS += -I$(buildsrc)/scp-shim\n' >> "$_scp_mk"
         sed -i 's/^CROSS_COMPILE=arm-none-eabi-/override CROSS_COMPILE=arm-none-eabi-/' "$_scp_mk"
         sed -i 's/^CPP=\$(CROSS_COMPILE)cpp/override CPP=\$(CROSS_COMPILE)cpp/' "$_scp_mk"
         sed -i 's/^CC=\$(CROSS_COMPILE)gcc/override CC=\$(CROSS_COMPILE)gcc/' "$_scp_mk"
@@ -147,9 +180,13 @@ fip_amlogic_assemble() {
     _size=$(wc -c < "$_output")
     _fip_log "FIP assembly complete: $_output ($_size bytes)"
 
-    # The AML BootROM magic must sit at offset 0x211 or the image will
-    # not load.
-    if ! dd if="$_output" bs=1 skip=529 count=3 2>/dev/null | grep -q "AML"; then
+    # AML magic must sit at disk offset 0x211; the blob starts at sector 1, so check file offset 529-512 = 17.
+    if ! dd if="$_output" bs=1 skip=17 count=3 2>/dev/null | grep -q "AML"; then
+        # Diagnose before dying.
+        _fip_warn "first bytes of sd_fuse/u-boot.bin:"
+        od -A x -t x1z -N 560 "$_output" 2>/dev/null | tail -8 >&2
+        _fip_warn "AML occurrences (offset: ): $(grep -abo 'AML' "$_output" | head -5 | tr '\n' ' ')"
+        ls -la "$_workdir/sd_fuse/" >&2 2>/dev/null
         _fip_die "AML BootROM signature not found at offset 0x211, refusing."
         return 1
     fi
@@ -233,6 +270,9 @@ fip_licheerv_assemble() {
         fi
 
         _fip_log "Building OpenSBI (PLATFORM=generic)..."
+        # GCC 15+ defaults to C23, where OpenSBI's `typedef int bool;` is a hard error. Force the pre-C23
+        # standard by sed on the single -Werror (a CFLAGS+= would drop the Makefile's -I paths).
+        sed -i 's/ -Werror\b/ -std=gnu11/' "$_opensbi_work/Makefile"
         if ! make -C "$_opensbi_work" \
                 CROSS_COMPILE="$FIP_LICHEERV_CROSS_COMPILE" \
                 PLATFORM=generic \

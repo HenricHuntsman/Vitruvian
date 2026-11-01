@@ -25,7 +25,10 @@ public:
 			const BString*		Get(PartitionReference* ref) const;
 
 private:
-			struct Entry;
+			struct Entry {
+				PartitionReference*	ref;
+				BString				opID;
+			};
 
 			BObjectList<Entry, true> fEntries;
 };
@@ -69,6 +72,19 @@ public:
 									const char* filesystem, const char* value);
 			void				AddSetGptName(const char* id,
 									const char* targetRef, const char* value);
+			void				AddSetType(const char* id,
+									const char* targetRef,
+									const char* type);
+			void				AddSetParameters(const char* id,
+									const char* targetRef,
+									const char* parameters);
+			void				AddSetContentParameters(const char* id,
+									const char* targetRef,
+									const char* filesystem,
+									const char* parameters);
+			void				AddDefrag(const char* id,
+									const char* targetRef,
+									const char* filesystem);
 
 			bool				IsValid() const { return fValid; }
 

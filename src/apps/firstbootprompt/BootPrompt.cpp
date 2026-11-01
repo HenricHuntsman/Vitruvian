@@ -35,7 +35,7 @@ main(int, char **)
 // #pragma mark -
 
 
-const char* kAppSignature = "application/x-vnd.Haiku-FirstBootPrompt";
+const char* kAppSignature = "application/x-vnd.vos-FirstBootPrompt";
 const char* kDeskbarSignature = "application/x-vnd.Be-TSKB";
 
 
@@ -71,14 +71,24 @@ BootPromptApp::MessageReceived(BMessage* message)
 		}
 		case MSG_RUN_INSTALLER:
 		{
-			be_roster->Launch("application/x-vnd.Haiku-Installer");
+			be_roster->Launch("application/x-vnd.vos-Installer");
+			sExitValue = 0;
+			PostMessage(B_QUIT_REQUESTED);
+			break;
+		}
+		case MSG_SETUP_INSTALL:
+		{
+			// The installer in account-only mode, converting this root.
+			char* args[] = { (char*)"Installer", (char*)"--setup-account",
+				NULL };
+			be_roster->Launch("application/x-vnd.vos-Installer", 2, args);
 			sExitValue = 0;
 			PostMessage(B_QUIT_REQUESTED);
 			break;
 		}
 		case MSG_REBOOT_REQUESTED:
 		{
-			BRoster::Private(be_roster).ShutDown(true, false, false);
+			BRoster::Private().ShutDown(true, false, false);
 			sExitValue = -1;
 			break;
 		}

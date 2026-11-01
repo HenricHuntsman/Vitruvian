@@ -67,6 +67,43 @@ arch_to_efi_target() {
     esac
 }
 
+# native_pkg_unpack <chroot-dir>: unpack the downloaded debs with the host dpkg (no qemu for the bulk
+# extraction); maintainer scripts still run in the guest. Needs /proc /dev /sys mounted; host and chroot
+# dpkg must share major.minor or it is refused.
+native_pkg_unpack() {
+    _npu_root="${1:?native_pkg_unpack: chroot dir required}"
+    [ -d "$_npu_root/var/lib/dpkg" ] \
+        || { log_error "native unpack: no dpkg db at $_npu_root/var/lib/dpkg"; return 1; }
+
+    _npu_host="$(dpkg-query -W -f='${Version}' dpkg 2>/dev/null || echo none)"
+    _npu_guest="$(dpkg-query --admindir="$_npu_root/var/lib/dpkg" -W -f='${Version}' dpkg 2>/dev/null || echo none)"
+    _npu_hm="$(printf '%s' "$_npu_host"   | sed 's/-.*//; s/[.][^.]*$//')"
+    _npu_gm="$(printf '%s' "$_npu_guest" | sed 's/-.*//; s/[.][^.]*$//')"
+    if [ "$_npu_host" = none ] || [ "$_npu_guest" = none ] || [ "$_npu_hm" != "$_npu_gm" ]; then
+        log_error "native unpack refused: host dpkg $_npu_host vs chroot dpkg $_npu_guest (major.minor must match)"
+        return 1
+    fi
+
+    _npu_debs=""
+    for _npu_d in "$_npu_root"/var/cache/apt/archives/*.deb; do
+        [ -f "$_npu_d" ] && _npu_debs="$_npu_debs $_npu_d"
+    done
+    # Project debs last: nexus-dkms' preinst needs the kernel headers' files present.
+    for _npu_d in "$_npu_root"/localdeb/*.deb; do
+        [ -f "$_npu_d" ] && _npu_debs="$_npu_debs $_npu_d"
+    done
+    if [ -z "$_npu_debs" ]; then
+        log_error "native unpack: no debs under $_npu_root/var/cache/apt/archives or localdeb"
+        return 1
+    fi
+
+    log_step "Native unpack: $(echo $_npu_debs | wc -w) debs via host dpkg $_npu_host (no qemu)"
+    # --force-depends: Pre-Depends are checked as configured state, which a bulk unpack can't satisfy;
+    # the in-chroot `dpkg --configure -a` that follows sorts it out.
+    # shellcheck disable=SC2086  # word-splitting the deb list is intended
+    sudo dpkg --root="$_npu_root" --unpack --force-depends $_npu_debs
+}
+
 # Debian leaves the sbin dirs off a normal user's PATH, but sfdisk, mke2fs
 # and mkfs.vfat live there.
 case ":$PATH:" in

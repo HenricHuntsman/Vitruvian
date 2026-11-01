@@ -26,7 +26,16 @@
 using namespace ICO;
 
 
-static const rgba32_color kMagicTransparentColor = *(rgba32_color *)&B_TRANSPARENT_MAGIC_RGBA32;
+static rgba32_color
+magicTransparentColor()
+{
+	rgba32_color color;
+	memcpy(&color, &B_TRANSPARENT_MAGIC_RGBA32, sizeof(color));
+	return color;
+}
+
+
+static const rgba32_color kMagicTransparentColor = magicTransparentColor();
 
 
 class TempAllocator {
@@ -516,11 +525,11 @@ ICO::identify(BMessage *settings, BPositionIO &stream, uint8 &type, int32 &bitsP
 
 	if (settings) {
 		// Add page count to ioExtension
-		settings->RemoveName(kDocumentCount);
-		settings->AddInt32(kDocumentCount, header.entry_count);
+		settings->RemoveName(B_TRANSLATOR_EXT_DOCUMENT_COUNT);
+		settings->AddInt32(B_TRANSLATOR_EXT_DOCUMENT_COUNT, header.entry_count);
 
-		// Check if a document index has been specified	
-		if (settings->FindInt32(kDocumentIndex, &iconIndex) == B_OK)
+		// Check if a document index has been specified
+		if (settings->FindInt32(B_TRANSLATOR_EXT_DOCUMENT_INDEX, &iconIndex) == B_OK)
 			iconIndex--;
 		else
 			iconIndex = 0;
@@ -585,8 +594,8 @@ ICO::convert_ico_to_bits(BMessage *settings, BPositionIO &source, BPositionIO &t
 	int32 iconIndex = 0;
 
 	if (settings) {
-		// Check if a document index has been specified	
-		if (settings->FindInt32(kDocumentIndex, &iconIndex) == B_OK)
+		// Check if a document index has been specified
+		if (settings->FindInt32(B_TRANSLATOR_EXT_DOCUMENT_INDEX, &iconIndex) == B_OK)
 			iconIndex--;
 		else
 			iconIndex = 0;

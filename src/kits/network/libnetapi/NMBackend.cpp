@@ -843,6 +843,8 @@ NMBackend::_HandleDeviceAdded(void* deviceRaw)
 	BMessage message((uint32)NOTIFICATION_DEVICE_ADDED);
 	if (path != NULL)
 		message.AddString(kNMFieldPath, path);
+	if (nm_device_get_iface(device) != NULL)
+		message.AddString(kNMFieldInterface, nm_device_get_iface(device));
 	_RefreshSnapshotAndNotify(NOTIFICATION_DEVICE_ADDED, message);
 }
 
@@ -889,6 +891,8 @@ NMBackend::_HandleDeviceRemoved(void* deviceRaw)
 	BMessage message((uint32)NOTIFICATION_DEVICE_REMOVED);
 	if (path != NULL)
 		message.AddString(kNMFieldPath, path);
+	if (nm_device_get_iface(device) != NULL)
+		message.AddString(kNMFieldInterface, nm_device_get_iface(device));
 	_RefreshSnapshotAndNotify(NOTIFICATION_DEVICE_REMOVED, message);
 }
 
@@ -909,6 +913,8 @@ NMBackend::_HandleDeviceStateChanged(void* deviceRaw)
 	BMessage message((uint32)NOTIFICATION_DEVICE_STATE_CHANGED);
 	if (path != NULL)
 		message.AddString(kNMFieldPath, path);
+	if (nm_device_get_iface(device) != NULL)
+		message.AddString(kNMFieldInterface, nm_device_get_iface(device));
 	message.AddUInt32(kNMFieldState, nm_device_get_state(device));
 	_RefreshSnapshotAndNotify(NOTIFICATION_DEVICE_STATE_CHANGED, message);
 }
@@ -925,6 +931,8 @@ NMBackend::_HandleDeviceIPConfigChanged(void* deviceRaw)
 	BMessage message((uint32)NOTIFICATION_DEVICE_IP_CHANGED);
 	if (path != NULL)
 		message.AddString(kNMFieldPath, path);
+	if (nm_device_get_iface(device) != NULL)
+		message.AddString(kNMFieldInterface, nm_device_get_iface(device));
 	_RefreshSnapshotAndNotify(NOTIFICATION_DEVICE_IP_CHANGED, message);
 }
 
@@ -2464,8 +2472,11 @@ _RunDisconnectVPN(gpointer data)
 		message.AddString("reason", "VPN connection is not active");
 	} else {
 		GError* error = NULL;
+		// Deprecated sync call kept; async changes the control flow.
+		G_GNUC_BEGIN_IGNORE_DEPRECATIONS
 		if (!nm_client_deactivate_connection(job->nmClient, target, NULL,
 				&error)) {
+		G_GNUC_END_IGNORE_DEPRECATIONS
 			message.AddString("reason",
 				error != NULL ? error->message : "unknown error");
 			if (error != NULL)
@@ -2996,10 +3007,13 @@ static gboolean
 _RunSetEnabled(gpointer data)
 {
 	_SetEnabledJob* job = (_SetEnabledJob*)data;
+	// Deprecated setters kept; async replacements change the control flow.
+	G_GNUC_BEGIN_IGNORE_DEPRECATIONS
 	if (job->wireless)
 		nm_client_wireless_set_enabled(job->nmClient, job->enabled);
 	else
 		nm_client_networking_set_enabled(job->nmClient, job->enabled, NULL);
+	G_GNUC_END_IGNORE_DEPRECATIONS
 	delete job;
 	return G_SOURCE_REMOVE;
 }
@@ -3870,7 +3884,9 @@ _FillMobileFromConnection(NMConnection* connection, bool connected,
 		const char* apn = nm_setting_gsm_get_apn(gsm);
 		const char* user = nm_setting_gsm_get_username(gsm);
 		const char* password = nm_setting_gsm_get_password(gsm);
+		G_GNUC_BEGIN_IGNORE_DEPRECATIONS
 		const char* number = nm_setting_gsm_get_number(gsm);
+		G_GNUC_END_IGNORE_DEPRECATIONS
 		reply->AddString(kNMFieldMobileAPN, apn != NULL ? apn : "");
 		reply->AddString(kNMFieldMobileUser, user != NULL ? user : "");
 		reply->AddString(kNMFieldMobilePassword,

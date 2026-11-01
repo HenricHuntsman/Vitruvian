@@ -28,6 +28,7 @@
  */
 
 #include "modeset.h"
+#include "DrmCompat.h"
 
 #define _GNU_SOURCE
 #include <errno.h>
@@ -587,6 +588,21 @@ int modeset_create_fb(int fd, struct modeset_dev *dev)
 	struct drm_mode_map_dumb mreq;
 	int ret;
 
+	// A rebuild replaces the buffer; release the previous mapping and
+	// handle or every SetMode leaks them and the virtual mapping grows
+	// until the OOM killer takes the server.
+	if (dev->map != NULL && dev->map != MAP_FAILED) {
+		munmap(dev->map, dev->size);
+		dev->map = NULL;
+	}
+	if (dev->handle != 0) {
+		struct drm_mode_destroy_dumb dreq;
+		memset(&dreq, 0, sizeof(dreq));
+		dreq.handle = dev->handle;
+		drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
+		dev->handle = 0;
+	}
+
 	memset(&creq, 0, sizeof(creq));
 	creq.width = dev->width;
 	creq.height = dev->height;
@@ -664,6 +680,19 @@ int modeset_create_back_fb(int fd, struct modeset_dev *dev)
 	struct drm_mode_create_dumb creq;
 	struct drm_mode_map_dumb mreq;
 	int ret;
+
+	// Same rebuild leak as the front buffer; see modeset_create_fb().
+	if (dev->back_map != NULL && dev->back_map != MAP_FAILED) {
+		munmap(dev->back_map, dev->back_size);
+		dev->back_map = NULL;
+	}
+	if (dev->back_handle != 0) {
+		struct drm_mode_destroy_dumb dreq;
+		memset(&dreq, 0, sizeof(dreq));
+		dreq.handle = dev->back_handle;
+		drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
+		dev->back_handle = 0;
+	}
 
 	memset(&creq, 0, sizeof(creq));
 	creq.width = dev->width;
@@ -1144,6 +1173,7 @@ modeset_create_gbm_fb(int fd, struct gbm_device* gbm,
 	uint32_t fb_id = 0;
 
 	int ret;
+#ifdef HAVE_DRM_ADDFB2_MODS
 	if (modifier != DRM_FORMAT_MOD_LINEAR && modifier != DRM_FORMAT_MOD_INVALID) {
 		uint32_t handles[4] = { handle };
 		uint32_t pitches[4] = { stride };
@@ -1152,7 +1182,9 @@ modeset_create_gbm_fb(int fd, struct gbm_device* gbm,
 		ret = drmModeAddFB2WithModifiers(fd, dev->width, dev->height,
 			DRM_FORMAT_XRGB8888, handles, pitches, offsets, modifiers,
 			&fb_id, DRM_MODE_FB_MODIFIERS);
-	} else {
+	} else
+#endif
+	{
 		uint32_t handles[4] = { handle };
 		uint32_t pitches[4] = { stride };
 		uint32_t offsets[4] = { 0 };
@@ -1218,6 +1250,7 @@ modeset_create_render_fb(int fd, struct gbm_device* gbm,
 	uint32_t fb_id = 0;
 
 	int ret;
+#ifdef HAVE_DRM_ADDFB2_MODS
 	if (modifier != DRM_FORMAT_MOD_LINEAR && modifier != DRM_FORMAT_MOD_INVALID) {
 		uint32_t handles[4] = { handle };
 		uint32_t pitches[4] = { stride };
@@ -1226,7 +1259,9 @@ modeset_create_render_fb(int fd, struct gbm_device* gbm,
 		ret = drmModeAddFB2WithModifiers(fd, dev->width, dev->height,
 			DRM_FORMAT_XRGB8888, handles, pitches, offsets, modifiers,
 			&fb_id, DRM_MODE_FB_MODIFIERS);
-	} else {
+	} else
+#endif
+	{
 		uint32_t handles[4] = { handle };
 		uint32_t pitches[4] = { stride };
 		uint32_t offsets[4] = { 0 };

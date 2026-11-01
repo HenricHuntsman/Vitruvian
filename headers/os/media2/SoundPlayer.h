@@ -1,7 +1,7 @@
 /*
  * Copyright 2025-2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2025-2026, The Vitruvian Project. All Rights Reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #ifndef _MEDIA2_SOUND_PLAYER_H
@@ -33,6 +33,12 @@ public:
 	typedef int32 play_id;
 
 								BSoundPlayer(const BMediaFormat* format,
+									const char* name = NULL,
+									BufferPlayerFunc playFunc = NULL,
+									EventNotifierFunc notifyFunc = NULL,
+									void* cookie = NULL);
+								BSoundPlayer(
+									const media_raw_audio_format* format,
 									const char* name = NULL,
 									BufferPlayerFunc playFunc = NULL,
 									EventNotifierFunc notifyFunc = NULL,

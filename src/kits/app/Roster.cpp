@@ -1,4 +1,5 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2001-2015 Haiku, Inc. All rights reserved.
  * Distributed under the terms of the MIT License.
  *
@@ -47,6 +48,8 @@
 #include <PortLink.h>
 #include <RosterPrivate.h>
 #include <ServerProtocol.h>
+
+#include <libroot/libroot_private.h>
 
 
 using namespace std;
@@ -741,6 +744,9 @@ BRoster::GetAppInfo(const char* signature, app_info* info) const
 			error = B_ERROR;
 	}
 
+	if (error != B_OK && info != NULL)
+		*info = app_info();
+
 	return error;
 }
 
@@ -766,6 +772,9 @@ BRoster::GetAppInfo(entry_ref* ref, app_info* info) const
 		else if (reply.FindInt32("error", &error) != B_OK)
 			error = B_ERROR;
 	}
+
+	if (error != B_OK && info != NULL)
+		*info = app_info();
 	return error;
 }
 
@@ -792,6 +801,9 @@ BRoster::GetRunningAppInfo(team_id team, app_info* info) const
 		else if (reply.FindInt32("error", &error) != B_OK)
 			error = B_ERROR;
 	}
+
+	if (error != B_OK && info != NULL)
+		*info = app_info();
 	return error;
 }
 
@@ -814,6 +826,9 @@ BRoster::GetActiveAppInfo(app_info* info) const
 		else if (reply.FindInt32("error", &error) != B_OK)
 			error = B_ERROR;
 	}
+
+	if (error != B_OK && info != NULL)
+		*info = app_info();
 	return error;
 }
 
@@ -2009,6 +2024,7 @@ BRoster::_LaunchApp(const char* mimeType, const entry_ref* ref,
 	port_id appPort = -1;
 	uint32 appToken = 0;
 	entry_ref hintRef;
+	int execStatusFd = -1;
 
 	while (true) {
 		// find the app
@@ -2056,8 +2072,9 @@ BRoster::_LaunchApp(const char* mimeType, const entry_ref* ref,
 		if (error == B_OK && !alreadyRunning) {
 			DBG(OUT("  token: %" B_PRIu32 "\n", appToken));
 			// load the app image
-			appThread = load_image(argVector.Count(),
-				const_cast<const char**>(argVector.Args()), environment);
+			appThread = __load_image_with_status(argVector.Count(),
+				const_cast<const char**>(argVector.Args()), environment,
+				&execStatusFd);
 
 			// get the app team
 			if (appThread >= 0) {
@@ -2084,6 +2101,30 @@ BRoster::_LaunchApp(const char* mimeType, const entry_ref* ref,
 
 			DBG(OUT("  resume thread: %s (%" B_PRIx32 ")\n", strerror(error),
 				error));
+			// An exec failure only happens in the child; the CLOEXEC
+			// status pipe carries it back once the thread runs.
+			if (error == B_OK && !launchSuspended && execStatusFd >= 0) {
+				status_t execStatus = __wait_exec_status(execStatusFd,
+					10000000LL);
+				if (execStatus != B_OK) {
+					if (wasDocument
+						&& execStatus == B_NOT_AN_EXECUTABLE) {
+						error = B_LAUNCH_FAILED_EXECUTABLE;
+					} else
+						error = execStatus;
+
+					// The team is dead but still registered; drop it
+					// now so a retry does not race the team death event.
+					if (!isScript && !fNoRegistrar && team >= 0)
+						_RemoveApp(team);
+				}
+			}
+
+			if (execStatusFd >= 0) {
+				close(execStatusFd);
+				execStatusFd = -1;
+			}
+
 			// on error: kill the launched team and unregister the app
 			if (error != B_OK) {
 				if (appThread >= 0)

@@ -1,4 +1,5 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2002-2015, Haiku, Inc. All Rights Reserved.
  * Distributed under the terms of the MIT License.
  *
@@ -70,6 +71,8 @@ char B_TRANSLATOR_EXT_SOUND_CHANNEL[]		= "nois/channel";
 char B_TRANSLATOR_EXT_SOUND_MONO[]			= "nois/mono";
 char B_TRANSLATOR_EXT_SOUND_MARKER[]		= "nois/marker";
 char B_TRANSLATOR_EXT_SOUND_LOOP[]			= "nois/loop";
+char B_TRANSLATOR_EXT_DOCUMENT_COUNT[]		= "/documentCount";
+char B_TRANSLATOR_EXT_DOCUMENT_INDEX[]		= "/documentIndex";
 
 BTranslatorRoster* BTranslatorRoster::sDefaultRoster = NULL;
 
@@ -248,6 +251,8 @@ BTranslatorRoster::Private::MessageReceived(BMessage* message)
 					// has the entry been moved into a monitored directory or
 					// has it been removed from one?
 					const char* name;
+					if (message->FindString("name", &name) != B_OK)
+						break;
 					entry_ref toEntryRef;
 					entry_ref fromEntryRef;
 					node_ref nodeRef;

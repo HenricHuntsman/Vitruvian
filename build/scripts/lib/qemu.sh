@@ -16,6 +16,19 @@ _resolve_disk() {
     fi
 }
 
+# UEFI by default; VOS_QEMU_FIRMWARE=bios (bake --legacy-boot) uses
+# QEMU's built-in SeaBIOS. A fresh vars copy per boot type.
+_amd64_firmware_args() {
+    _fw_basedir="$1"; _fw_tag="$2"
+    _firmware_args=""
+    [ "${VOS_QEMU_FIRMWARE:-uefi}" = "bios" ] && return 0
+    [ -f /usr/share/OVMF/OVMF_VARS_4M.fd ] \
+        || die "OVMF_VARS_4M.fd not found. Install package 'ovmf'."
+    _fw_vars="$_fw_basedir/OVMF_VARS.$_fw_tag.fd"
+    cp -f /usr/share/OVMF/OVMF_VARS_4M.fd "$_fw_vars"
+    _firmware_args="-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd -drive if=pflash,format=raw,file=$_fw_vars"
+}
+
 run_qemu() {
     _basedir="$1"
     _arch="$2"
@@ -35,10 +48,16 @@ run_qemu() {
         [ -d "$_shared_folder" ] || die "shared folder not found: $_shared_folder"
         _extra_drives="$_extra_drives -drive file=fat:rw:$_shared_folder,format=raw,if=virtio"
     fi
-    if [ -n "$_target_disk" ]; then
-        _resolve_disk "$_target_disk"
+    # One path per line, in the order given.
+    _nl='
+'
+    _old_ifs="$IFS"; IFS="$_nl"
+    for _td in $_target_disk; do
+        IFS="$_old_ifs"
+        _resolve_disk "$_td"
         _extra_drives="$_extra_drives -drive file=$_resolved_disk,format=raw,if=virtio,cache=writethrough"
-    fi
+    done
+    IFS="$_old_ifs"
     if [ -n "$_usb_disk" ]; then
         if [ -d "$_usb_disk" ]; then
             _usb_file="fat:rw:$_usb_disk"
@@ -72,19 +91,15 @@ run_qemu() {
             _resolve_disk "$_disk_image"
             [ -f "$_resolved_disk" ] || [ -b "$_resolved_disk" ] \
                 || die "disk image not found: $_disk_image"
-            [ "$_arch" = "amd64" ] || die "--image-type=disk is amd64/UEFI only (got $_arch)"
+            [ "$_arch" = "amd64" ] || die "--image-type=disk is amd64 only (got $_arch)"
 
-            [ -f /usr/share/OVMF/OVMF_VARS_4M.fd ] \
-                || die "OVMF_VARS_4M.fd not found. Install package 'ovmf'."
-            _disk_vars="$_basedir/OVMF_VARS.disk.fd"
-            cp -f /usr/share/OVMF/OVMF_VARS_4M.fd "$_disk_vars"
+            _amd64_firmware_args "$_basedir" disk
 
             log_step "Booting disk image $_resolved_disk in QEMU ($_qemu_cmd)..."
             "$_qemu_cmd" \
-                -m 4096 -cpu host -smp sockets=1,cores=2,threads=2 --enable-kvm \
+                -m 4096 -cpu host -smp "${VOS_QEMU_SMP:-sockets=1,cores=2,threads=2}" --enable-kvm \
                 -drive file="$_resolved_disk",format=raw,if=virtio,cache=writethrough \
-                -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
-                -drive if=pflash,format=raw,file="$_disk_vars" \
+                $_firmware_args \
                 -netdev user,id=mynet,hostfwd=tcp::2222-:22 \
                 -device virtio-net-pci,netdev=mynet \
                 -device intel-hda -device hda-duplex,audiodev=snd0 -audiodev pa,id=snd0 \
@@ -102,7 +117,7 @@ run_qemu() {
             case "$_arch" in
                 amd64)
                     "$_qemu_cmd" \
-                        -m 4096 -cpu host -smp sockets=1,cores=2,threads=2 --enable-kvm \
+                        -m 4096 -cpu host -smp "${VOS_QEMU_SMP:-sockets=1,cores=2,threads=2}" --enable-kvm \
                         -drive file="$_raw",format=raw,if=virtio,cache=writethrough \
                         -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
                         -drive if=pflash,format=raw,file="$_basedir/OVMF_VARS.fd" \
@@ -116,7 +131,7 @@ run_qemu() {
                     ;;
                 arm64)
                     "$_qemu_cmd" \
-                        -m 2048 -smp 2 \
+                        -m 2048 -smp "${VOS_QEMU_SMP:-2}" \
                         -machine virt \
                         -cpu cortex-a72 \
                         -drive file="$_raw",format=raw,if=virtio,cache=writethrough \
@@ -128,7 +143,7 @@ run_qemu() {
                     ;;
                 arm32)
                     "$_qemu_cmd" \
-                        -m 1024 -smp 1 \
+                        -m 1024 -smp "${VOS_QEMU_SMP:-1}" \
                         -machine virt \
                         -cpu cortex-a15 \
                         -drive file="$_raw",format=raw,if=virtio \
@@ -136,7 +151,7 @@ run_qemu() {
                     ;;
                 riscv64)
                     "$_qemu_cmd" \
-                        -m 2048 -smp 2 \
+                        -m 2048 -smp "${VOS_QEMU_SMP:-2}" \
                         -machine virt \
                         -drive file="$_raw",format=raw,if=virtio \
                         $_extra_drives
@@ -150,9 +165,11 @@ run_qemu() {
             log_step "Booting ISO in QEMU ($_qemu_cmd)..."
             case "$_arch" in
                 amd64)
+                    _amd64_firmware_args "$_basedir" iso
                     "$_qemu_cmd" \
+                        $_firmware_args \
                         -cdrom "$_iso" -boot order=dc,menu=on \
-                        -m 8G -cpu host -smp sockets=1,cores=2,threads=2 --enable-kvm \
+                        -m 8G -cpu host -smp "${VOS_QEMU_SMP:-sockets=1,cores=2,threads=2}" --enable-kvm \
                         -netdev user,id=mynet,hostfwd=tcp::2222-:22 \
                         -device virtio-net-pci,netdev=mynet \
                         -device intel-hda -device hda-duplex,audiodev=snd0 -audiodev pa,id=snd0 \
@@ -195,7 +212,7 @@ run_qemu() {
             log_step "Booting Raspberry Pi image in QEMU (aarch64)..."
             require_cmd qemu-system-aarch64 "qemu-efi-aarch64"
             qemu-system-aarch64 \
-                -m 2048 -smp 4 \
+                -m 2048 -smp "${VOS_QEMU_SMP:-4}" \
                 -machine raspi4b \
                 -cpu cortex-a72 \
                 -drive file="$_raw",format=raw,if=sd \
@@ -210,7 +227,7 @@ run_qemu() {
             log_step "Booting Raspberry Pi arm32 image in QEMU..."
             require_cmd qemu-system-arm "qemu-system-arm"
             qemu-system-arm \
-                -m 1024 -smp 1 \
+                -m 1024 -smp "${VOS_QEMU_SMP:-1}" \
                 -machine raspi2b \
                 -cpu cortex-a7 \
                 -drive file="$_raw",format=raw,if=sd \
@@ -226,7 +243,7 @@ run_qemu() {
             log_warn "These images are designed for real hardware."
             log_info "Attempting generic arm64 virt boot..."
             qemu-system-aarch64 \
-                -m 2048 -smp 2 \
+                -m 2048 -smp "${VOS_QEMU_SMP:-2}" \
                 -machine virt -cpu cortex-a72 \
                 -bios /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
                 -drive file="$_raw",format=raw,if=virtio \
@@ -241,7 +258,7 @@ run_qemu() {
             log_warn "These images are designed for real hardware."
             log_info "Attempting generic arm32 virt boot..."
             qemu-system-arm \
-                -m 1024 -smp 1 \
+                -m 1024 -smp "${VOS_QEMU_SMP:-1}" \
                 -machine virt -cpu cortex-a15 \
                 -drive file="$_raw",format=raw,if=virtio \
                 -netdev user,id=mynet,hostfwd=tcp::2222-:22 \
@@ -255,7 +272,7 @@ run_qemu() {
             log_warn "These images are designed for real hardware."
             log_info "Attempting generic riscv64 virt boot..."
             qemu-system-riscv64 \
-                -m 2048 -smp 2 \
+                -m 2048 -smp "${VOS_QEMU_SMP:-2}" \
                 -machine virt \
                 -drive file="$_raw",format=raw,if=virtio \
                 -netdev user,id=mynet,hostfwd=tcp::2222-:22 \

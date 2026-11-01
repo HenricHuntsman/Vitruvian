@@ -1,6 +1,6 @@
 /*
  * Copyright 2025-2026, Dario Casalinuovo. All rights reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #ifndef _VITRUVIAN_MEDIA2_FORMAT_CONVERSION_H
@@ -9,6 +9,7 @@
 
 #include <spa/param/audio/raw.h>
 #include <spa/param/video/raw.h>
+#include <spa/pod/builder.h>
 
 #include <media2/MediaFormat.h>
 
@@ -36,6 +37,19 @@ bool					BuildSPAVideoInfo(const BMediaFormat& fmt,
 							spa_video_info_raw* out);
 void					ExtractFromSPAVideo(const spa_video_info_raw& spa,
 							BMediaFormat* out);
+
+// EnumFormat pod for camera-style capture: YUY2, BGRx and I420 with size
+// and framerate ranges. preferred becomes the default choice value. With
+// mjpg the pod offers the compressed subtype with the same ranges instead.
+const spa_pod*			BuildVideoEnumFormat(spa_pod_builder* builder,
+							const media_raw_video_format& preferred,
+							bool fixed = false, bool mjpg = false);
+
+// Convert packed/planar webcam frames to BGRx (B_RGB32) for display.
+bool					ConvertYUY2ToRGB32(const uint8* src, uint32 width,
+							uint32 height, uint8* dst, uint32 dstStride);
+bool					ConvertI420ToRGB32(const uint8* src, uint32 width,
+							uint32 height, uint8* dst, uint32 dstStride);
 
 
 } }

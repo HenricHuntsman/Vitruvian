@@ -1,6 +1,6 @@
 /*
  * Copyright 2025-2026, Dario Casalinuovo. All Rights Reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #include <media2/MediaTheme.h>
@@ -36,7 +36,7 @@ public:
 	{
 		// MakeControlFor must return a BControl; only BContinuousParameter
 		// fits (BSlider IS-A BControl). Discrete parameters become a
-		// BMenuField (BView, not BControl) — handled inline in MakeViewFor.
+		// BMenuField (BView, not BControl); handled inline in MakeViewFor.
 		if (parameter == NULL
 				|| parameter->Type() != BParameter::B_CONTINUOUS_PARAMETER) {
 			return NULL;

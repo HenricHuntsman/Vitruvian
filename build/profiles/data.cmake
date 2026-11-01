@@ -43,8 +43,9 @@ install(FILES data/etc/installer/excludes.list
   DESTINATION /usr/share/vos/installer/ COMPONENT data)
 
 # update-grub must yield rw root and keep the Safe Mode/Debug entries.
-# 40_vos goes to /etc/grub.d, and /etc/default/grub is left to the image and installer writers.
-install(PROGRAMS data/etc/grub.d/40_vos
+# 15_vos sorts before 30_uefi-firmware so the order matches the other menus;
+# it goes to /etc/grub.d, and /etc/default/grub is left to the image and installer writers.
+install(PROGRAMS data/etc/grub.d/15_vos
   DESTINATION /etc/grub.d/)
 install(FILES data/etc/default/grub
   DESTINATION /usr/share/vos/grub/ COMPONENT data)
@@ -149,11 +150,13 @@ ImageIncludeFile("data/system/settings/fresh_install" "/system/settings")
 # Data files
 ImageIncludeDir("data/system/data/fortunes" "/system/data/")
 install(DIRECTORY "data/system/data/terminal_themes/" DESTINATION "/system/data/Terminal/Themes" COMPONENT data)
-ImageIncludeDir("data/system/data/joysticks" "/system/data/")
 ImageIncludeDir("data/system/data/network" "/system/data/")
 ImageIncludeDir("data/system/data/licenses" "/system/data/")
 ImageIncludeDir("data/system/data/fonts" "/system/data/")
+# Small synthetic media files for testing MediaPlayer and MediaConverter.
+ImageIncludeDir("data/system/data/samples" "/system/data/")
 ImageIncludeDir("data/system/data/KeyboardLayouts" "/system/data/")
+ImageIncludeDir("data/system/data/sounds" "/system/data/")
 
 install(FILES "data/artwork/V_OS logo.png" DESTINATION "/system/data/artwork" COMPONENT data)
 
@@ -184,5 +187,14 @@ ImageIncludeFile("data/bin/userguide" "/bin")
 ImageIncludeFile("data/bin/welcome" "/bin")
 
 # Build files
+install(FILES data/develop/makefile-engine DESTINATION /system/develop/etc COMPONENT dev)
 install(FILES data/develop/makefile-engine DESTINATION /etc COMPONENT dev)
 install(FILES data/develop/vos.specs DESTINATION /etc COMPONENT dev)
+install(FILES
+	data/develop/linkcompat/libbnetapi.so
+	data/develop/linkcompat/libcolumnlistview.so
+	data/develop/linkcompat/libdebug.so
+	data/develop/linkcompat/libmedia.so
+	data/develop/linkcompat/libnetservices.so
+	data/develop/linkcompat/libnetwork.so
+	DESTINATION /usr/lib COMPONENT dev)

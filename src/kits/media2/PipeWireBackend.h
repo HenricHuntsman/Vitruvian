@@ -1,6 +1,6 @@
 /*
  * Copyright 2025-2026, Dario Casalinuovo. All rights reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #ifndef _VITRUVIAN_MEDIA2_PIPEWIRE_BACKEND_H
@@ -11,6 +11,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <pipewire/pipewire.h>
@@ -22,12 +23,20 @@
 #include <media2/MediaFormat.h>
 
 
+class BControllable;
+
+
 namespace BPrivate { namespace media {
 
 
 class PipeWireBackend {
 public:
 	static	PipeWireBackend*		GetInstance();
+
+			// Host performance clock for HandleStart/Stop/Seek. Unit RT
+			// callbacks still read the PipeWire graph clock via
+			// spa_io_position; this is the app-thread "now".
+			static	bigtime_t		PerformanceTime();
 
 			pw_loop*				GetMainLoop() const { return fLoop; }
 			pw_core*				GetCore()     const { return fCore; }
@@ -39,6 +48,8 @@ public:
 			pw_filter*				CreateFilter(const char* name,
 										pw_properties* props);
 
+			uint32					VideoNodeIdByName(const char* nodeName);
+
 			pw_stream*				CreateAndConnectStream(
 										const char* name,
 										pw_direction direction,
@@ -46,7 +57,9 @@ public:
 										const pw_stream_events* events,
 										void* userdata,
 										const char* targetNodeName = NULL,
-										bool captureSinkMonitor = false);
+										bool captureSinkMonitor = false,
+										bool autoConnect = true,
+										bool allowMjpeg = false);
 
 			void					DestroyStream(pw_stream* stream);
 
@@ -58,15 +71,50 @@ public:
 			std::string		mediaClass;
 			bool			isSink;
 			bool			isSource;
+			// Camera devices (media.class Video/Source).
+			bool			isVideo;
+			std::string		stableId;
+			std::string		location;
 		};
 
 		std::vector<DeviceInfo>	Devices();
 
 			uint32					GetDefaultSinkId();
 			uint32					GetDefaultSourceId();
+			uint32					GetDefaultVideoSourceId();
 
 			status_t				SetDefaultSink(uint32 deviceId);
 			status_t				SetDefaultSource(uint32 deviceId);
+			status_t				SetDefaultVideoSource(uint32 deviceId);
+
+		// Camera controls: SPA_PARAM_Props on the Video/Source node.
+		// The v4l2 SPA plugin maps those props to V4L2 controls.
+		struct NodeControlInfo {
+			uint32			propId;
+			int32			value;
+			int32			min;
+			int32			max;
+			int32			step;
+			uint32			menuMask;	// menu controls: bit n = item n
+			bool			isBool;
+			bool			present;
+		};
+
+		status_t				QueryNodeControls(const char* nodeName,
+										std::vector<NodeControlInfo>& out);
+		status_t				SetNodeControls(const char* nodeName,
+										const std::vector<NodeControlInfo>& props);
+
+		// Capture sizes a Video/Source node offers, with the best frame
+		// rate for each (30 when offered, else the highest).
+		struct NodeVideoMode {
+			uint32			width;
+			uint32			height;
+			float			frameRate;
+		};
+
+		status_t				QueryNodeVideoModes(const char* nodeName,
+										std::vector<NodeVideoMode>& out);
 
 		struct DevicePort {
 			std::string		name;
@@ -132,19 +180,26 @@ public:
 		static const char* const kPeakMeterNodeName;
 
 		enum {
-			kMsgDevicesChanged      = 'PWDC',
-			kMsgStreamsChanged      = 'PWSC',
-			kMsgDefaultChanged      = 'PWDF',
-			kMsgDeviceVolumeChanged = 'PWVC',
-
-			kMsgDevicePortChanged   = 'PWPC',
-			kMsgDeviceProfileChanged= 'PWPF'
+			kMsgMidiNodesChanged    = 'PWMC'
 		};
 
-		void					AddWatcher(const BMessenger& target);
+		// MIDI-class registry nodes (media.class "Midi/..."). Ports for these
+		// nodes already live in fPorts; only the node list was missing.
+		struct MidiNodeInfo {
+			uint32			id;
+			std::string		name;
+			std::string		description;
+			std::string		mediaClass;
+		};
+		std::vector<MidiNodeInfo>	MidiNodes();
+
+		void					AddWatcher(const BMessenger& target,
+									int32 notificationMask);
 		void					RemoveWatcher(const BMessenger& target);
 
 		void					_Broadcast(uint32 what, uint32 deviceId = 0);
+
+	static	void					_ForeignLinkRemoved(void* linkInfo);
 
 		enum NotificationType {
 			kNotificationDeviceAdded		= 'mdad',
@@ -172,10 +227,23 @@ public:
 			uint32			nodeId;
 			std::string		name;
 			std::string		direction;
+			std::string		channel;
 			std::string		format;
 		};
 		std::vector<ForeignNodeInfo>	ForeignNodes();
 		std::vector<ForeignPortInfo>	ForeignPorts(uint32 nodeId);
+
+		// Every link the registry sees, whoever created it. Port ids are
+		// registry global ids, 0 when the link is node-wide.
+		struct RegistryLinkInfo {
+			uint32			id;
+			uint32			outputNodeId;
+			uint32			outputPortId;
+			uint32			inputNodeId;
+			uint32			inputPortId;
+		};
+		std::vector<RegistryLinkInfo>	Links();
+		status_t				DestroyLink(uint32 linkId);
 
 		status_t				ResolveNodePorts(uint32 nodeId,
 									pw_direction direction,
@@ -184,6 +252,44 @@ public:
 
 			status_t				RoundtripLocked(
 									bigtime_t timeoutUsecs = 2000000);
+
+		// SPA node params: PropInfo descriptors and Props values.
+		// valueTypes use spa pod types (SPA_TYPE_Float, Bool, Int, Id, String).
+		struct NodePropInfo {
+			uint32			id;
+			std::string		name;
+			uint32			valueType;
+			float			minValue;
+			float			maxValue;
+			float			step;
+			bool			hasRange;
+			std::vector<std::pair<uint32, std::string> > labels;
+		};
+		struct NodePropValue {
+			uint32			id;
+			uint32			valueType;
+			std::vector<uint8_t> bytes;
+		};
+
+		status_t				QueryNodePropInfo(uint32 nodeId,
+									std::vector<NodePropInfo>& outInfos,
+									bigtime_t timeoutUsecs = 2000000);
+		status_t				QueryNodeProps(uint32 nodeId,
+									std::vector<NodePropValue>& outValues,
+									bigtime_t timeoutUsecs = 2000000);
+		status_t				SetNodeProp(uint32 nodeId, uint32 propId,
+									uint32 valueType, const void* value,
+									size_t size);
+		status_t				WatchNodeParams(uint32 nodeId,
+									BControllable* target);
+		status_t				UnwatchNodeParams(uint32 nodeId,
+									BControllable* target);
+
+		// Publish PropInfo/Props on a filter we created so foreign clients
+		// (and our own BControllable bind) can see and set them.
+		status_t				PublishFilterParams(struct pw_filter* filter,
+									const std::vector<NodePropInfo>& infos,
+									const std::vector<NodePropValue>& values);
 
 private:
 			void					_OnRegistryGlobal(uint32 id, uint32 perms,
@@ -238,6 +344,18 @@ private:
 										uint32 id, uint32 index, uint32 next,
 										const struct spa_pod* param);
 
+			struct NodeControlQuery {
+				std::vector<NodeControlInfo>	info;
+				bool					done;
+			};
+			static void				_NodeControlParamThunk(void* data, int seq,
+										uint32 id, uint32 index, uint32 next,
+										const struct spa_pod* param);
+
+			static void				_NodeVideoModeThunk(void* data, int seq,
+										uint32 id, uint32 index, uint32 next,
+										const struct spa_pod* param);
+
 			struct RouteVolumeQuery {
 				int32				wantDirection;
 				int32				index;
@@ -252,9 +370,36 @@ private:
 										uint32 next,
 										const struct spa_pod* param);
 
+			struct PropInfoQuery {
+				std::vector<NodePropInfo>	infos;
+				bool						done;
+			};
+			static void				_PropInfoThunk(void* data, int seq,
+										uint32 id, uint32 index, uint32 next,
+										const struct spa_pod* param);
+
+			struct NodePropsQuery {
+				std::vector<NodePropValue>	values;
+				bool						done;
+			};
+			static void				_NodePropsThunk(void* data, int seq,
+										uint32 id, uint32 index, uint32 next,
+										const struct spa_pod* param);
+
 			status_t				_QueryActiveRoute(uint32 cardId,
 										int32 wantDirection,
 										RouteVolumeQuery& outQuery);
+
+			static void				_ParsePropInfoPod(const struct spa_pod* pod,
+										NodePropInfo& outInfo);
+			static void				_ParsePropsPod(const struct spa_pod* pod,
+										std::vector<NodePropValue>& outValues);
+			static bool				_ValueFromPod(const struct spa_pod* pod,
+										uint32& outType,
+										std::vector<uint8_t>& outBytes);
+			static const struct spa_pod* _PodFromValue(
+										const NodePropValue& value,
+										void* buffer, size_t bufferSize);
 
 private:
 			pw_thread_loop*			fThreadLoop;
@@ -290,14 +435,22 @@ private:
 			std::vector<StreamInfo>	fStreams;
 			std::mutex				fStreamsLock;
 
+			std::vector<MidiNodeInfo>	fMidiNodes;
+			std::mutex				fMidiNodesLock;
+
 			void*					fMetadata;
 			spa_hook				fMetadataListener;
 			std::mutex				fMetadataLock;
 			std::string				fDefaultSinkName;
 			std::string				fDefaultSourceName;
+			std::string				fDefaultVideoSourceName;
 
+			struct Watcher {
+				BMessenger			messenger;
+				int32				mask;
+			};
 			std::mutex				fWatchersLock;
-			std::vector<BMessenger>	fWatchers;
+			std::vector<Watcher>	fWatchers;
 
 			struct TestTone {
 				pw_stream*			stream;
@@ -317,6 +470,7 @@ private:
 				bool			isOutput;
 				uint32			portOrdinal;
 				std::string		name;
+				std::string		channel;
 			};
 			std::mutex				fPortsLock;
 			std::map<uint32, PortRegistryEntry>	fPorts;
@@ -324,9 +478,34 @@ private:
 			spa_hook				fLinkListener;
 			std::mutex					fLinkToDeviceMapLock;
 			std::map<uint32, uint32>	fLinkToDeviceMap;
+			// Full registry link table for BMediaGraph::GetLinks.
+			std::mutex					fRegistryLinksLock;
+			std::map<uint32, RegistryLinkInfo>	fRegistryLinks;
 			spa_hook				fNodeListener;
 			std::map<uint32, std::string> fNodeNames;
 			std::map<uint32, std::string> fNodeApps;
+
+			struct NodeParamWatch {
+				PipeWireBackend*	backend;
+				uint32				nodeId;
+				struct pw_node*		proxy;
+				spa_hook			hook;
+				std::vector<BControllable*>	targets;
+			};
+			std::mutex				fNodeParamWatchesLock;
+			std::map<uint32, NodeParamWatch*>	fNodeParamWatches;
+			static void				_NodeParamWatchThunk(void* data, int seq,
+										uint32 id, uint32 index, uint32 next,
+										const struct spa_pod* param);
+			void					_OnNodeParamWatch(NodeParamWatch* watch,
+										uint32 id, const struct spa_pod* param);
+			void					_DestroyNodeParamWatch(uint32 nodeId);
+
+			// PropInfo/Props published on filters we created, so QueryNode*
+			// can serve them even if the server-side filter does not yet.
+			std::mutex				fPublishedParamsLock;
+			std::map<uint32, std::vector<NodePropInfo> >	fPublishedInfos;
+			std::map<uint32, std::vector<NodePropValue> >	fPublishedValues;
 
 			static int				_MetadataPropertyThunk(void* data,
 										uint32 id, const char* key,

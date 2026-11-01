@@ -1,7 +1,7 @@
 /*
  * Copyright 2025-2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2025-2026, The Vitruvian Project. All Rights Reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #ifndef _MEDIA2_MEDIA_DEFS_H
@@ -65,7 +65,12 @@ struct media_raw_audio_format {
 
 enum {
 	B_VIDEO_TOP_LEFT_RIGHT = 0,
-	B_VIDEO_BOTTOM_LEFT_RIGHT = 1
+	B_VIDEO_BOTTOM_LEFT_RIGHT = 1,
+	// Degrees the stored image must be rotated clockwise for display
+	// (container rotation metadata, e.g. phone videos).
+	B_VIDEO_ROTATE_90 = 2,
+	B_VIDEO_ROTATE_180 = 3,
+	B_VIDEO_ROTATE_270 = 4
 };
 
 
@@ -102,7 +107,12 @@ enum media_codec_type {
 	B_CODEC_TYPE_OGG     = 4,
 	B_CODEC_TYPE_OPUS    = 5,
 	B_CODEC_TYPE_FLAC    = 6,
-	B_CODEC_TYPE_WAV     = 7
+	B_CODEC_TYPE_WAV     = 7,
+	B_CODEC_TYPE_VP8     = 8,
+	B_CODEC_TYPE_VP9     = 9,
+	B_CODEC_TYPE_THEORA  = 10,
+	B_CODEC_TYPE_H264    = 11,
+	B_CODEC_TYPE_MJPEG   = 12
 };
 
 

@@ -1,4 +1,5 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2005-2012, Haiku.
  * Distributed under the terms of the MIT License.
  *
@@ -646,13 +647,22 @@ void
 HWInterface::_CopyToFront(uint8* src, uint32 srcBPR, int32 x, int32 y,
 	int32 right, int32 bottom) const
 {
-	RenderingBuffer* frontBuffer = FrontBuffer();
+	_CopyToBuffer(FrontBuffer(), src, srcBPR, x, y, right, bottom);
+}
 
-	uint8* dst = (uint8*)frontBuffer->Bits();
-	uint32 dstBPR = frontBuffer->BytesPerRow();
+
+void
+HWInterface::_CopyToBuffer(RenderingBuffer* buffer, uint8* src,
+	uint32 srcBPR, int32 x, int32 y, int32 right, int32 bottom) const
+{
+	if (buffer == NULL)
+		return;
+
+	uint8* dst = (uint8*)buffer->Bits();
+	uint32 dstBPR = buffer->BytesPerRow();
 
 	// transfer, handle colorspace conversion
-	switch (frontBuffer->ColorSpace()) {
+	switch (buffer->ColorSpace()) {
 		case B_RGB32:
 		case B_RGBA32:
 		{
@@ -766,7 +776,7 @@ HWInterface::_CopyToFront(uint8* src, uint32 srcBPR, int32 x, int32 y,
 		}
 
 		case B_GRAY8:
-			if (frontBuffer->Width() > dstBPR) {
+			if (buffer->Width() > dstBPR) {
 				// VGA 16 color grayscale planar mode
 				if (fVGADevice >= 0) {
 					vga_planar_blit_args args;
@@ -841,7 +851,7 @@ HWInterface::_CopyToFront(uint8* src, uint32 srcBPR, int32 x, int32 y,
 
 		default:
 			fprintf(stderr, "HWInterface::CopyBackToFront() - unsupported "
-				"front buffer format! (0x%x)\n", frontBuffer->ColorSpace());
+				"front buffer format! (0x%x)\n", buffer->ColorSpace());
 			break;
 	}
 }

@@ -1,6 +1,6 @@
 /*
  * Copyright 2025-2026, Dario Casalinuovo. All rights reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #include "PipeWireBackend.h"
@@ -28,12 +28,21 @@
 #include <pipewire/port.h>
 #include <pipewire/extensions/metadata.h>
 #include <spa/param/audio/format-utils.h>
+#include <spa/utils/type.h>
+
+#include <media2/Controllable.h>
+#include <spa/param/video/format-utils.h>
 #include <spa/utils/dict.h>
 
+#include <Application.h>
+#include <ApplicationPrivate.h>
 #include <OS.h>
 #include <Notification.h>
+#include <media2/MediaGraph.h>
 
 #include "FormatConversion.h"
+#include <ControllablePrivate.h>
+#include <MediaGraphPrivate.h>
 
 namespace BPrivate { namespace media {
 static PipeWireBackend* sInstance = NULL;
@@ -118,6 +127,10 @@ PipeWireBackend::_Init()
 	if (fCore != NULL) {
 		fRegistry = pw_core_get_registry(fCore, PW_VERSION_REGISTRY, 0);
 		if (fRegistry != NULL) {
+			// SPA event structs are positional C arrays with no designated
+			// initializers in this codebase: a missing entry defaults to NULL
+			// and inserting one shifts every following field onto the wrong
+			// callback. Verify order against the header after any edit.
 			static const pw_registry_events kRegEvents = {
 				PW_VERSION_REGISTRY_EVENTS,
 				&PipeWireBackend::_GlobalThunk,
@@ -144,6 +157,13 @@ PipeWireBackend::_Init()
 		}
 	}
 	pw_thread_loop_unlock(fThreadLoop);
+
+	// Populate the registry before the first Devices() call.
+	if (fCore != NULL) {
+		pw_thread_loop_lock(fThreadLoop);
+		RoundtripLocked(2000000);
+		pw_thread_loop_unlock(fThreadLoop);
+	}
 
 	if (fCore == NULL) {
 		const char* runtimeDir = getenv("PIPEWIRE_RUNTIME_DIR");
@@ -178,6 +198,12 @@ void
 PipeWireBackend::_OnRegistryGlobal(uint32 id, uint32 /*perms*/,
 	const char* type, uint32 /*version*/, const struct spa_dict* props)
 {
+	// PW_DEPRECATED's macro trips -Wdeprecated-declarations on every
+	// wrapped call; the replacements are not drop-in.
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
 	if (type == NULL)
 		return;
 
@@ -210,6 +236,8 @@ PipeWireBackend::_OnRegistryGlobal(uint32 id, uint32 /*perms*/,
 			return;
 		const char* portIdStr = spa_dict_lookup(props, PW_KEY_PORT_ID);
 		const char* nameStr = spa_dict_lookup(props, PW_KEY_PORT_NAME);
+		const char* channelStr = spa_dict_lookup(props,
+			PW_KEY_AUDIO_CHANNEL);
 
 		PortRegistryEntry entry;
 		entry.nodeId = (uint32)strtoul(nodeIdStr, NULL, 10);
@@ -217,6 +245,7 @@ PipeWireBackend::_OnRegistryGlobal(uint32 id, uint32 /*perms*/,
 		entry.portOrdinal = portIdStr != NULL
 			? (uint32)strtoul(portIdStr, NULL, 10) : 0;
 		entry.name = nameStr != NULL ? nameStr : "";
+		entry.channel = channelStr != NULL ? channelStr : "";
 
 		{
 			std::lock_guard<std::mutex> _(fPortsLock);
@@ -236,10 +265,11 @@ PipeWireBackend::_OnRegistryGlobal(uint32 id, uint32 /*perms*/,
 		return;
 	const bool isSink   = strcmp(mediaClass, "Audio/Sink") == 0;
 	const bool isSource = strcmp(mediaClass, "Audio/Source") == 0;
+	const bool isVideo  = strcmp(mediaClass, "Video/Source") == 0;
 	const bool isStreamOut = strncmp(mediaClass, "Stream/Output", 13) == 0;
 	const bool isStreamIn  = strncmp(mediaClass, "Stream/Input",  12) == 0;
 
-	if (isSink || isSource) {
+	if (isSink || isSource || isVideo) {
 		const char* desc = spa_dict_lookup(props, PW_KEY_NODE_DESCRIPTION);
 		const char* name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
 		const char* cardIdStr = props != NULL
@@ -255,7 +285,37 @@ PipeWireBackend::_OnRegistryGlobal(uint32 id, uint32 /*perms*/,
 		info.nodeName   = name != NULL ? name : "";
 		info.mediaClass = mediaClass;
 		info.isSink     = isSink;
-		info.isSource   = isSource;
+		info.isSource   = isSource && !isVideo;
+		info.isVideo    = isVideo;
+		info.stableId   = "";
+		info.location   = "";
+
+		if (isVideo) {
+			// Prefer udev-backed serial; never persist /dev/videoN as the key.
+			const char* serial = spa_dict_lookup(props, "device.serial");
+			const char* busPath = spa_dict_lookup(props, "device.bus-path");
+			const char* objectPath = spa_dict_lookup(props, "object.path");
+			const char* v4l2Path = spa_dict_lookup(props, "api.v4l2.path");
+			if (serial != NULL && serial[0] != '\0')
+				info.stableId = std::string("serial:") + serial;
+			else if (busPath != NULL && busPath[0] != '\0')
+				info.stableId = std::string("bus:") + busPath;
+			else if (objectPath != NULL && objectPath[0] != '\0')
+				info.stableId = std::string("path:") + objectPath;
+			else if (v4l2Path != NULL && v4l2Path[0] != '\0')
+				info.stableId = std::string("v4l2:") + v4l2Path;
+			else if (!info.nodeName.empty())
+				info.stableId = std::string("node:") + info.nodeName;
+
+			const char* deviceApi = spa_dict_lookup(props, "device.api");
+			const char* loc = spa_dict_lookup(props, "api.libcamera.location");
+			if (loc != NULL && loc[0] != '\0')
+				info.location = loc;
+			else if (deviceApi != NULL && strcmp(deviceApi, "libcamera") == 0)
+				info.location = "libcamera";
+			else
+				info.location = "external";
+		}
 
 		{
 			std::lock_guard<std::mutex> _(fDevicesLock);
@@ -263,6 +323,8 @@ PipeWireBackend::_OnRegistryGlobal(uint32 id, uint32 /*perms*/,
 		}
 
 		if (cardId != 0 && fCardWatches.find(cardId) == fCardWatches.end()) {
+			// Bind runs on the loop thread (registry callback); the hook
+			// lives inside the heap CardWatch, never a stack local (L2).
 			pw_device* device = (pw_device*)pw_registry_bind(fRegistry,
 				cardId, PW_TYPE_INTERFACE_Device, PW_VERSION_DEVICE, 0);
 			if (device != NULL) {
@@ -290,7 +352,7 @@ PipeWireBackend::_OnRegistryGlobal(uint32 id, uint32 /*perms*/,
 				}
 			}
 		}
-		_Broadcast(kMsgDevicesChanged, id);
+		_Broadcast(BMediaGraph::B_MEDIA_CLIENT_ADDED, id);
 		return;
 	}
 
@@ -323,11 +385,31 @@ PipeWireBackend::_OnRegistryGlobal(uint32 id, uint32 /*perms*/,
 			std::lock_guard<std::mutex> _(fStreamsLock);
 			fStreams.push_back(s);
 		}
-		_Broadcast(kMsgStreamsChanged, id);
+		_Broadcast(BMediaGraph::B_MEDIA_STREAMS_CHANGED, id);
 		return;
 	}
-}
 
+	if (strncmp(mediaClass, "Midi/", 5) == 0) {
+		const char* desc = spa_dict_lookup(props, PW_KEY_NODE_DESCRIPTION);
+		const char* name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
+
+		MidiNodeInfo info;
+		info.id         = id;
+		info.name       = name != NULL ? name : "";
+		info.description= desc != NULL ? desc : info.name;
+		info.mediaClass = mediaClass;
+
+		{
+			std::lock_guard<std::mutex> _(fMidiNodesLock);
+			fMidiNodes.push_back(info);
+		}
+		_Broadcast(kMsgMidiNodesChanged, id);
+		return;
+	}
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+}
 
 void
 PipeWireBackend::_OnRegistryGlobalRemove(uint32 id)
@@ -370,8 +452,20 @@ PipeWireBackend::_OnRegistryGlobalRemove(uint32 id)
 		}
 	}
 
+	bool midiChanged = false;
+	if (!deviceChanged && !streamChanged) {
+		std::lock_guard<std::mutex> _(fMidiNodesLock);
+		for (auto it = fMidiNodes.begin(); it != fMidiNodes.end(); ++it) {
+			if (it->id == id) {
+				fMidiNodes.erase(it);
+				midiChanged = true;
+				break;
+			}
+		}
+	}
+
 	if (deviceChanged) {
-		_Broadcast(kMsgDevicesChanged, id);
+		_Broadcast(BMediaGraph::B_MEDIA_CLIENT_REMOVED, id);
 
 		if (wasSink) {
 			ShowNotification(kNotificationDeviceRemoved, "Audio Output Removed",
@@ -383,7 +477,10 @@ PipeWireBackend::_OnRegistryGlobalRemove(uint32 id)
 	}
 
 	if (streamChanged)
-		_Broadcast(kMsgStreamsChanged, id);
+		_Broadcast(BMediaGraph::B_MEDIA_STREAMS_CHANGED, id);
+
+	if (midiChanged)
+		_Broadcast(kMsgMidiNodesChanged, id);
 }
 
 
@@ -464,6 +561,8 @@ PipeWireBackend::_OnCardParam(CardWatch* watch, uint32 id,
 void
 PipeWireBackend::_DestroyCardWatch(uint32 cardId)
 {
+	// Caller holds the loop lock or runs after stop; never leave a listener
+	// registered against a destroyed proxy.
 	auto it = fCardWatches.find(cardId);
 	if (it == fCardWatches.end())
 		return;
@@ -521,9 +620,14 @@ PipeWireBackend::_MetadataPropertyThunk(void* data, uint32 /*subject*/,
 			self->fDefaultSourceName = nodeName;
 			changed = true;
 		}
+	} else if (strcmp(key, "default.video.source") == 0) {
+		if (self->fDefaultVideoSourceName != nodeName) {
+			self->fDefaultVideoSourceName = nodeName;
+			changed = true;
+		}
 	}
 	if (changed)
-		self->_Broadcast(kMsgDefaultChanged);
+		self->_Broadcast(BMediaGraph::B_MEDIA_DEFAULTS_CHANGED);
 	return 0;
 }
 
@@ -560,6 +664,25 @@ PipeWireBackend::GetDefaultSourceId()
 	std::lock_guard<std::mutex> _(fDevicesLock);
 	for (auto& d : fDevices) {
 		if (d.isSource && d.nodeName == want)
+			return d.id;
+	}
+	return 0;
+}
+
+
+uint32
+PipeWireBackend::GetDefaultVideoSourceId()
+{
+	std::string want;
+	{
+		std::lock_guard<std::mutex> _(fMetadataLock);
+		want = fDefaultVideoSourceName;
+	}
+	if (want.empty())
+		return 0;
+	std::lock_guard<std::mutex> _(fDevicesLock);
+	for (auto& d : fDevices) {
+		if (d.isVideo && d.nodeName == want)
 			return d.id;
 	}
 	return 0;
@@ -626,11 +749,39 @@ PipeWireBackend::SetDefaultSource(uint32 deviceId)
 }
 
 
+status_t
+PipeWireBackend::SetDefaultVideoSource(uint32 deviceId)
+{
+	std::string nodeName;
+	{
+		std::lock_guard<std::mutex> _(fDevicesLock);
+		for (auto& d : fDevices) {
+			if (d.id == deviceId && d.isVideo) {
+				nodeName = d.nodeName;
+				break;
+			}
+		}
+	}
+	if (nodeName.empty())
+		return B_BAD_VALUE;
+
+	Lock();
+	status_t status = SetDefaultMetadataNode(fMetadata,
+		"default.video.source", nodeName);
+	Unlock();
+	return status;
+}
+
+
 void
 PipeWireBackend::_Teardown()
 {
+	// Loop thread is stopped first: destroy below must not race callbacks.
 	if (fThreadLoop != NULL)
 		pw_thread_loop_stop(fThreadLoop);
+
+	while (!fNodeParamWatches.empty())
+		_DestroyNodeParamWatch(fNodeParamWatches.begin()->first);
 
 	while (!fCardWatches.empty())
 		_DestroyCardWatch(fCardWatches.begin()->first);
@@ -684,9 +835,19 @@ PipeWireBackend::GetInstance()
 }
 
 
+bigtime_t
+PipeWireBackend::PerformanceTime()
+{
+	return system_time();
+}
+
+
 void
 PipeWireBackend::Lock()
 {
+	// Always outermost. Bookkeeping locks (sLinksLock, fDevicesLock) nest
+	// inside; never call RoundtripLocked from the loop thread while holding
+	// a lock the loop thread itself needs.
 	pw_thread_loop_lock(fThreadLoop);
 }
 
@@ -711,29 +872,47 @@ pw_stream*
 PipeWireBackend::CreateAndConnectStream(const char* name,
 	pw_direction direction, const BMediaFormat& format,
 	const pw_stream_events* events, void* userdata,
-	const char* targetNodeName, bool captureSinkMonitor)
+	const char* targetNodeName, bool captureSinkMonitor, bool autoConnect,
+	bool allowMjpeg)
 {
 	if (fLoop == NULL || events == NULL)
 		return NULL;
 	if (captureSinkMonitor && direction != PW_DIRECTION_INPUT)
 		return NULL;
 
-	spa_audio_info_raw info;
-	if (!BuildSPAAudioInfo(format, &info))
+	const bool isVideo = format.IsRawVideo();
+	const bool isAudio = format.IsRawAudio();
+	if (!isVideo && !isAudio)
 		return NULL;
+
+	spa_audio_info_raw info;
+	media_raw_video_format preferred;
+	memset(&preferred, 0, sizeof(preferred));
+	memset(&info, 0, sizeof(info));
+	if (isVideo) {
+		if (!format.IsRawVideo())
+			return NULL;
+		preferred = format.format.u.raw_video;
+	} else {
+		if (!BuildSPAAudioInfo(format, &info))
+			return NULL;
+	}
 
 	const char* category = (direction == PW_DIRECTION_OUTPUT)
 		? "Playback" : "Capture";
 
 	Lock();
 	pw_properties* props = pw_properties_new(
-		PW_KEY_MEDIA_TYPE,     "Audio",
+		PW_KEY_MEDIA_TYPE,     isVideo ? "Video" : "Audio",
 		PW_KEY_MEDIA_CATEGORY, category,
-		PW_KEY_MEDIA_ROLE,     "Music",
+		PW_KEY_MEDIA_ROLE,     isVideo ? "Camera" : "Music",
 		PW_KEY_NODE_NAME,      name != NULL ? name : "vitruvian-media",
 		NULL);
 	if (targetNodeName != NULL)
 		pw_properties_set(props, PW_KEY_TARGET_OBJECT, targetNodeName);
+	// Graph-routed streams are linked explicitly; the session manager must not.
+	if (!autoConnect)
+		pw_properties_set(props, PW_KEY_NODE_AUTOCONNECT, "false");
 	if (captureSinkMonitor)
 		pw_properties_set(props, PW_KEY_STREAM_CAPTURE_SINK, "true");
 	pw_stream* stream = pw_stream_new_simple(fLoop,
@@ -743,18 +922,43 @@ PipeWireBackend::CreateAndConnectStream(const char* name,
 	if (stream == NULL)
 		return NULL;
 
-	uint8_t buf[1024];
+	// Connect under the same lock as create/destroy (L3). The unlocked gap
+	// above is only for building the pod; the stream is not yet in the graph.
+	uint8_t buf[2048];
 	spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
-	const spa_pod* params[1];
-	params[0] = spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &info);
+	const spa_pod* params[3];
+	uint32 paramCount = 1;
+	// Video offers YUY2/BGRx/I420 with size and rate ranges; most UVC
+	// webcams do not do BGRx only, so a single fixed format never links.
+	if (isVideo) {
+		// Exact preferred mode first, the full range as fallback.
+		params[0] = BuildVideoEnumFormat(&b, preferred, true);
+		params[1] = BuildVideoEnumFormat(&b, preferred);
+		paramCount = 2;
+		if (params[1] == NULL)
+			params[0] = NULL;
+		// Compressed fallback after raw, so raw wins when the device has it.
+		if (allowMjpeg && direction == PW_DIRECTION_INPUT) {
+			params[2] = BuildVideoEnumFormat(&b, preferred, false, true);
+			if (params[2] != NULL)
+				paramCount = 3;
+		}
+	} else
+		params[0] = spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &info);
+	if (params[0] == NULL) {
+		Lock();
+		pw_stream_destroy(stream);
+		Unlock();
+		return NULL;
+	}
 
 	Lock();
 	const int r = pw_stream_connect(stream,
 		direction, PW_ID_ANY,
-		(pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT
+		(pw_stream_flags)((autoConnect ? PW_STREAM_FLAG_AUTOCONNECT : 0)
 			| PW_STREAM_FLAG_MAP_BUFFERS
 			| PW_STREAM_FLAG_RT_PROCESS),
-		params, 1);
+		params, paramCount);
 	Unlock();
 
 	if (r < 0) {
@@ -764,6 +968,20 @@ PipeWireBackend::CreateAndConnectStream(const char* name,
 		return NULL;
 	}
 	return stream;
+}
+
+
+uint32
+PipeWireBackend::VideoNodeIdByName(const char* nodeName)
+{
+	if (nodeName == NULL)
+		return 0;
+	std::lock_guard<std::mutex> _(fDevicesLock);
+	for (auto& d : fDevices) {
+		if (d.isVideo && d.nodeName == nodeName)
+			return d.id;
+	}
+	return 0;
 }
 
 
@@ -780,10 +998,17 @@ PipeWireBackend::DestroyStream(pw_stream* stream)
 
 
 void
-PipeWireBackend::AddWatcher(const BMessenger& target)
+PipeWireBackend::AddWatcher(const BMessenger& target, int32 notificationMask)
 {
 	std::lock_guard<std::mutex> _(fWatchersLock);
-	fWatchers.push_back(target);
+	for (auto& watcher : fWatchers) {
+		if (watcher.messenger == target) {
+			watcher.mask = notificationMask;
+			return;
+		}
+	}
+	Watcher watcher = { target, notificationMask };
+	fWatchers.push_back(watcher);
 }
 
 
@@ -792,7 +1017,7 @@ PipeWireBackend::RemoveWatcher(const BMessenger& target)
 {
 	std::lock_guard<std::mutex> _(fWatchersLock);
 	for (auto it = fWatchers.begin(); it != fWatchers.end(); ++it) {
-		if (*it == target) {
+		if (it->messenger == target) {
 			fWatchers.erase(it);
 			return;
 		}
@@ -800,10 +1025,29 @@ PipeWireBackend::RemoveWatcher(const BMessenger& target)
 }
 
 
+// The public notification codes double as their own mask bit; private
+// codes carry no bit, so every watcher receives those.
+static bool
+_IsNotified(int32 mask, uint32 what)
+{
+	switch (what) {
+		case BMediaGraph::B_MEDIA_CLIENT_ADDED:
+		case BMediaGraph::B_MEDIA_CLIENT_REMOVED:
+		case BMediaGraph::B_MEDIA_DEFAULTS_CHANGED:
+		case BMediaGraph::B_MEDIA_VOLUME_CHANGED:
+		case BMediaGraph::B_MEDIA_STREAMS_CHANGED:
+		case BMediaGraph::B_MEDIA_LINKS_CHANGED:
+			return (mask & (int32)what) != 0;
+		default:
+			return true;
+	}
+}
+
+
 void
 PipeWireBackend::_Broadcast(uint32 what, uint32 deviceId)
 {
-	std::vector<BMessenger> snapshot;
+	std::vector<Watcher> snapshot;
 	{
 		std::lock_guard<std::mutex> _(fWatchersLock);
 		snapshot = fWatchers;
@@ -811,8 +1055,10 @@ PipeWireBackend::_Broadcast(uint32 what, uint32 deviceId)
 	BMessage msg(what);
 	if (deviceId != 0)
 		msg.AddUInt32("device_id", deviceId);
-	for (auto& m : snapshot)
-		m.SendMessage(&msg);
+	for (const auto& watcher : snapshot) {
+		if (_IsNotified(watcher.mask, what))
+			watcher.messenger.SendMessage(&msg);
+	}
 }
 
 
@@ -821,6 +1067,14 @@ PipeWireBackend::Streams()
 {
 	std::lock_guard<std::mutex> _(fStreamsLock);
 	return fStreams;
+}
+
+
+std::vector<PipeWireBackend::MidiNodeInfo>
+PipeWireBackend::MidiNodes()
+{
+	std::lock_guard<std::mutex> _(fMidiNodesLock);
+	return fMidiNodes;
 }
 
 
@@ -839,7 +1093,7 @@ PipeWireBackend::MoveStream(uint32 streamId, uint32 deviceId)
 		}
 	}
 	if (found)
-		_Broadcast(kMsgStreamsChanged, streamId);
+		_Broadcast(BMediaGraph::B_MEDIA_STREAMS_CHANGED, streamId);
 	return found ? B_OK : B_BAD_VALUE;
 }
 
@@ -878,7 +1132,7 @@ PipeWireBackend::SetStreamVolume(uint32 streamId, float volume, bool mute)
 		}
 	}
 	if (found)
-		_Broadcast(kMsgStreamsChanged, streamId);
+		_Broadcast(BMediaGraph::B_MEDIA_STREAMS_CHANGED, streamId);
 	return found ? B_OK : B_BAD_VALUE;
 }
 
@@ -914,9 +1168,26 @@ PipeWireBackend::_OnLinkEvent(uint32 id, uint32,
 	uint32 outputNodeId = (uint32)atoi(outputNode);
 	uint32 inputNodeId = (uint32)atoi(inputNode);
 
+	const char* outputPort = props != NULL
+		? spa_dict_lookup(props, "link.output.port") : NULL;
+	const char* inputPort = props != NULL
+		? spa_dict_lookup(props, "link.input.port") : NULL;
+
+	{
+		std::lock_guard<std::mutex> _(fRegistryLinksLock);
+		RegistryLinkInfo& entry = fRegistryLinks[id];
+		entry.id = id;
+		entry.outputNodeId = outputNodeId;
+		entry.outputPortId = outputPort != NULL
+			? (uint32)atoi(outputPort) : 0;
+		entry.inputNodeId = inputNodeId;
+		entry.inputPortId = inputPort != NULL ? (uint32)atoi(inputPort) : 0;
+	}
+
+	_Broadcast(BMediaGraph::B_MEDIA_LINKS_CHANGED, id);
+
 	uint32 deviceId = 0;
 	uint32 streamNodeId = 0;
-	bool isOutput = false;
 
 	{
 		std::lock_guard<std::mutex> _(fDevicesLock);
@@ -924,12 +1195,10 @@ PipeWireBackend::_OnLinkEvent(uint32 id, uint32,
 			if (d.id == outputNodeId) {
 				deviceId = outputNodeId;
 				streamNodeId = inputNodeId;
-				isOutput = false;
 				break;
 			} else if (d.id == inputNodeId) {
 				deviceId = inputNodeId;
 				streamNodeId = outputNodeId;
-				isOutput = true;
 				break;
 			}
 		}
@@ -955,16 +1224,21 @@ PipeWireBackend::_OnLinkEvent(uint32 id, uint32,
 			std::lock_guard<std::mutex> _(fLinkToDeviceMapLock);
 			fLinkToDeviceMap[id] = deviceId;
 		}
-		_Broadcast(kMsgStreamsChanged, streamNodeId);
-
-		ShowNotification(kNotificationDeviceConnected, "Audio Stream Connected",
-			"Stream routed to audio device", streamNodeId);
+		// Watchers get the broadcast; a desktop notification per app stream
+		// link (two per stereo stream) flooded every player switch.
+		_Broadcast(BMediaGraph::B_MEDIA_STREAMS_CHANGED, streamNodeId);
 	}
 }
 
-	void
+void
 PipeWireBackend::_OnLinkRemove(uint32 id)
 {
+	{
+		std::lock_guard<std::mutex> _(fRegistryLinksLock);
+		if (fRegistryLinks.erase(id) > 0)
+			_Broadcast(BMediaGraph::B_MEDIA_LINKS_CHANGED, id);
+	}
+
 	uint32 deviceId = 0;
 	uint32 streamNodeId = 0;
 
@@ -990,10 +1264,7 @@ PipeWireBackend::_OnLinkRemove(uint32 id)
 	}
 
 	if (streamNodeId != 0) {
-		_Broadcast(kMsgStreamsChanged, streamNodeId);
-
-		ShowNotification(kNotificationDeviceDisconnected, "Audio Stream Disconnected",
-			"Stream unlinked from audio device", streamNodeId);
+		_Broadcast(BMediaGraph::B_MEDIA_STREAMS_CHANGED, streamNodeId);
 	}
 }
 
@@ -1081,7 +1352,7 @@ PipeWireBackend::_OnNodeEvent(uint32 id, uint32,
 	}
 
 	if (volumeChanged || muteChanged)
-		_Broadcast(kMsgStreamsChanged, id);
+		_Broadcast(BMediaGraph::B_MEDIA_STREAMS_CHANGED, id);
 }
 
 
@@ -1144,6 +1415,357 @@ PipeWireBackend::_NodeParamThunk(void* data, int, uint32 id,
 	}
 
 	q->done = true;
+}
+
+
+void
+PipeWireBackend::_NodeControlParamThunk(void* data, int, uint32 id,
+	uint32, uint32, const struct spa_pod* param)
+{
+	NodeControlQuery* q = (NodeControlQuery*)data;
+	if (q == NULL || param == NULL)
+		return;
+
+	if (id == SPA_PARAM_PropInfo) {
+		const spa_pod_prop* idProp = spa_pod_find_prop(param, NULL,
+			SPA_PROP_INFO_id);
+		if (idProp == NULL)
+			return;
+		uint32 propId = 0;
+		if (spa_pod_get_id(&idProp->value, &propId) < 0)
+			return;
+
+		NodeControlInfo info;
+		info.propId = propId;
+		info.value = 0;
+		info.min = 0;
+		info.max = 0;
+		info.step = 1;
+		info.menuMask = 0;
+		info.isBool = false;
+		info.present = true;
+
+		const spa_pod_prop* typeProp = spa_pod_find_prop(param, NULL,
+			SPA_PROP_INFO_type);
+		if (typeProp != NULL) {
+			uint32 nVals = 0;
+			uint32 choice = 0;
+			const spa_pod* values = spa_pod_get_values(&typeProp->value,
+				&nVals, &choice);
+			if (values != NULL && nVals > 0) {
+				const uint32 valType = SPA_POD_TYPE(values);
+				if (valType == SPA_TYPE_Bool) {
+					bool v = false;
+					spa_pod_get_bool(values, &v);
+					info.isBool = true;
+					info.value = v ? 1 : 0;
+					info.max = 1;
+				} else if (choice == SPA_CHOICE_Step && nVals >= 4) {
+					const int32* v = (const int32*)SPA_POD_BODY(values);
+					info.value = v[0];
+					info.min = v[1];
+					info.max = v[2];
+					info.step = v[3] != 0 ? v[3] : 1;
+				} else if (choice == SPA_CHOICE_Range && nVals >= 3) {
+					const int32* v = (const int32*)SPA_POD_BODY(values);
+					info.value = v[0];
+					info.min = v[1];
+					info.max = v[2];
+				} else if (choice == SPA_CHOICE_Enum && valType == SPA_TYPE_Int
+					&& nVals >= 2) {
+					// Menus: default first, then the items the device offers.
+					const int32* v = (const int32*)SPA_POD_BODY(values);
+					info.value = v[0];
+					info.min = v[1];
+					info.max = v[1];
+					for (uint32 n = 1; n < nVals; n++) {
+						if (v[n] >= 0 && v[n] < 32)
+							info.menuMask |= 1u << v[n];
+						info.min = v[n] < info.min ? v[n] : info.min;
+						info.max = v[n] > info.max ? v[n] : info.max;
+					}
+				} else if (valType == SPA_TYPE_Int) {
+					const int32* v = (const int32*)SPA_POD_BODY(values);
+					info.value = v[0];
+				}
+			}
+		}
+		q->info.push_back(info);
+		return;
+	}
+
+	if (id != SPA_PARAM_Props)
+		return;
+
+	// Fold current device values into the PropInfo list built above.
+	for (size_t i = 0; i < q->info.size(); i++) {
+		NodeControlInfo& c = q->info[i];
+		const spa_pod_prop* p = spa_pod_find_prop(param, NULL, c.propId);
+		if (p == NULL)
+			continue;
+		if (c.isBool) {
+			bool v = false;
+			if (spa_pod_get_bool(&p->value, &v) >= 0)
+				c.value = v ? 1 : 0;
+		} else {
+			int32 v = 0;
+			if (spa_pod_get_int(&p->value, &v) >= 0)
+				c.value = v;
+			else {
+				float f = 0;
+				if (spa_pod_get_float(&p->value, &f) >= 0)
+					c.value = (int32)f;
+			}
+		}
+	}
+	q->done = true;
+}
+
+
+status_t
+PipeWireBackend::QueryNodeControls(const char* nodeName,
+	std::vector<NodeControlInfo>& out)
+{
+	if (nodeName == NULL || nodeName[0] == '\0')
+		return B_BAD_VALUE;
+	if (fRegistry == NULL)
+		return B_DEVICE_NOT_FOUND;
+
+	uint32 nodeId = 0;
+	{
+		std::lock_guard<std::mutex> _(fDevicesLock);
+		for (auto& d : fDevices) {
+			if (d.isVideo && d.nodeName == nodeName) {
+				nodeId = d.id;
+				break;
+			}
+		}
+	}
+	if (nodeId == 0)
+		return B_ENTRY_NOT_FOUND;
+
+	NodeControlQuery query = { {}, false };
+	Lock();
+	struct pw_node* node = _BindNode(nodeId);
+	if (node == NULL) {
+		Unlock();
+		return B_DEVICE_NOT_FOUND;
+	}
+
+	spa_hook listener;
+	memset(&listener, 0, sizeof(listener));
+	static const pw_node_events kControlEvents = {
+		PW_VERSION_NODE_EVENTS,
+		NULL,
+		&PipeWireBackend::_NodeControlParamThunk
+	};
+	pw_node_add_listener(node, &listener, &kControlEvents, &query);
+	pw_node_enum_params(node, 0, SPA_PARAM_PropInfo, 0, UINT32_MAX, NULL);
+	pw_node_enum_params(node, 0, SPA_PARAM_Props, 0, UINT32_MAX, NULL);
+	RoundtripLocked();
+	spa_hook_remove(&listener);
+	pw_proxy_destroy((struct pw_proxy*)node);
+	Unlock();
+
+	out = query.info;
+	return B_OK;
+}
+
+
+static float
+_PickFrameRate(const spa_pod* value)
+{
+	uint32 count = 0;
+	uint32 choice = SPA_CHOICE_None;
+	const spa_pod* values = spa_pod_get_values(value, &count, &choice);
+	if (values == NULL || values->type != SPA_TYPE_Fraction || count == 0)
+		return 0;
+
+	const spa_fraction* f = (const spa_fraction*)SPA_POD_BODY(values);
+	float best = 0;
+	if (choice == SPA_CHOICE_Range && count >= 3) {
+		const float min = f[1].denom != 0 ? (float)f[1].num / f[1].denom : 0;
+		const float max = f[2].denom != 0 ? (float)f[2].num / f[2].denom : 0;
+		return (min <= 30 && max >= 30) ? 30 : max;
+	}
+	// Enum: the first entry is the default; scan them all.
+	for (uint32 i = 0; i < count; i++) {
+		if (f[i].denom == 0)
+			continue;
+		const float rate = (float)f[i].num / f[i].denom;
+		if (fabsf(rate - 30) < 0.01f)
+			return 30;
+		if (rate > best)
+			best = rate;
+	}
+	return best;
+}
+
+
+/* static */ void
+PipeWireBackend::_NodeVideoModeThunk(void* data, int, uint32 id, uint32,
+	uint32, const struct spa_pod* param)
+{
+	std::vector<NodeVideoMode>* modes = (std::vector<NodeVideoMode>*)data;
+	if (modes == NULL || param == NULL || id != SPA_PARAM_EnumFormat)
+		return;
+
+	const spa_pod_prop* sizeProp = spa_pod_find_prop(param, NULL,
+		SPA_FORMAT_VIDEO_size);
+	if (sizeProp == NULL)
+		return;
+	const spa_pod_prop* rateProp = spa_pod_find_prop(param, NULL,
+		SPA_FORMAT_VIDEO_framerate);
+	const float rate = rateProp != NULL ? _PickFrameRate(&rateProp->value) : 0;
+
+	uint32 count = 0;
+	uint32 choice = SPA_CHOICE_None;
+	const spa_pod* values = spa_pod_get_values(&sizeProp->value, &count,
+		&choice);
+	if (values == NULL || values->type != SPA_TYPE_Rectangle || count == 0)
+		return;
+
+	const spa_rectangle* r = (const spa_rectangle*)SPA_POD_BODY(values);
+	// A range lists default, min, max; offer the default and the maximum.
+	uint32 first = 0;
+	uint32 last = count;
+	if (choice == SPA_CHOICE_Range || choice == SPA_CHOICE_Step) {
+		first = 0;
+		last = 1;
+		if (count >= 3 && (r[2].width != r[0].width
+				|| r[2].height != r[0].height)) {
+			NodeVideoMode mode = { r[2].width, r[2].height, rate };
+			modes->push_back(mode);
+		}
+	} else if (choice == SPA_CHOICE_Enum && count > 1)
+		first = 1;
+
+	for (uint32 i = first; i < last; i++) {
+		NodeVideoMode mode = { r[i].width, r[i].height, rate };
+		modes->push_back(mode);
+	}
+}
+
+
+status_t
+PipeWireBackend::QueryNodeVideoModes(const char* nodeName,
+	std::vector<NodeVideoMode>& out)
+{
+	out.clear();
+	if (nodeName == NULL || nodeName[0] == '\0')
+		return B_BAD_VALUE;
+	if (fRegistry == NULL)
+		return B_DEVICE_NOT_FOUND;
+
+	uint32 nodeId = 0;
+	{
+		std::lock_guard<std::mutex> _(fDevicesLock);
+		for (auto& d : fDevices) {
+			if (d.isVideo && d.nodeName == nodeName) {
+				nodeId = d.id;
+				break;
+			}
+		}
+	}
+	if (nodeId == 0)
+		return B_ENTRY_NOT_FOUND;
+
+	std::vector<NodeVideoMode> found;
+	Lock();
+	struct pw_node* node = _BindNode(nodeId);
+	if (node == NULL) {
+		Unlock();
+		return B_DEVICE_NOT_FOUND;
+	}
+
+	spa_hook listener;
+	memset(&listener, 0, sizeof(listener));
+	static const pw_node_events kModeEvents = {
+		PW_VERSION_NODE_EVENTS,
+		NULL,
+		&PipeWireBackend::_NodeVideoModeThunk
+	};
+	pw_node_add_listener(node, &listener, &kModeEvents, &found);
+	pw_node_enum_params(node, 0, SPA_PARAM_EnumFormat, 0, UINT32_MAX, NULL);
+	RoundtripLocked();
+	spa_hook_remove(&listener);
+	pw_proxy_destroy((struct pw_proxy*)node);
+	Unlock();
+
+	// One entry per size, keeping the best rate any pixel format gave it.
+	for (size_t i = 0; i < found.size(); i++) {
+		bool merged = false;
+		for (size_t j = 0; j < out.size(); j++) {
+			if (out[j].width == found[i].width
+				&& out[j].height == found[i].height) {
+				if (out[j].frameRate != 30
+					&& (found[i].frameRate == 30
+						|| found[i].frameRate > out[j].frameRate))
+					out[j].frameRate = found[i].frameRate;
+				merged = true;
+				break;
+			}
+		}
+		if (!merged)
+			out.push_back(found[i]);
+	}
+	std::sort(out.begin(), out.end(),
+		[](const NodeVideoMode& a, const NodeVideoMode& b) {
+			return (uint64)a.width * a.height < (uint64)b.width * b.height;
+		});
+	return out.empty() ? B_ENTRY_NOT_FOUND : B_OK;
+}
+
+
+status_t
+PipeWireBackend::SetNodeControls(const char* nodeName,
+	const std::vector<NodeControlInfo>& props)
+{
+	if (nodeName == NULL || nodeName[0] == '\0' || props.empty())
+		return B_BAD_VALUE;
+	if (fRegistry == NULL)
+		return B_DEVICE_NOT_FOUND;
+
+	uint32 nodeId = 0;
+	{
+		std::lock_guard<std::mutex> _(fDevicesLock);
+		for (auto& d : fDevices) {
+			if (d.isVideo && d.nodeName == nodeName) {
+				nodeId = d.id;
+				break;
+			}
+		}
+	}
+	if (nodeId == 0)
+		return B_ENTRY_NOT_FOUND;
+
+	uint8_t buffer[1024];
+	spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+	spa_pod_frame frame;
+	spa_pod_builder_push_object(&b, &frame,
+		SPA_TYPE_OBJECT_Props, SPA_PARAM_Props);
+	for (size_t i = 0; i < props.size(); i++) {
+		if (props[i].isBool)
+			spa_pod_builder_add(&b, props[i].propId,
+				SPA_POD_Bool(props[i].value != 0), 0);
+		else
+			spa_pod_builder_add(&b, props[i].propId,
+				SPA_POD_Int(props[i].value), 0);
+	}
+	const spa_pod* param = (const spa_pod*)spa_pod_builder_pop(&b, &frame);
+	if (param == NULL)
+		return B_NO_MEMORY;
+
+	Lock();
+	struct pw_node* node = _BindNode(nodeId);
+	if (node == NULL) {
+		Unlock();
+		return B_DEVICE_NOT_FOUND;
+	}
+	pw_node_set_param(node, SPA_PARAM_Props, 0, param);
+	pw_proxy_destroy((struct pw_proxy*)node);
+	Unlock();
+	return B_OK;
 }
 
 
@@ -1838,81 +2460,83 @@ PipeWireBackend::SetDeviceVolume(uint32 deviceId,
 
 		RouteVolumeQuery rq;
 		status_t rs = _QueryActiveRoute(cardId, wantDirection, rq);
-		if (rs != B_OK) {
-			fprintf(stderr, "nexus: SetDeviceVolume(%u): could not query "
-				"active route (status=%s)\n", deviceId, strerror(rs));
-			return rs;
-		}
+		if (rs == B_TIMED_OUT)
+			return B_TIMED_OUT;
+		// Only ALSA-style cards carry routes; Bluetooth and other
+		// endpoint devices expose volume on the node itself, so fall
+		// through to the Props path below like GetDeviceVolume does.
+		if (rs == B_OK && rq.haveRoute) {
+			uint8_t buffer[512];
+			spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+			spa_pod_frame routeFrame, propsFrame;
+			spa_pod_builder_push_object(&b, &routeFrame,
+				SPA_TYPE_OBJECT_ParamRoute, SPA_PARAM_Route);
+			spa_pod_builder_add(&b,
+				SPA_PARAM_ROUTE_index,  SPA_POD_Int(rq.index),
+				SPA_PARAM_ROUTE_device, SPA_POD_Int(rq.device),
+				0);
+			spa_pod_builder_prop(&b, SPA_PARAM_ROUTE_props, 0);
+			spa_pod_builder_push_object(&b, &propsFrame,
+				SPA_TYPE_OBJECT_Props, SPA_PARAM_Props);
+			spa_pod_builder_add(&b,
+				SPA_PROP_channelVolumes, SPA_POD_Array(sizeof(float),
+					SPA_TYPE_Float, (uint32)count, volumes),
+				0);
+			spa_pod_builder_pop(&b, &propsFrame);
+			spa_pod_builder_add(&b, SPA_PARAM_ROUTE_save, SPA_POD_Bool(true),
+				0);
+			const spa_pod* routeParam
+				= (const spa_pod*)spa_pod_builder_pop(&b, &routeFrame);
+			if (routeParam == NULL)
+				return B_NO_MEMORY;
 
-		uint8_t buffer[512];
-		spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-		spa_pod_frame routeFrame, propsFrame;
-		spa_pod_builder_push_object(&b, &routeFrame,
-			SPA_TYPE_OBJECT_ParamRoute, SPA_PARAM_Route);
-		spa_pod_builder_add(&b,
-			SPA_PARAM_ROUTE_index,  SPA_POD_Int(rq.index),
-			SPA_PARAM_ROUTE_device, SPA_POD_Int(rq.device),
-			0);
-		spa_pod_builder_prop(&b, SPA_PARAM_ROUTE_props, 0);
-		spa_pod_builder_push_object(&b, &propsFrame,
-			SPA_TYPE_OBJECT_Props, SPA_PARAM_Props);
-		spa_pod_builder_add(&b,
-			SPA_PROP_channelVolumes, SPA_POD_Array(sizeof(float),
-				SPA_TYPE_Float, (uint32)count, volumes),
-			0);
-		spa_pod_builder_pop(&b, &propsFrame);
-		spa_pod_builder_add(&b, SPA_PARAM_ROUTE_save, SPA_POD_Bool(true), 0);
-		const spa_pod* routeParam
-			= (const spa_pod*)spa_pod_builder_pop(&b, &routeFrame);
-		if (routeParam == NULL)
-			return B_NO_MEMORY;
+			Lock();
+			struct pw_device* device = (struct pw_device*)pw_registry_bind(
+				fRegistry, cardId, PW_TYPE_INTERFACE_Device,
+				PW_VERSION_DEVICE, 0);
+			if (device == NULL) {
+				Unlock();
+				return B_DEVICE_NOT_FOUND;
+			}
+			pw_device_set_param(device, SPA_PARAM_Route, 0, routeParam);
 
-		Lock();
-		struct pw_device* device = (struct pw_device*)pw_registry_bind(
-			fRegistry, cardId, PW_TYPE_INTERFACE_Device, PW_VERSION_DEVICE,
-			0);
-		if (device == NULL) {
+			RouteVolumeQuery verify;
+			spa_hook hook;
+			memset(&hook, 0, sizeof(hook));
+			static const pw_device_events kVerifyEvents = {
+				PW_VERSION_DEVICE_EVENTS,
+				NULL,
+				&PipeWireBackend::_RouteVolumeParamThunk
+			};
+			verify = { wantDirection, -1, -1, {}, false, false, false };
+			pw_device_add_listener(device, &hook, &kVerifyEvents, &verify);
+			pw_device_enum_params(device, 0, SPA_PARAM_Route, 0, UINT32_MAX,
+				NULL);
+			status_t rt = RoundtripLocked();
+			spa_hook_remove(&hook);
+			pw_proxy_destroy((struct pw_proxy*)device);
 			Unlock();
-			return B_DEVICE_NOT_FOUND;
+
+			if (rt != B_OK) {
+				fprintf(stderr, "nexus: SetDeviceVolume(%u): route verify "
+					"timed out\n", deviceId);
+				return rt;
+			}
+
+			bool applied = !verify.volumes.empty()
+				&& fabsf(verify.volumes[0] - volumes[0]) < 0.01f;
+			if (!applied) {
+				fprintf(stderr, "nexus: SetDeviceVolume(%u): route not "
+					"applied (read back %zu ch, first %.3f, wanted %.3f)\n",
+					deviceId, verify.volumes.size(),
+					verify.volumes.empty() ? -1.0f : verify.volumes[0],
+					volumes[0]);
+				return B_ERROR;
+			}
+
+			_Broadcast(BMediaGraph::B_MEDIA_VOLUME_CHANGED, deviceId);
+			return B_OK;
 		}
-		pw_device_set_param(device, SPA_PARAM_Route, 0, routeParam);
-
-		RouteVolumeQuery verify;
-		spa_hook hook;
-		memset(&hook, 0, sizeof(hook));
-		static const pw_device_events kVerifyEvents = {
-			PW_VERSION_DEVICE_EVENTS,
-			NULL,
-			&PipeWireBackend::_RouteVolumeParamThunk
-		};
-		verify = { wantDirection, -1, -1, {}, false, false, false };
-		pw_device_add_listener(device, &hook, &kVerifyEvents, &verify);
-		pw_device_enum_params(device, 0, SPA_PARAM_Route, 0, UINT32_MAX,
-			NULL);
-		status_t rt = RoundtripLocked();
-		spa_hook_remove(&hook);
-		pw_proxy_destroy((struct pw_proxy*)device);
-		Unlock();
-
-		if (rt != B_OK) {
-			fprintf(stderr, "nexus: SetDeviceVolume(%u): route verify "
-				"timed out\n", deviceId);
-			return rt;
-		}
-
-		bool applied = !verify.volumes.empty()
-			&& fabsf(verify.volumes[0] - volumes[0]) < 0.01f;
-		if (!applied) {
-			fprintf(stderr, "nexus: SetDeviceVolume(%u): route not applied "
-				"(read back %zu ch, first %.3f, wanted %.3f)\n",
-				deviceId, verify.volumes.size(),
-				verify.volumes.empty() ? -1.0f : verify.volumes[0],
-				volumes[0]);
-			return B_ERROR;
-		}
-
-		_Broadcast(kMsgDeviceVolumeChanged, deviceId);
-		return B_OK;
 	}
 
 	uint8_t buffer[512];
@@ -1958,7 +2582,7 @@ PipeWireBackend::SetDeviceVolume(uint32 deviceId,
 		return B_ERROR;
 	}
 
-	_Broadcast(kMsgDeviceVolumeChanged, deviceId);
+	_Broadcast(BMediaGraph::B_MEDIA_VOLUME_CHANGED, deviceId);
 	return B_OK;
 }
 
@@ -1992,74 +2616,75 @@ PipeWireBackend::SetDeviceMute(uint32 deviceId, bool mute)
 
 		RouteVolumeQuery rq;
 		status_t rs = _QueryActiveRoute(cardId, wantDirection, rq);
-		if (rs != B_OK) {
-			fprintf(stderr, "nexus: SetDeviceMute(%u): could not query "
-				"active route (status=%s)\n", deviceId, strerror(rs));
-			return rs;
-		}
+		if (rs == B_TIMED_OUT)
+			return B_TIMED_OUT;
+		// Same route-less fallback as SetDeviceVolume: Bluetooth and
+		// other endpoint devices carry mute on the node Props.
+		if (rs == B_OK && rq.haveRoute) {
+			uint8_t buffer[256];
+			spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+			spa_pod_frame routeFrame, propsFrame;
+			spa_pod_builder_push_object(&b, &routeFrame,
+				SPA_TYPE_OBJECT_ParamRoute, SPA_PARAM_Route);
+			spa_pod_builder_add(&b,
+				SPA_PARAM_ROUTE_index,  SPA_POD_Int(rq.index),
+				SPA_PARAM_ROUTE_device, SPA_POD_Int(rq.device),
+				0);
+			spa_pod_builder_prop(&b, SPA_PARAM_ROUTE_props, 0);
+			spa_pod_builder_push_object(&b, &propsFrame,
+				SPA_TYPE_OBJECT_Props, SPA_PARAM_Props);
+			spa_pod_builder_add(&b, SPA_PROP_mute, SPA_POD_Bool(mute), 0);
+			spa_pod_builder_pop(&b, &propsFrame);
+			spa_pod_builder_add(&b, SPA_PARAM_ROUTE_save, SPA_POD_Bool(true),
+				0);
+			const spa_pod* routeParam
+				= (const spa_pod*)spa_pod_builder_pop(&b, &routeFrame);
+			if (routeParam == NULL)
+				return B_NO_MEMORY;
 
-		uint8_t buffer[256];
-		spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-		spa_pod_frame routeFrame, propsFrame;
-		spa_pod_builder_push_object(&b, &routeFrame,
-			SPA_TYPE_OBJECT_ParamRoute, SPA_PARAM_Route);
-		spa_pod_builder_add(&b,
-			SPA_PARAM_ROUTE_index,  SPA_POD_Int(rq.index),
-			SPA_PARAM_ROUTE_device, SPA_POD_Int(rq.device),
-			0);
-		spa_pod_builder_prop(&b, SPA_PARAM_ROUTE_props, 0);
-		spa_pod_builder_push_object(&b, &propsFrame,
-			SPA_TYPE_OBJECT_Props, SPA_PARAM_Props);
-		spa_pod_builder_add(&b, SPA_PROP_mute, SPA_POD_Bool(mute), 0);
-		spa_pod_builder_pop(&b, &propsFrame);
-		spa_pod_builder_add(&b, SPA_PARAM_ROUTE_save, SPA_POD_Bool(true), 0);
-		const spa_pod* routeParam
-			= (const spa_pod*)spa_pod_builder_pop(&b, &routeFrame);
-		if (routeParam == NULL)
-			return B_NO_MEMORY;
+			Lock();
+			struct pw_device* device = (struct pw_device*)pw_registry_bind(
+				fRegistry, cardId, PW_TYPE_INTERFACE_Device,
+				PW_VERSION_DEVICE, 0);
+			if (device == NULL) {
+				Unlock();
+				return B_DEVICE_NOT_FOUND;
+			}
+			pw_device_set_param(device, SPA_PARAM_Route, 0, routeParam);
 
-		Lock();
-		struct pw_device* device = (struct pw_device*)pw_registry_bind(
-			fRegistry, cardId, PW_TYPE_INTERFACE_Device, PW_VERSION_DEVICE,
-			0);
-		if (device == NULL) {
+			RouteVolumeQuery verify = { wantDirection, -1, -1, {}, false,
+				false, false };
+			spa_hook hook;
+			memset(&hook, 0, sizeof(hook));
+			static const pw_device_events kVerifyEvents = {
+				PW_VERSION_DEVICE_EVENTS,
+				NULL,
+				&PipeWireBackend::_RouteVolumeParamThunk
+			};
+			pw_device_add_listener(device, &hook, &kVerifyEvents, &verify);
+			pw_device_enum_params(device, 0, SPA_PARAM_Route, 0, UINT32_MAX,
+				NULL);
+			status_t rt = RoundtripLocked();
+			spa_hook_remove(&hook);
+			pw_proxy_destroy((struct pw_proxy*)device);
 			Unlock();
-			return B_DEVICE_NOT_FOUND;
+
+			if (rt != B_OK) {
+				fprintf(stderr, "nexus: SetDeviceMute(%u): route verify "
+					"timed out\n", deviceId);
+				return rt;
+			}
+
+			if (!verify.haveMute || verify.mute != mute) {
+				fprintf(stderr, "nexus: SetDeviceMute(%u): route not "
+					"applied (haveMute=%d, mute=%d, wanted %d)\n",
+					deviceId, verify.haveMute, verify.mute, mute);
+				return B_ERROR;
+			}
+
+			_Broadcast(BMediaGraph::B_MEDIA_VOLUME_CHANGED, deviceId);
+			return B_OK;
 		}
-		pw_device_set_param(device, SPA_PARAM_Route, 0, routeParam);
-
-		RouteVolumeQuery verify = { wantDirection, -1, -1, {}, false, false,
-			false };
-		spa_hook hook;
-		memset(&hook, 0, sizeof(hook));
-		static const pw_device_events kVerifyEvents = {
-			PW_VERSION_DEVICE_EVENTS,
-			NULL,
-			&PipeWireBackend::_RouteVolumeParamThunk
-		};
-		pw_device_add_listener(device, &hook, &kVerifyEvents, &verify);
-		pw_device_enum_params(device, 0, SPA_PARAM_Route, 0, UINT32_MAX,
-			NULL);
-		status_t rt = RoundtripLocked();
-		spa_hook_remove(&hook);
-		pw_proxy_destroy((struct pw_proxy*)device);
-		Unlock();
-
-		if (rt != B_OK) {
-			fprintf(stderr, "nexus: SetDeviceMute(%u): route verify "
-				"timed out\n", deviceId);
-			return rt;
-		}
-
-		if (!verify.haveMute || verify.mute != mute) {
-			fprintf(stderr, "nexus: SetDeviceMute(%u): route not applied "
-				"(haveMute=%d, mute=%d, wanted %d)\n",
-				deviceId, verify.haveMute, verify.mute, mute);
-			return B_ERROR;
-		}
-
-		_Broadcast(kMsgDeviceVolumeChanged, deviceId);
-		return B_OK;
 	}
 
 	uint8_t buffer[256];
@@ -2100,7 +2725,7 @@ PipeWireBackend::SetDeviceMute(uint32 deviceId, bool mute)
 		return B_ERROR;
 	}
 
-	_Broadcast(kMsgDeviceVolumeChanged, deviceId);
+	_Broadcast(BMediaGraph::B_MEDIA_VOLUME_CHANGED, deviceId);
 	return B_OK;
 }
 
@@ -2272,23 +2897,31 @@ void
 PipeWireBackend::ShowNotification(NotificationType type, const char* title,
 	const char* message, uint32 deviceId)
 {
-	notification_type haikuType;
+	// BNotification needs a live be_app with an app_server connection;
+	// during shutdown or in headless teams posting one crashes.
+	if (be_app == NULL || be_app->Thread() < B_OK
+		|| BApplication::Private::ServerLink() == NULL) {
+		fprintf(stderr, "media2: %s: %s\n", title, message);
+		return;
+	}
+
+	// Volume is a state change, not an operation with a progress bar;
+	// watchers already receive 'PWVC'. Progress type would need SetProgress.
+	notification_type legacyType;
 	switch (type) {
 		case kNotificationDeviceAdded:
 		case kNotificationDeviceRemoved:
 		case kNotificationDeviceConnected:
 		case kNotificationDeviceDisconnected:
 		case kNotificationDefaultChanged:
-			haikuType = B_INFORMATION_NOTIFICATION;
-			break;
 		case kNotificationVolumeChanged:
-			haikuType = B_PROGRESS_NOTIFICATION;
+			legacyType = B_INFORMATION_NOTIFICATION;
 			break;
 		default:
-			haikuType = B_INFORMATION_NOTIFICATION;
+			legacyType = B_INFORMATION_NOTIFICATION;
 			break;
 	}
-	BNotification notification(haikuType);
+	BNotification notification(legacyType);
 	notification.SetTitle(title);
 	notification.SetContent(message);
 	notification.SetGroup("AudioDevices");
@@ -2309,6 +2942,8 @@ PipeWireBackend::RoundtripLocked(bigtime_t timeoutUsecs)
 	if (fThreadLoop == NULL || fCore == NULL)
 		return B_DEVICE_NOT_FOUND;
 
+	// Self-deadlock guard: the loop thread is the one that would deliver
+	// `done`; waiting on it from there never returns (L6).
 	if (pw_thread_loop_in_thread(fThreadLoop))
 		return B_NOT_ALLOWED;
 
@@ -2351,6 +2986,7 @@ PipeWireBackend::ResolveNodePorts(uint32 nodeId, pw_direction direction,
 	if (fThreadLoop == NULL || fCore == NULL)
 		return B_DEVICE_NOT_FOUND;
 
+	// Blocks the caller; never from the loop thread or an RT callback (L6).
 	if (pw_thread_loop_in_thread(fThreadLoop))
 		return B_NOT_ALLOWED;
 
@@ -2453,11 +3089,717 @@ PipeWireBackend::ForeignPorts(uint32 nodeId)
 		port.nodeId = kv.second.nodeId;
 		port.name = kv.second.name;
 		port.direction = kv.second.isOutput ? "out" : "in";
+		port.channel = kv.second.channel;
 		port.format = "";
 		ports.push_back(port);
 	}
-
 	return ports;
 }
+
+
+std::vector<PipeWireBackend::RegistryLinkInfo>
+PipeWireBackend::Links()
+{
+	std::lock_guard<std::mutex> _(fRegistryLinksLock);
+	std::vector<RegistryLinkInfo> links;
+	links.reserve(fRegistryLinks.size());
+	for (const auto& kv : fRegistryLinks)
+		links.push_back(kv.second);
+	return links;
+}
+
+
+status_t
+PipeWireBackend::DestroyLink(uint32 linkId)
+{
+	if (linkId == 0)
+		return B_BAD_VALUE;
+	if (fRegistry == NULL || fThreadLoop == NULL)
+		return B_DEVICE_NOT_FOUND;
+
+	{
+		std::lock_guard<std::mutex> _(fRegistryLinksLock);
+		if (fRegistryLinks.find(linkId) == fRegistryLinks.end())
+			return B_ENTRY_NOT_FOUND;
+	}
+
+	Lock();
+	pw_registry_destroy(fRegistry, linkId);
+	RoundtripLocked(500000);
+	Unlock();
+	return B_OK;
+}
+
+
+void
+PipeWireBackend::_DestroyNodeParamWatch(uint32 nodeId)
+{
+	NodeParamWatch* watch = NULL;
+	{
+		std::lock_guard<std::mutex> _(fNodeParamWatchesLock);
+		auto it = fNodeParamWatches.find(nodeId);
+		if (it == fNodeParamWatches.end())
+			return;
+		watch = it->second;
+		fNodeParamWatches.erase(it);
+	}
+	if (watch == NULL)
+		return;
+	Lock();
+	if (watch->proxy != NULL) {
+		spa_hook_remove(&watch->hook);
+		pw_proxy_destroy((struct pw_proxy*)watch->proxy);
+	}
+	Unlock();
+	delete watch;
+}
+
+
+void
+PipeWireBackend::_NodeParamWatchThunk(void* data, int seq, uint32 id,
+	uint32, uint32, const struct spa_pod* param)
+{
+	NodeParamWatch* watch = (NodeParamWatch*)data;
+	if (watch != NULL && watch->backend != NULL)
+		watch->backend->_OnNodeParamWatch(watch, id, param);
+}
+
+
+void
+PipeWireBackend::_OnNodeParamWatch(NodeParamWatch* watch, uint32 id,
+	const struct spa_pod* param)
+{
+	if (param == NULL || id != SPA_PARAM_Props)
+		return;
+
+	std::vector<BControllable*> targets;
+	{
+		std::lock_guard<std::mutex> _(fNodeParamWatchesLock);
+		targets = watch->targets;
+	}
+	for (size_t i = 0; i < targets.size(); i++) {
+		if (targets[i] != NULL)
+			ControllablePrivate::ApplyProps(targets[i], param);
+	}
+}
+
+
+status_t
+PipeWireBackend::WatchNodeParams(uint32 nodeId, BControllable* target)
+{
+	if (nodeId == 0 || target == NULL)
+		return B_BAD_VALUE;
+	if (fRegistry == NULL)
+		return B_DEVICE_NOT_FOUND;
+
+	NodeParamWatch* watch = NULL;
+	bool created = false;
+	{
+		std::lock_guard<std::mutex> _(fNodeParamWatchesLock);
+		auto it = fNodeParamWatches.find(nodeId);
+		if (it != fNodeParamWatches.end()) {
+			watch = it->second;
+			for (size_t i = 0; i < watch->targets.size(); i++) {
+				if (watch->targets[i] == target)
+					return B_OK;
+			}
+		} else {
+			watch = new(std::nothrow) NodeParamWatch();
+			if (watch == NULL)
+				return B_NO_MEMORY;
+			watch->backend = this;
+			watch->nodeId = nodeId;
+			watch->proxy = NULL;
+			memset(&watch->hook, 0, sizeof(watch->hook));
+			fNodeParamWatches[nodeId] = watch;
+			created = true;
+		}
+		watch->targets.push_back(target);
+	}
+
+	if (!created)
+		return B_OK;
+
+	Lock();
+	struct pw_node* node = _BindNode(nodeId);
+	if (node == NULL) {
+		Unlock();
+		UnwatchNodeParams(nodeId, target);
+		return B_DEVICE_NOT_FOUND;
+	}
+
+	static const pw_node_events kWatchEvents = {
+		PW_VERSION_NODE_EVENTS,
+		NULL,
+		&PipeWireBackend::_NodeParamWatchThunk
+	};
+	pw_node_add_listener(node, &watch->hook, &kWatchEvents, watch);
+	uint32_t ids[1] = { SPA_PARAM_Props };
+	pw_node_subscribe_params(node, ids, 1);
+	watch->proxy = node;
+	Unlock();
+
+	return B_OK;
+}
+
+
+status_t
+PipeWireBackend::UnwatchNodeParams(uint32 nodeId, BControllable* target)
+{
+	if (nodeId == 0)
+		return B_BAD_VALUE;
+
+	NodeParamWatch* dead = NULL;
+	{
+		std::lock_guard<std::mutex> _(fNodeParamWatchesLock);
+		auto it = fNodeParamWatches.find(nodeId);
+		if (it == fNodeParamWatches.end())
+			return B_OK;
+		NodeParamWatch* watch = it->second;
+		for (size_t i = 0; i < watch->targets.size(); i++) {
+			if (watch->targets[i] == target) {
+				watch->targets.erase(watch->targets.begin() + i);
+				break;
+			}
+		}
+		if (watch->targets.empty()) {
+			fNodeParamWatches.erase(it);
+			dead = watch;
+		}
+	}
+
+	if (dead != NULL) {
+		Lock();
+		if (dead->proxy != NULL) {
+			spa_hook_remove(&dead->hook);
+			pw_proxy_destroy((struct pw_proxy*)dead->proxy);
+		}
+		Unlock();
+		delete dead;
+	}
+	return B_OK;
+}
+
+
+void
+PipeWireBackend::_ParsePropInfoPod(const struct spa_pod* pod,
+	NodePropInfo& outInfo)
+{
+	outInfo = NodePropInfo();
+	if (pod == NULL || !spa_pod_is_object(pod))
+		return;
+
+	const spa_pod_object* object = (const spa_pod_object*)pod;
+	const spa_pod_prop* prop;
+	SPA_POD_OBJECT_FOREACH(object, prop) {
+		switch (prop->key) {
+			case SPA_PROP_INFO_id:
+			{
+				uint32_t id = 0;
+				if (spa_pod_get_id(&prop->value, &id) >= 0)
+					outInfo.id = id;
+				break;
+			}
+			case SPA_PROP_INFO_name:
+			{
+				const char* name = NULL;
+				if (spa_pod_get_string(&prop->value, &name) >= 0
+						&& name != NULL)
+					outInfo.name = name;
+				break;
+			}
+			case SPA_PROP_INFO_type:
+			{
+				const struct spa_pod* typePod = &prop->value;
+				// Choice pods wrap the default and alternatives.
+				if (spa_pod_is_object(typePod)
+						&& SPA_POD_OBJECT_TYPE(typePod)
+							== SPA_TYPE_Object) {
+					const spa_pod_object* typeObj
+						= (const spa_pod_object*)typePod;
+					const spa_pod_prop* tp;
+					SPA_POD_OBJECT_FOREACH(typeObj, tp) {
+						if (tp->key == SPA_CHOICE_None
+								|| tp->key == 0) {
+							typePod = &tp->value;
+							break;
+						}
+					}
+				}
+				outInfo.valueType = SPA_POD_TYPE(typePod);
+				if (spa_pod_is_object(typePod)
+						&& SPA_POD_OBJECT_TYPE(typePod) == SPA_TYPE_Object) {
+					const spa_pod_object* rangeObj
+						= (const spa_pod_object*)typePod;
+					const spa_pod_prop* rp;
+					SPA_POD_OBJECT_FOREACH(rangeObj, rp) {
+						if (rp->key == SPA_CHOICE_Range
+								|| rp->key == SPA_CHOICE_Step) {
+							const spa_pod_object* rangePods
+								= (const spa_pod_object*)&rp->value;
+							// Range is typically a Pod array or object of floats.
+							// Try to read min/max from a nested object.
+							if (spa_pod_is_object(&rp->value)) {
+								const spa_pod_object* inner
+									= (const spa_pod_object*)&rp->value;
+								const spa_pod_prop* ip;
+								float vals[3] = { 0, 0, 0 };
+								int n = 0;
+								SPA_POD_OBJECT_FOREACH(inner, ip) {
+									if (n < 3
+											&& spa_pod_get_float(&ip->value,
+												&vals[n]) >= 0)
+										n++;
+								}
+								if (n >= 2) {
+									outInfo.hasRange = true;
+									outInfo.minValue = vals[0];
+									outInfo.maxValue = vals[1];
+									if (n >= 3)
+										outInfo.step = vals[2];
+								}
+							} else if (spa_pod_is_array(&rp->value)) {
+								uint32_t n = 0;
+								const float* f
+									= (const float*)spa_pod_get_array(
+										&rp->value, &n);
+								if (f != NULL && n >= 2) {
+									outInfo.hasRange = true;
+									outInfo.minValue = f[0];
+									outInfo.maxValue = f[1];
+									if (n >= 3)
+										outInfo.step = f[2];
+								}
+							}
+							(void)rangePods;
+						}
+					}
+				}
+				break;
+			}
+			case SPA_PROP_INFO_labels:
+			{
+				// Labels are a Struct of (value, name) pairs.
+				if (!spa_pod_is_object(&prop->value))
+					break;
+				const spa_pod_object* labels
+					= (const spa_pod_object*)&prop->value;
+				const spa_pod_prop* lp;
+				uint32 pendingId = 0;
+				bool havePending = false;
+				SPA_POD_OBJECT_FOREACH(labels, lp) {
+					if (lp->key % 2 == 0 || !havePending) {
+						// First of pair is the value.
+						uint32_t id = 0;
+						int32_t i = 0;
+						if (spa_pod_get_id(&lp->value, &id) >= 0)
+							pendingId = id;
+						else if (spa_pod_get_int(&lp->value, &i) >= 0)
+							pendingId = (uint32)i;
+						else if (spa_pod_get_float(&lp->value,
+								(float*)&pendingId) >= 0)
+							; // keep raw bits
+						havePending = true;
+					} else {
+						const char* name = NULL;
+						if (spa_pod_get_string(&lp->value, &name) >= 0
+								&& name != NULL) {
+							outInfo.labels.push_back(
+								std::make_pair(pendingId,
+									std::string(name)));
+						}
+						havePending = false;
+					}
+				}
+				break;
+			}
+			default:
+				break;
+		}
+	}
+}
+
+
+bool
+PipeWireBackend::_ValueFromPod(const struct spa_pod* pod, uint32& outType,
+	std::vector<uint8_t>& outBytes)
+{
+	if (pod == NULL)
+		return false;
+	outType = SPA_POD_TYPE(pod);
+	const char* str = NULL;
+	float f = 0.0f;
+	int32_t i = 0;
+	bool b = false;
+	if (spa_pod_get_string(pod, &str) >= 0 && str != NULL) {
+		size_t len = strlen(str) + 1;
+		outBytes.resize(len);
+		memcpy(outBytes.data(), str, len);
+		return true;
+	}
+	if (spa_pod_get_float(pod, &f) >= 0) {
+		outBytes.resize(sizeof(float));
+		memcpy(outBytes.data(), &f, sizeof(float));
+		return true;
+	}
+	if (spa_pod_get_int(pod, &i) >= 0) {
+		outBytes.resize(sizeof(int32_t));
+		memcpy(outBytes.data(), &i, sizeof(int32_t));
+		return true;
+	}
+	if (spa_pod_get_bool(pod, &b) >= 0) {
+		outBytes.resize(sizeof(bool));
+		memcpy(outBytes.data(), &b, sizeof(bool));
+		return true;
+	}
+	return false;
+}
+
+
+void
+PipeWireBackend::_ParsePropsPod(const struct spa_pod* pod,
+	std::vector<NodePropValue>& outValues)
+{
+	outValues.clear();
+	if (pod == NULL || !spa_pod_is_object(pod))
+		return;
+	if (SPA_POD_OBJECT_TYPE(pod) != SPA_TYPE_OBJECT_Props
+			&& SPA_POD_OBJECT_TYPE(pod) != SPA_TYPE_Object)
+		return;
+
+	const spa_pod_object* object = (const spa_pod_object*)pod;
+	const spa_pod_prop* prop;
+	SPA_POD_OBJECT_FOREACH(object, prop) {
+		NodePropValue v;
+		v.id = prop->key;
+		if (_ValueFromPod(&prop->value, v.valueType, v.bytes))
+			outValues.push_back(v);
+	}
+}
+
+
+const struct spa_pod*
+PipeWireBackend::_PodFromValue(const NodePropValue& value,
+	void* buffer, size_t bufferSize)
+{
+	if (buffer == NULL || bufferSize < 64)
+		return NULL;
+	spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, (uint32)bufferSize);
+	const struct spa_pod* pod = NULL;
+	switch (value.valueType) {
+		case SPA_TYPE_Float:
+		{
+			float f = 0.0f;
+			if (value.bytes.size() >= sizeof(float))
+				memcpy(&f, value.bytes.data(), sizeof(float));
+			pod = (const struct spa_pod*)spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_Props, SPA_PARAM_Props,
+				value.id, SPA_POD_Float(f));
+			break;
+		}
+		case SPA_TYPE_Bool:
+		{
+			bool bv = false;
+			if (value.bytes.size() >= sizeof(bool))
+				memcpy(&bv, value.bytes.data(), sizeof(bool));
+			pod = (const struct spa_pod*)spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_Props, SPA_PARAM_Props,
+				value.id, SPA_POD_Bool(bv));
+			break;
+		}
+		case SPA_TYPE_Int:
+		case SPA_TYPE_Id:
+		{
+			int32_t iv = 0;
+			if (value.bytes.size() >= sizeof(int32_t))
+				memcpy(&iv, value.bytes.data(), sizeof(int32_t));
+			pod = (const struct spa_pod*)spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_Props, SPA_PARAM_Props,
+				value.id, SPA_POD_Int(iv));
+			break;
+		}
+		case SPA_TYPE_String:
+		{
+			const char* s = value.bytes.empty()
+				? "" : (const char*)value.bytes.data();
+			pod = (const struct spa_pod*)spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_Props, SPA_PARAM_Props,
+				value.id, SPA_POD_String(s));
+			break;
+		}
+		default:
+			break;
+	}
+	return pod;
+}
+
+
+void
+PipeWireBackend::_PropInfoThunk(void* data, int, uint32 id,
+	uint32, uint32, const struct spa_pod* param)
+{
+	PropInfoQuery* q = (PropInfoQuery*)data;
+	if (q == NULL)
+		return;
+	if (id == SPA_PARAM_PropInfo && param != NULL) {
+		NodePropInfo info;
+		_ParsePropInfoPod(param, info);
+		if (info.id != 0 || !info.name.empty())
+			q->infos.push_back(info);
+	} else if (id == SPA_PARAM_Props && param != NULL) {
+		q->done = true;
+	}
+}
+
+
+void
+PipeWireBackend::_NodePropsThunk(void* data, int, uint32 id,
+	uint32, uint32, const struct spa_pod* param)
+{
+	NodePropsQuery* q = (NodePropsQuery*)data;
+	if (q == NULL)
+		return;
+	if (id != SPA_PARAM_Props || param == NULL)
+		return;
+	_ParsePropsPod(param, q->values);
+	q->done = true;
+}
+
+
+status_t
+PipeWireBackend::QueryNodePropInfo(uint32 nodeId,
+	std::vector<NodePropInfo>& outInfos, bigtime_t timeoutUsecs)
+{
+	outInfos.clear();
+	if (nodeId == 0)
+		return B_BAD_VALUE;
+	if (fRegistry == NULL || fCore == NULL)
+		return B_DEVICE_NOT_FOUND;
+
+	// Prefer locally published info for filters we created.
+	{
+		std::lock_guard<std::mutex> _(fPublishedParamsLock);
+		auto it = fPublishedInfos.find(nodeId);
+		if (it != fPublishedInfos.end() && !it->second.empty()) {
+			outInfos = it->second;
+			return B_OK;
+		}
+	}
+
+	PropInfoQuery query;
+	query.done = false;
+
+	Lock();
+	struct pw_node* node = _BindNode(nodeId);
+	if (node == NULL) {
+		Unlock();
+		return B_DEVICE_NOT_FOUND;
+	}
+
+	spa_hook hook;
+	memset(&hook, 0, sizeof(hook));
+	static const pw_node_events kInfoEvents = {
+		PW_VERSION_NODE_EVENTS,
+		NULL,
+		&PipeWireBackend::_PropInfoThunk
+	};
+	pw_node_add_listener(node, &hook, &kInfoEvents, &query);
+	pw_node_enum_params(node, 0, SPA_PARAM_PropInfo, 0, UINT32_MAX, NULL);
+	status_t result = RoundtripLocked(timeoutUsecs);
+	spa_hook_remove(&hook);
+	pw_proxy_destroy((struct pw_proxy*)node);
+	Unlock();
+
+	if (result != B_OK)
+		return result;
+	outInfos = query.infos;
+	return outInfos.empty() ? B_ENTRY_NOT_FOUND : B_OK;
+}
+
+
+status_t
+PipeWireBackend::QueryNodeProps(uint32 nodeId,
+	std::vector<NodePropValue>& outValues, bigtime_t timeoutUsecs)
+{
+	outValues.clear();
+	if (nodeId == 0)
+		return B_BAD_VALUE;
+	if (fRegistry == NULL || fCore == NULL)
+		return B_DEVICE_NOT_FOUND;
+
+	{
+		std::lock_guard<std::mutex> _(fPublishedParamsLock);
+		auto it = fPublishedValues.find(nodeId);
+		if (it != fPublishedValues.end() && !it->second.empty()) {
+			outValues = it->second;
+			return B_OK;
+		}
+	}
+
+	NodePropsQuery query;
+	query.done = false;
+
+	Lock();
+	struct pw_node* node = _BindNode(nodeId);
+	if (node == NULL) {
+		Unlock();
+		return B_DEVICE_NOT_FOUND;
+	}
+
+	spa_hook hook;
+	memset(&hook, 0, sizeof(hook));
+	static const pw_node_events kPropsEvents = {
+		PW_VERSION_NODE_EVENTS,
+		NULL,
+		&PipeWireBackend::_NodePropsThunk
+	};
+	pw_node_add_listener(node, &hook, &kPropsEvents, &query);
+	pw_node_enum_params(node, 0, SPA_PARAM_Props, 0, UINT32_MAX, NULL);
+	status_t result = RoundtripLocked(timeoutUsecs);
+	spa_hook_remove(&hook);
+	pw_proxy_destroy((struct pw_proxy*)node);
+	Unlock();
+
+	if (result != B_OK && result != B_ENTRY_NOT_FOUND)
+		return result;
+	outValues = query.values;
+	return outValues.empty() ? B_ENTRY_NOT_FOUND : B_OK;
+}
+
+
+status_t
+PipeWireBackend::SetNodeProp(uint32 nodeId, uint32 propId,
+	uint32 valueType, const void* value, size_t size)
+{
+	if (nodeId == 0 || value == NULL || size == 0)
+		return B_BAD_VALUE;
+	if (fRegistry == NULL)
+		return B_DEVICE_NOT_FOUND;
+
+	NodePropValue v;
+	v.id = propId;
+	v.valueType = valueType;
+	v.bytes.assign((const uint8_t*)value, (const uint8_t*)value + size);
+
+	uint8_t buffer[512];
+	const struct spa_pod* param = _PodFromValue(v, buffer, sizeof(buffer));
+	if (param == NULL)
+		return B_BAD_VALUE;
+
+	Lock();
+	struct pw_node* node = _BindNode(nodeId);
+	if (node == NULL) {
+		Unlock();
+		return B_DEVICE_NOT_FOUND;
+	}
+	pw_node_set_param(node, SPA_PARAM_Props, 0, param);
+
+	// Keep the published cache in sync so QueryNodeProps sees our write
+	// even when the server-side filter does not echo Props back.
+	{
+		std::lock_guard<std::mutex> _(fPublishedParamsLock);
+		std::vector<NodePropValue>& vals = fPublishedValues[nodeId];
+		bool found = false;
+		for (size_t i = 0; i < vals.size(); i++) {
+			if (vals[i].id == propId) {
+				vals[i] = v;
+				found = true;
+				break;
+			}
+		}
+		if (!found)
+			vals.push_back(v);
+	}
+
+	// Verify with a bounded round-trip when the node might answer.
+	status_t rt = RoundtripLocked(1000000);
+	pw_proxy_destroy((struct pw_proxy*)node);
+	Unlock();
+
+	if (rt == B_TIMED_OUT)
+		return B_OK;
+	return rt;
+}
+
+
+status_t
+PipeWireBackend::PublishFilterParams(struct pw_filter* filter,
+	const std::vector<NodePropInfo>& infos,
+	const std::vector<NodePropValue>& values)
+{
+	if (filter == NULL)
+		return B_BAD_VALUE;
+
+	uint32 nodeId = pw_filter_get_node_id(filter);
+	if (nodeId == 0)
+		return B_ERROR;
+
+	{
+		std::lock_guard<std::mutex> _(fPublishedParamsLock);
+		fPublishedInfos[nodeId] = infos;
+		fPublishedValues[nodeId] = values;
+	}
+
+	Lock();
+
+	// Push current Props so foreign clients see values via enum_params.
+	std::vector<const struct spa_pod*> pods;
+	std::vector<uint8_t> storage;
+	storage.reserve(values.size() * 128);
+	for (size_t i = 0; i < values.size(); i++) {
+		size_t offset = storage.size();
+		storage.resize(offset + 256);
+		const struct spa_pod* pod = _PodFromValue(values[i],
+			storage.data() + offset, 256);
+		if (pod != NULL)
+			pods.push_back(pod);
+	}
+	if (!pods.empty())
+		pw_filter_update_params(filter, NULL, pods.data(),
+			(uint32_t)pods.size());
+
+	// Also publish PropInfo so pw-cli and our BindNode can discover them.
+	std::vector<uint8_t> infoStorage;
+	std::vector<const struct spa_pod*> infoPods;
+	infoStorage.reserve(infos.size() * 256);
+	for (size_t i = 0; i < infos.size(); i++) {
+		size_t offset = infoStorage.size();
+		infoStorage.resize(offset + 512);
+		spa_pod_builder b = SPA_POD_BUILDER_INIT(
+			infoStorage.data() + offset, 512);
+		spa_pod_frame frame;
+		const struct spa_pod* pod = NULL;
+		if (spa_pod_builder_push_object(&b, &frame,
+				SPA_TYPE_OBJECT_PropInfo, SPA_PARAM_PropInfo) >= 0) {
+			spa_pod_builder_add(&b,
+				SPA_PROP_INFO_id, SPA_POD_Id(infos[i].id),
+				SPA_PROP_INFO_name, SPA_POD_String(infos[i].name.c_str()),
+				0);
+			if (infos[i].hasRange && infos[i].valueType == SPA_TYPE_Float) {
+				spa_pod_builder_prop(&b, SPA_PROP_INFO_type, 0);
+				spa_pod_frame typeFrame;
+				if (spa_pod_builder_push_object(&b, &typeFrame,
+						SPA_TYPE_Object, SPA_CHOICE_Range) >= 0) {
+					spa_pod_builder_add(&b,
+						SPA_CHOICE_None,
+							SPA_POD_Float(infos[i].minValue),
+						0);
+					// Range alternatives as a simple float pair via Choice.
+					spa_pod_builder_pop(&b, &typeFrame);
+				}
+			}
+			pod = (const struct spa_pod*)spa_pod_builder_pop(&b, &frame);
+		}
+		if (pod != NULL)
+			infoPods.push_back(pod);
+	}
+	if (!infoPods.empty())
+		pw_filter_update_params(filter, NULL, infoPods.data(),
+			(uint32_t)infoPods.size());
+
+	Unlock();
+	return B_OK;
+}
+
 
 } }

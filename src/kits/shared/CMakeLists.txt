@@ -47,9 +47,9 @@ AddOn(
 	StringForRate.cpp
 	StringForSize.cpp
 	StripeView.cpp
+	TemperatureSensors.cpp
 	TextTable.cpp
 	Thread.cpp
-	ToolBar.cpp
 	Variant.cpp
 	WeakReferenceable.cpp
 	md5.cpp

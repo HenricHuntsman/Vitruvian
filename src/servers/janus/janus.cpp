@@ -51,7 +51,7 @@ struct KnownServer {
 
 static const KnownServer kKnownServers[] = {
 	{ "mount_server",  // root: mount(2) needs CAP_SYS_ADMIN
-	  "application/x-vnd.Haiku-mount_server",
+	  "application/x-vnd.vos-mount_server",
 	  NULL },
 	{ NULL, NULL, NULL }
 };
@@ -673,7 +673,7 @@ send_to_app_server(int32 what, bigtime_t timeout, int32 unlockTeam = -1)
 	pid_t pid = -1;
 	for (int i = 0; i < sAppCount; i++) {
 		if (strcmp(sApps[i].signature,
-				"application/x-vnd.Haiku-app_server") == 0
+				"application/x-vnd.vos-app_server") == 0
 				&& sApps[i].port >= 0) {
 			port_info info;
 			if (get_port_info(sApps[i].port, &info) == B_OK) {
@@ -815,6 +815,17 @@ stop_unlock_app()
 
 
 static void
+notify_session_lock_watchers()
+{
+	port_id watchers = find_port("vos-polkit-agent:session-lock");
+	if (watchers < 0)
+		return;
+
+	write_port(watchers, BPrivate::B_JANUS_SESSION_LOCKED, NULL, 0);
+}
+
+
+static void
 handle_lock_session(BPrivate::KMessage& kmsg, uid_t sender_uid)
 {
 	pthread_mutex_lock(&sSessionLock);
@@ -878,6 +889,7 @@ handle_lock_session(BPrivate::KMessage& kmsg, uid_t sender_uid)
 	sScreenLocked = true;
 	sUnlockFailures = 0;
 	sUnlockLockedUntil = 0;
+	notify_session_lock_watchers();
 
 	BPrivate::KMessage reply(B_OK);
 	kmsg.SendReply(&reply);
@@ -990,6 +1002,25 @@ handle_locker_died(BPrivate::KMessage& kmsg, uid_t sender_uid)
 }
 
 
+// A relaunched app_server comes up unlocked; replay the lock so the
+// display and janus's auth state agree again.
+static void
+handle_app_server_restarted(BPrivate::KMessage& kmsg, uid_t sender_uid)
+{
+	if (sender_uid != 0)
+		return;
+
+	if (!sScreenLocked)
+		return;
+
+	fprintf(stderr, "janus: app_server restarted while locked; re-locking\n");
+	// The locker survives a server death; launch_unlock_app() only
+	// relaunches it if it died too.
+	if (launch_unlock_app())
+		send_to_app_server(B_SESSION_LOCK, 2000000LL, (int32)sUnlockAppPid);
+}
+
+
 static void
 copy_attributes(int srcFd, int dstFd)
 {
@@ -1043,8 +1074,16 @@ copy_settings_file(const char* srcPath, const char* dstDir,
 	}
 	if (chown(dstDir, uid, gid) < 0) { /* best effort */ }
 
+	// Truncation only makes open() fail below.
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+#endif
 	char dstPath[PATH_MAX];
 	snprintf(dstPath, sizeof(dstPath), "%s/%s", dstDir, fileName);
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 	int dst = open(dstPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 	if (dst < 0) {
 		close(src);
@@ -1568,9 +1607,17 @@ check_pending_launches()
 			printf("janus: %s ready, pid=%d port=%d\n",
 				sApps[idx].name, (int)sApps[idx].pid, (int)port);
 
+	// Truncation only makes open() fail below.
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+#endif
 			char pidpath[128];
 			snprintf(pidpath, sizeof(pidpath), "%s/%s.pid",
 				runtime_dir(), sApps[idx].name);
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 			FILE* f = fopen(pidpath, "w");
 			if (f != NULL) {
 				fprintf(f, "%d\n", (int)sApps[idx].pid);
@@ -1647,6 +1694,8 @@ launch_daemon_thread(void* /*data*/)
 					handle_unlock_auth(kmsg, mi.sender);
 			} else if (kmsg.What() == BPrivate::B_JANUS_LOCKER_DIED) {
 				handle_locker_died(kmsg, mi.sender);
+			} else if (kmsg.What() == BPrivate::B_JANUS_APP_SERVER_RESTARTED) {
+				handle_app_server_restarted(kmsg, mi.sender);
 			} else if (kmsg.What() == BPrivate::B_JANUS_SESSION_HELLO) {
 				handle_session_hello(kmsg, mi.sender_team);
 			} else if (kmsg.What() == BPrivate::B_JANUS_REGISTER_APP) {

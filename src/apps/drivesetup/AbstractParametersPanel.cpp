@@ -1,4 +1,5 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2008-2013 Haiku, Inc. All rights reserved.
  * Distributed under the terms of the MIT license.
  *
@@ -228,7 +229,7 @@ AbstractParametersPanel::ValidWithoutEditor() const
 }
 
 status_t
-AbstractParametersPanel::ParametersReceived(const BString& parameters,
+AbstractParametersPanel::ParametersReceived(BString& parameters,
 	BMessage& storage)
 {
 	return B_OK;

@@ -146,6 +146,13 @@ DeclareDependency(
 )
 
 DeclareDependency(
+	OPENSSL
+	LIBRARIES  "ssl;crypto"
+	PACKAGES  "libssl-dev"
+	RUNTIMES  "libssl3t64 (>= 3.0)"
+)
+
+DeclareDependency(
 	LIBDRM
 	LIBRARIES  "drm"
 	PACKAGES  "libdrm-dev"
@@ -196,6 +203,13 @@ DeclareDependency(
 	LIBRARIES	"webp"
 	PACKAGES	"libwebp-dev"
 	RUNTIMES	"libwebp7 (>= 1.2.0)"
+)
+
+DeclareDependency(
+	AVIF
+	LIBRARIES	"avif"
+	PACKAGES	"libavif-dev"
+	RUNTIMES	"libavif16 (>= 1.0)"
 )
 
 # JASPER (libjasper-dev) was removed from Debian for unfixed CVEs; the
@@ -257,6 +271,17 @@ DeclareDependency(
 	INCLUDES   "${HEADERS_PATH_BASE}/gstreamer-1.0/;${HEADERS_PATH_BASE}/glib-2.0/;${VITRUVIAN_CHROOT_PATH}/usr/lib/${VITRUVIAN_MULTIARCH_TRIPLE}/glib-2.0/include/"
 )
 
+# Softsynth engine. Debian packages fluidsynth 2.x as libfluidsynth3;
+# the -dev package supplies fluidsynth.h. Runtime name verified against
+# Debian trixie packaging; a missing SF3 bank falls back to the SF2 GM bank.
+DeclareDependency(
+	FLUIDSYNTH
+	LIBRARIES  "fluidsynth"
+	PACKAGES   "libfluidsynth-dev"
+	RUNTIMES   "libfluidsynth3 (>= 2.3)"
+	INCLUDES   "${HEADERS_PATH_BASE}/fluidsynth/"
+)
+
 DeclareDependency(
 	BLUETOOTH
 	PACKAGES   "libbluetooth-dev"
@@ -284,9 +309,67 @@ DeclareDependency(
 
 DeclareDependency(
 	CAIRO
-	LIBRARIES  "cairo"
-	PACKAGES   "libcairo2-dev"
-	RUNTIMES   "libcairo2"
+	LIBRARIES	"cairo"
+	PACKAGES	"libcairo2-dev"
+	RUNTIMES	"libcairo2"
+)
+
+DeclareDependency(
+	SANE
+	LIBRARIES	"sane"
+	PACKAGES	"libsane-dev"
+	RUNTIMES	"libsane1"
+)
+
+DeclareDependency(
+	LILV
+	LIBRARIES  "lilv-0"
+	PACKAGES   "liblilv-dev"
+	RUNTIMES   "liblilv-0-0"
+	INCLUDES   "${HEADERS_PATH_BASE}/lilv-0/"
+)
+
+DeclareDependency(
+	SUIL
+	LIBRARIES  "suil-0"
+	PACKAGES   "libsuil-dev"
+	RUNTIMES   "libsuil-0-0"
+	INCLUDES   "${HEADERS_PATH_BASE}/suil-0/"
+)
+
+DeclareDependency(
+	LV2
+	PACKAGES   "lv2-dev"
+	INCLUDES   "${HEADERS_PATH_BASE}/lv2/"
+)
+
+DeclareDependency(
+	LADSPA
+	PACKAGES   "ladspa-sdk"
+	INCLUDES   "${HEADERS_PATH_BASE}/ladspa/"
+)
+
+# WPE WebKit2 dependencies (web kit / net+ browser)
+# wpebackend-fdo is the web-process renderer backend.
+DeclareDependency(
+	WPE_WEBKIT
+	LIBRARIES  "wpe-webkit-2.0"
+	PACKAGES   "libwpewebkit-2.0-dev;libwpe-1.0-dev;libwpebackend-fdo-1.0-dev"
+	RUNTIMES   "libwpewebkit-2.0-1;libwpe-1.0-1;libwpebackend-fdo-1.0-1"
+)
+
+DeclareDependency(
+	GLESV2
+	LIBRARIES  "GLESv2"
+	PACKAGES   "libgles-dev"
+	RUNTIMES   "libgles2"
+)
+
+DeclareDependency(
+	WAYLAND_SERVER
+	LIBRARIES  "wayland-server"
+	PACKAGES   "libwayland-dev"
+	RUNTIMES   "libwayland-server0"
 )
 
 # Dependencies for Debug builds

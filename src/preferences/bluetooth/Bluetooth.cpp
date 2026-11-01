@@ -16,7 +16,7 @@
 
 
 // Existing signature; do not change.
-static const char* kSignature = "application/x-vnd.Haiku-Bluetooth";
+static const char* kSignature = "application/x-vnd.vos-Bluetooth";
 
 
 class Application : public BApplication {

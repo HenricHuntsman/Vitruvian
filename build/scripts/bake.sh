@@ -45,7 +45,7 @@ Boot options:
                           (QEMU vvfat FAT disk; rw but fragile under heavy writes).
                           This is a data share, NOT an install target.
   --target-disk=PATH     Attach an existing disk image as an install target
-                          (make one with `bake create disk`). This is what the
+                          (make one with `bake create disk`); repeat for more. This is what the
                           Installer sees as a destination volume.
   --usb-disk=PATH        Attach PATH as a removable USB stick. A directory is
                           exposed via vvfat; a file or block device is a raw disk.
@@ -53,6 +53,9 @@ Boot options:
   --enable-console-stdout  Stream serial output to stdio (combine to tee)
   --use-bochs-drm        Use QEMU's std VGA (bochs-drm) instead of virtio-gpu
                           (shared-folder/usb-disk: amd64, arm64, riscv64)
+  --legacy-boot          amd64 iso/disk: boot with legacy BIOS (SeaBIOS)
+                          instead of the default UEFI firmware (OVMF)
+  --smp=N                Give the VM N CPUs (e.g. 1 to expose one-CPU races)
 
 Build options:
   --image-type=TYPE      Image type(s), comma-separated: raw, iso, raspberry, rpi-arm32,
@@ -65,6 +68,9 @@ Build options:
   --enable-console-log   Write serial output to vitruvian-console.log
   --enable-console-stdout  Stream serial output to stdio (combine with --enable-console-log to tee)
   --use-bochs-drm        Use QEMU's std VGA (bochs-drm) instead of virtio-gpu
+  --legacy-boot          amd64 iso/disk: boot with legacy BIOS (SeaBIOS)
+                          instead of the default UEFI firmware (OVMF)
+  --smp=N                Give the VM N CPUs (e.g. 1 to expose one-CPU races)
   --regenerate-chroot    Recreate the chroot before building
   --arch=ARCH            Target architecture: amd64, arm64, arm32, riscv64
                           (reads from buildstate.conf if omitted)
@@ -150,6 +156,17 @@ cmd_build() {
                 VOS_QEMU_VGA=std
                 export VOS_QEMU_VGA
                 ;;
+            --legacy-boot)
+                VOS_QEMU_FIRMWARE=bios
+                export VOS_QEMU_FIRMWARE
+                ;;
+            --smp=*)
+                VOS_QEMU_SMP="${arg#*=}"
+                case "$VOS_QEMU_SMP" in
+                    ''|*[!0-9]*) die "--smp needs a CPU count: $arg" ;;
+                esac
+                export VOS_QEMU_SMP
+                ;;
             --enable-console-stdout)
                 _console_stdout=1
                 ;;
@@ -160,7 +177,8 @@ cmd_build() {
                 _usb_disk="${arg#*=}"
                 ;;
             --target-disk=*)
-                _target_disk="${arg#*=}"
+                _target_disk="${_target_disk:+$_target_disk
+}${arg#*=}"
                 ;;
             --help|-h)
                 usage
@@ -341,6 +359,17 @@ cmd_boot() {
                 VOS_QEMU_VGA=std
                 export VOS_QEMU_VGA
                 ;;
+            --legacy-boot)
+                VOS_QEMU_FIRMWARE=bios
+                export VOS_QEMU_FIRMWARE
+                ;;
+            --smp=*)
+                VOS_QEMU_SMP="${arg#*=}"
+                case "$VOS_QEMU_SMP" in
+                    ''|*[!0-9]*) die "--smp needs a CPU count: $arg" ;;
+                esac
+                export VOS_QEMU_SMP
+                ;;
             --enable-console-stdout)
                 _console_stdout=1
                 ;;
@@ -351,7 +380,8 @@ cmd_boot() {
                 _usb_disk="${arg#*=}"
                 ;;
             --target-disk=*)
-                _target_disk="${arg#*=}"
+                _target_disk="${_target_disk:+$_target_disk
+}${arg#*=}"
                 ;;
             --help|-h)
                 usage

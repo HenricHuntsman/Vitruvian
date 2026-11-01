@@ -1,4 +1,7 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
+ */
+/*
 Open Tracker License
 
 Terms and Conditions
@@ -487,7 +490,7 @@ TBarWindow::SetDeskbarLocation(deskbar_location location, bool newExpandState)
 			break;
 	}
 
-	fBarView->ChangeState(expand, vertical, left, top);
+	fBarView->ChangeState(vertical, left, top, expand ? kExpandoState : kMiniState);
 }
 
 
@@ -519,7 +522,7 @@ TBarWindow::Expand(BMessage* message)
 		bool vertical = fBarView->Vertical();
 		bool left = fBarView->Left();
 		bool top = fBarView->Top();
-		fBarView->ChangeState(expand, vertical, left, top);
+		fBarView->ChangeState(vertical, left, top, expand ? kExpandoState : kMiniState);
 	}
 }
 

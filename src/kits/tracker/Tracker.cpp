@@ -1,4 +1,7 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
+ */
+/*
 Open Tracker License
 
 Terms and Conditions
@@ -67,6 +70,7 @@ All rights reserved.
 
 #include "Attributes.h"
 #include "AutoLock.h"
+#include "Background.h"
 #include "BackgroundImage.h"
 #include "Bitmaps.h"
 #include "Commands.h"
@@ -372,7 +376,8 @@ TTracker::QuitRequested()
 			= dynamic_cast<BContainerWindow*>(fWindowList.ItemAt(i));
 
 		if (window != NULL && window->Lock()) {
-			if (window->TargetModel() != NULL && !window->TargetModel()->IsDesktop()) {
+			if (window->TargetModel() != NULL && window->PoseView() != NULL
+				&& !window->PoseView()->IsDesktopView()) {
 				if (window->TargetModel()->IsRoot()) {
 					message.AddBool("open_disks_window", true);
 				} else {
@@ -581,12 +586,11 @@ TTracker::MessageReceived(BMessage* message)
 			MountServer().SendMessage(message);
 			break;
 
-		case kRestoreBackgroundImage:
+		case B_RESTORE_BACKGROUND_IMAGE:
 		{
 			BDeskWindow* desktop = GetDeskWindow();
 			AutoLock<BWindow> lock(desktop);
-			desktop->UpdateDesktopBackgroundImages();
-			desktop->PostMessage(message, desktop->PoseView());
+			desktop->PostMessage(message, desktop);
 			break;
 		}
 
@@ -1126,6 +1130,12 @@ TTracker::OpenContainerWindow(Model* model, BMessage* originalRefsList,
 	// If no window was activated (none in the current workspace),
 	// we open a new one.
 
+#ifdef __VOS__
+	BEntry rootCheckEntry;
+	if (model != NULL)
+		rootCheckEntry.SetTo(model->EntryRef());
+#endif
+
 	if (openSelector == kRunOpenWithWindow) {
 		BMessage* refList = NULL;
 		if (originalRefsList == NULL) {
@@ -1149,7 +1159,7 @@ TTracker::OpenContainerWindow(Model* model, BMessage* originalRefsList,
 		window = new VirtualDirectoryWindow(&fWindowList, openFlags);
 #ifdef __VOS__
 	} else if (TrackerSettings().ShowDisksIcon()
-			&& FSIsRootDir(&BEntry(model->EntryRef()))) {
+			&& FSIsRootDir(&rootCheckEntry)) {
 		// On Vitruvian "/" is the real boot fs. Promote the model to kRootNode
 		// so TargetModel()->IsRoot()=true, which causes AddVolumePoses to iterate
 		// all volumes (showing every persistent volume in the Disks window).
@@ -1783,10 +1793,10 @@ TTracker::NeedMoreNodeMonitors()
 	fNodeMonitorCount += kNodeMonitorBumpValue;
 	PRINT(("bumping nodeMonitorCount to %" B_PRId32 "\n", fNodeMonitorCount));
 
+	#ifndef __VOS__
 	struct rlimit rl;
 	rl.rlim_cur = fNodeMonitorCount;
 	rl.rlim_max = RLIM_SAVED_MAX;
-	#ifndef __VOS__
 	if (setrlimit(RLIMIT_NOVMON, &rl) < 0) {
 		fNodeMonitorCount -= kNodeMonitorBumpValue;
 		return -errno;

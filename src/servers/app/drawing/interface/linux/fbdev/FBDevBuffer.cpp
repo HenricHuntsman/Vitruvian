@@ -5,17 +5,24 @@
 
 #include "FBDevBuffer.h"
 
+#include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 
 
-FBDevBuffer::FBDevBuffer(int fd, struct fb_var_screeninfo vInfo,
-	struct fb_fix_screeninfo finfo)
+FBDevBuffer::FBDevBuffer(int fd, struct fb_var_screeninfo vInfo)
 	:
 	fBuffer((uint8_t*)MAP_FAILED),
 	fSpace(B_RGB32)
 {
 	fVInfo = vInfo;
-	fInfo = finfo;
+	memset(&fInfo, 0, sizeof(fInfo));
+
+	// A mode change can move line_length, so the stride and the mmap
+	// size must come from the fix info as it is right now, not from
+	// whatever the caller last cached.
+	if (ioctl(fd, FBIOGET_FSCREENINFO, &fInfo) != 0)
+		memset(&fInfo, 0, sizeof(fInfo));
 
 	if (!fbdev_color_space(fVInfo.bits_per_pixel, &fSpace))
 		fSpace = B_RGB32;
@@ -89,4 +96,86 @@ FBDevBuffer::Height() const
 {
 	CALLED();
 	return fVInfo.yres;
+}
+
+
+FBDevPage::FBDevPage()
+	:
+	fBuffer(NULL),
+	fPage(0)
+{
+}
+
+
+FBDevPage::FBDevPage(FBDevBuffer* buffer, uint32 page)
+	:
+	fBuffer(buffer),
+	fPage(page)
+{
+}
+
+
+FBDevPage::~FBDevPage()
+{
+}
+
+
+void
+FBDevPage::SetTo(FBDevBuffer* buffer, uint32 page)
+{
+	fBuffer = buffer;
+	fPage = page;
+}
+
+
+status_t
+FBDevPage::InitCheck() const
+{
+	if (fBuffer == NULL || fBuffer->InitCheck() != B_OK)
+		return B_ERROR;
+	if (fBuffer->Bits() == NULL)
+		return B_ERROR;
+	return B_OK;
+}
+
+
+color_space
+FBDevPage::ColorSpace() const
+{
+	if (fBuffer == NULL)
+		return B_RGB32;
+	return fBuffer->ColorSpace();
+}
+
+
+void*
+FBDevPage::Bits() const
+{
+	if (fBuffer == NULL || fBuffer->Bits() == NULL)
+		return NULL;
+
+	uint8_t* base = (uint8_t*)fBuffer->Bits();
+	return base + (uint64)fPage * fBuffer->BytesPerRow()
+		* fBuffer->Height();
+}
+
+
+uint32
+FBDevPage::BytesPerRow() const
+{
+	return fBuffer != NULL ? fBuffer->BytesPerRow() : 0;
+}
+
+
+uint32
+FBDevPage::Width() const
+{
+	return fBuffer != NULL ? fBuffer->Width() : 0;
+}
+
+
+uint32
+FBDevPage::Height() const
+{
+	return fBuffer != NULL ? fBuffer->Height() : 0;
 }

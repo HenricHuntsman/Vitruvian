@@ -104,7 +104,7 @@ entry_ref::entry_ref(dev_t dev, ino_t dir, const char* name)
 	if (cache_ticket == BPrivate::B_INVALID_VREF_TICKET)
 		return;
 
-	int fd = BPrivate::VRefCache::Open((vref_id)dir);
+	int fd = BPrivate::VRefCache::OpenPath((vref_id)dir);
 	if (fd < 0)
 		return;
 
@@ -454,7 +454,7 @@ BEntry::SetTo(const char* path, bool traverse)
 	// check the argument
 	if (!path)
 		return (fCStatus = B_BAD_VALUE);
-	return (fCStatus = _SetTo(-1, path, traverse));
+	return (fCStatus = _SetTo(AT_FDCWD, path, traverse));
 }
 
 
@@ -507,7 +507,8 @@ BEntry::GetPath(BPath* path) const
 }
 
 
-status_t BEntry::GetParent(BEntry* entry) const
+status_t
+BEntry::GetParent(BEntry* entry) const
 {
 	// check parameter and initialization
 	if (fCStatus != B_OK)
@@ -596,7 +597,8 @@ BEntry::GetNodeRef(node_ref* ref) const
 	// stat + re-open liveness check that was here — path refs can go stale
 	// on any rename, unlike vref (fd-backed, inode kept alive) or fh
 	// (survives rename but not unlink).
-	int tempFd = _kern_open(fDirFd, fName, O_RDONLY | O_NONBLOCK | O_NOFOLLOW, 0);
+	int tempFd = _kern_open(fDirFd, fName,
+		O_RDONLY | O_NONBLOCK | O_NOTRAVERSE, 0);
 	if (tempFd < 0)
 		return tempFd;
 
@@ -775,7 +777,7 @@ BEntry::set_stat(struct stat& st, uint32 what)
 	close the FD afterwards.
 
 	\param dirFD File descriptor of a directory relative to which path is to
-		be considered. May be -1 if the current directory shall be considered.
+		be considered. May be AT_FDCWD if the current directory shall be considered.
 	\param path Pointer to a path relative to the given directory.
 	\param traverse If \c true and the given entry is a symbolic link, the
 		object is recursively set to point to the entry linked to by the
@@ -894,6 +896,8 @@ BEntry::_SetTo(int dirFD, const char* path, bool traverse)
 			error = _kern_read_link(dirFD, leafName, tmpPath, &bufferSize);
 			if (error < 0)
 				return error;
+			if (bufferSize >= B_PATH_NAME_LENGTH)
+				return B_NAME_TOO_LONG;
 			tmpPath[bufferSize] = '\0';
 			path = tmpPath;
 			// next round...
@@ -1075,9 +1079,9 @@ bool
 operator<(const entry_ref& a, const entry_ref& b)
 {
 	if (a.device() != b.device())
-		return a.device() < b.device();
+		return (int64)a.device() < (int64)b.device();
 	if (a.directory() != b.directory())
-		return a.directory() < b.directory();
+		return (int64)a.directory() < (int64)b.directory();
 	if (a.name == NULL)
 		return b.name != NULL;
 	if (b.name == NULL)

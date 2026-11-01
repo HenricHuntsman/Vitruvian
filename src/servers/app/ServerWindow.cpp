@@ -1,4 +1,5 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2001-2019, Haiku.
  * Distributed under the terms of the MIT License.
  *
@@ -4090,8 +4091,9 @@ ServerWindow::_DispatchPictureMessage(int32 code, BPrivate::LinkReceiver& link)
 					// We need to make a copy of the picture, since it can
 					// change after it has been drawn
 					BReference<ServerPicture> copy(App()->CreatePicture(pictureToDraw), true);
-					picture->NestPicture(copy);
-					picture->WriteDrawPicture(where, copy->Token());
+					int32 subPictureIndex = picture->NestPicture(copy);
+					if (subPictureIndex >= 0)
+						picture->WriteDrawPicture(where, subPictureIndex);
 				}
 			}
 			break;
@@ -4141,8 +4143,9 @@ ServerWindow::_DispatchPictureMessage(int32 code, BPrivate::LinkReceiver& link)
 				// We need to make a copy of the picture, since it can
 				// change after it has been drawn
 				BReference<ServerPicture> copy(App()->CreatePicture(pictureToClip), true);
-				picture->NestPicture(copy);
-				picture->WriteClipToPicture(copy->Token(), where, inverse);
+				int32 subPictureIndex = picture->NestPicture(copy);
+				if (subPictureIndex >= 0)
+					picture->WriteClipToPicture(subPictureIndex, where, inverse);
 			}
 			break;
 		}
@@ -4508,10 +4511,19 @@ ServerWindow::HandleDirectConnection(int32 bufferState, int32 driverState)
 	STRACE(("HandleDirectConnection(bufferState = %" B_PRId32 ", driverState = "
 		"%" B_PRId32 ")\n", bufferState, driverState));
 
+	// FrontBuffer() can be deleted by a concurrent SetMode() (resize
+	// thread after a hotplug, or a rotation from another app): hold the
+	// parallel lock so the modeset's write lock waits out this call.
+	HWInterface* hwInterface = fDesktop->HWInterface();
+	if (!hwInterface->LockParallelAccess())
+		return;
+
 	status_t status = fDirectWindowInfo->SetState(
 		(direct_buffer_state)bufferState, (direct_driver_state)driverState,
-		fDesktop->HWInterface()->FrontBuffer(), fWindow->Frame(),
+		hwInterface->FrontBuffer(), fWindow->Frame(),
 		fWindow->VisibleContentRegion());
+
+	hwInterface->UnlockParallelAccess();
 
 	if (status != B_OK) {
 		char errorString[256];

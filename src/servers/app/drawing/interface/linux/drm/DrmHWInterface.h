@@ -16,6 +16,7 @@ extern "C" {
 #include <Region.h>
 #include <pthread.h>
 #include <atomic>
+#include <vector>
 
 #include "DrmBuffer.h"
 #include "HWInterface.h"
@@ -58,6 +59,15 @@ struct CrtcProps {
 struct ConnProps {
 	uint32_t crtc_id;
 	uint32_t dpms;
+};
+
+// A cursor-plane change held back until the next frame commit, so it
+// rides that commit instead of colliding with an in-flight flip (EBUSY).
+struct CursorUpdate {
+	bool		valid;
+	uint32_t	fb_id;
+	int32_t		x, y;
+	uint32_t	w, h;
 };
 
 // Values match the kernel's "panel orientation" connector property
@@ -152,6 +162,8 @@ public:
 			status_t			InitCheck() const;
 
 private:
+	struct FlipToken;
+
 	static	int32				_EventThreadEntry(void* data);
 			void				_EventThreadMain();
 			void				_RestoreDisplay();
@@ -172,6 +184,13 @@ private:
 	static	void				_PageFlipHandler(int fd, unsigned int frame,
 									unsigned int sec, unsigned int usec,
 									void* data);
+			// Front/back swap + damage rotation, flip event or paced flip.
+			// Entered with fFlipMutex held; releases it.
+			void				_FinishFrameSwap(uint64_t generation);
+			// Fallback for drivers whose page flip never works: wait a
+			// vblank, drmModeSetCrtc the back fb, then swap as a flip
+			// completion would. Tearing possible, display usable.
+			void				_VblankPacedFlip();
 
 			void				_BlitRect(RenderingBuffer* src,
 									RenderingBuffer* dst,
@@ -216,8 +235,14 @@ private:
 			status_t			_AtomicModeset(uint32_t fb_id,
 									drmModeModeInfo* mode);
 		status_t			_AtomicFlip(uint32_t fb_id,
+								FlipToken* token,
 								const BRect* dirty_rects,
 								uint32_t nrects);
+			// One request: primary fb (+damage clips) and cursor plane.
+			status_t			_AtomicCommitFrame(uint32_t fb_id,
+								const BRegion* damage,
+								const CursorUpdate* cursor,
+								FlipToken* token);
 			status_t			_AtomicSetCursor(uint32_t fb_id,
 									uint32_t crtc_id,
 									int32 x, int32 y,
@@ -262,8 +287,39 @@ private:
 
 			MallocBuffer*		fRenderBuffer;
 
-			bool				fPageFlipEnabled;
+			// Written only under fFlipMutex (SetMode, _OnSessionEnable),
+			// read lock-free by the event thread's flip gate; atomic so
+			// the unlocked read is well-defined. The buffer pointers it
+			// gates are validated under fFlipMutex before use.
+			std::atomic<bool>	fPageFlipEnabled;
 			std::atomic<bool>	fPageFlipPending;
+
+			// Serializes buffer pointer swaps (page-flip completion) against
+			// the SetMode() teardown that deletes those same buffers, and
+			// guards fDisplayMode's virtual size while a flip blits. Never
+			// held across a LockExclusiveAccess: the flip handler runs on
+			// the event thread and must not block on the mode lock, which
+			// SetMode() holds while it waits for that very handler.
+			pthread_mutex_t		fFlipMutex;
+			// Bumped whenever buffers are torn down or a drain gives up on
+			// an in-flight flip; a completion event whose token generation
+			// no longer matches is stale and must not swap anything.
+			uint64_t			fFlipGeneration;
+			// One heap token per issued flip, freed by the completion
+			// handler. A token for an abandoned flip stays listed so the
+			// eventual late event can be recognised and dropped, and the
+			// destructor reaps any the kernel never delivered.
+			struct FlipToken {
+				DrmHWInterface*	hw;
+				uint64_t		generation;
+			};
+			std::vector<FlipToken*> fFlipTokens;
+			pthread_cond_t		fFlipCond;
+			// Guards the modeset_dev list against udev hotplug/rescan while
+			// the event thread's flip path and the cursor ioctls hold a
+			// pointer into it. Copy scalars under this lock; the long users
+			// (SetMode, resize) are already serialized by the mode lock.
+			pthread_mutex_t		fModesetMutex;
 
 			// Dirty-rect accumulator (replaces fixed fFlipDirtyRects array).
 			// fAccumulatedDirty collects damage between flips. On flip
@@ -275,9 +331,20 @@ private:
 			bool				fNeedsFlip;
 			pthread_mutex_t		fDirtyMutex;
 
+			// Serialises _BlendCursor's write to the scanout buffer
+			// (fWriteTarget) between the main thread (CopyBackToFront,
+			// under the parallel lock) and the DRM event thread
+			// (_PageFlipHandler, under the exclusive lock only when it
+			// has damage to present). A software cursor blended with no
+			// new damage races the main-thread blend otherwise.
+			mutable pthread_mutex_t	fCursorBlendMutex;
+
 			int					fWakeFd;
 
-			uint32				fDpmsState;
+			// Written by SetDPMSMode() on an app thread, read by the event
+			// thread's flip gate; atomic so the flip path can check it
+			// under fFlipMutex without the connector lock.
+			std::atomic<uint32>	fDpmsState;
 
 			struct backlight*	fBacklight;
 
@@ -290,6 +357,18 @@ private:
 			uint32_t			fCursorPlaneId;
 			// Which API armed the cursor plane; set once by _ProbeCursor().
 			bool				fCursorUsesAtomic;
+			// VOS_ATOMIC_BATCH: flip, cursor and damage ride one atomic
+			// request. Off keeps the legacy page-flip and cursor ioctls.
+			bool				fAtomicBatch;
+			CursorUpdate		fStagedCursor;
+		// Armed once unsupported flip errors reach the limit: the
+		// driver has dumb buffers but no working page flip. Cleared
+		// on session enable; only flip-unsupported errnos count.
+		bool				fVblankPacedFlip;
+		uint32_t			fFlipFailures;
+		// Set while a modeset is in flight; a flip EINVAL during a
+		// modeset is transient, not proof the flip is broken.
+		std::atomic<bool>	fModesetActive;
 			uint32_t			fModeBlobId;
 			struct PlaneProps	fPlaneProps;
 			struct PlaneProps	fCursorPlaneProps;

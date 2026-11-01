@@ -4,7 +4,8 @@ Application(ShowImage
 	ImageCache.cpp
 	ImageFileNavigator.cpp
 	PrintOptionsWindow.cpp
-	ProgressWindow.cpp
+	InfoStatusView.cpp
+	ProgressStatusView.cpp
 	SelectionBox.cpp
 	ShowImageApp.cpp
 	ShowImageSettings.cpp
@@ -17,4 +18,4 @@ Application(ShowImage
 	RDEF ShowImage.rdef
 )
 UsePrivateHeaders(ShowImage tracker shared system kernel)
-DoCatalogs("x-vnd.Haiku-ShowImage" apps/showimage)
+DoCatalogs("x-vnd.vos-ShowImage" apps/showimage)

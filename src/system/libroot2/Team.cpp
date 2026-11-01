@@ -3,7 +3,10 @@
  *  Distributed under the terms of the LGPL License.
  */
 
+/* cc1plus predefines _GNU_SOURCE for C++. */
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 
 #include "Team.h"
 
@@ -18,11 +21,14 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 
+#include <new>
 #include <set>
 #include <string>
 
 #include "KernelDebug.h"
 #include "syscalls.h"
+#include "exec_status.h"
+#include "proc_read.h"
 #include <syscall_process_info.h>
 
 #include "../kernel/nexus/nexus/nexus.h"
@@ -109,12 +115,15 @@ signal_to_msg(int sig)
 
 
 void
-fault_handler(int sig)
+fault_handler(int sig, siginfo_t* /*info*/, void* /*context*/)
 {
 	debugger(signal_to_msg(sig));
 }
 
 
+// Priority <100 is reserved: the team must exist before other constructors.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wprio-ctor-dtor"
 void __attribute__ ((constructor(1)))
 init_team(int argc, char** argv)
 {
@@ -150,6 +159,10 @@ deinit_team()
 		gNexusNodeMonitor = -1;
 	}
 }
+
+
+#pragma GCC diagnostic pop
+
 
 void
 Team::InitTeam()
@@ -322,6 +335,9 @@ Team::ReinitChildAtFork()
 	pthread_mutex_init(&gLoadedPidsLock, NULL);
 	pthread_mutex_init(&gDevicesLock, NULL);
 
+	// Enumeration handles belong to the parent's get_next_* calls.
+	proc_enum_reset_after_fork();
+
 	// Inherited pids belong to the parent's LoadImage() calls, not ours;
 	// waiting on them here would race the parent's own reaping.
 	gLoadedPids.clear();
@@ -339,14 +355,34 @@ Team::ReinitChildAtFork()
 
 
 thread_id
-Team::LoadImage(int32 argc, const char** argv, const char** envp)
+Team::LoadImage(int32 argc, const char** argv, const char** envp,
+	int* _execStatusFd)
 {
 	if (argc < 1 || argv == NULL || argv[0] == NULL) {
 		TRACE("load_image: invalid arguments\n");
 		return B_BAD_VALUE;
 	}
 
+	if (_execStatusFd != NULL)
+		*_execStatusFd = -1;
+
 	TRACE("load_image: %s (argc=%d)\n", argv[0], argc);
+
+	// An unresolvable dependency is reported here, before the clone; the
+	// loader's list mode resolves libraries without running the app.
+	char loaderDetail[256];
+	status_t loaderStatus = CheckDynamicLoader(argv[0], loaderDetail,
+		sizeof(loaderDetail));
+	if (loaderStatus < B_OK) {
+		fprintf(stderr, "load_image: %s: %s%s%s\n", argv[0],
+			strerror(loaderStatus), loaderDetail[0] != '\0' ? ": " : "",
+			loaderDetail);
+		return loaderStatus;
+	}
+
+	int statusPipe[2] = { -1, -1 };
+	if (_execStatusFd != NULL && pipe2(statusPipe, O_CLOEXEC) != 0)
+		return B_NO_MORE_FDS;
 
 	TRACE("LoadImage: about to clone(), gNexus=%d gNexusArea=%d gNexusNodeMonitor=%d\n",
 		gNexus, gNexusArea, gNexusNodeMonitor);
@@ -359,10 +395,14 @@ Team::LoadImage(int32 argc, const char** argv, const char** envp)
 	if (pid == -1) {
 		TRACE("load_image: clone failed: %s\n", strerror(errno));
 		fprintf(stderr, "load_image: clone failed: %s\n", strerror(errno));
-		return -errno;
+		CloseExecStatusPipe(statusPipe[0], statusPipe[1]);
+		return errno == EAGAIN ? B_NO_MORE_TEAMS : B_ERROR;
 	}
 
 	if (pid == 0) {
+		if (statusPipe[0] >= 0)
+			close(statusPipe[0]);
+
 		TRACE("LoadImage CHILD: closing nexus fds gNexus=%d gNexusArea=%d gNexusNodeMonitor=%d\n",
 			gNexus, gNexusArea, gNexusNodeMonitor);
 
@@ -393,27 +433,61 @@ Team::LoadImage(int32 argc, const char** argv, const char** envp)
 		// Park until the creator's resume_thread().
 		thread_id id = nexus_io(nexus, NEXUS_THREAD_CLONE_EXECUTED, NULL);
 		if (id < 0) {
+			if (statusPipe[1] >= 0) {
+				signal(SIGPIPE, SIG_IGN);
+				status_t status = id;
+				write(statusPipe[1], &status, sizeof(status));
+			}
 			fprintf(stderr, "load_image child: nexus park failed (%d)\n",
 				(int)id);
 			_exit(127);
 		}
 
-		execvpe(argv[0], const_cast<char* const*>(argv),
-			envp ? const_cast<char* const*>(envp) : environ);
+		// execvpe() would fall back to /bin/sh on ENOEXEC, launching a
+		// 0-byte or text file as a script; real paths get no such tail.
+		if (strchr(argv[0], '/') != NULL) {
+			execve(argv[0], const_cast<char* const*>(argv),
+				envp ? const_cast<char* const*>(envp) : environ);
+		} else {
+			execvpe(argv[0], const_cast<char* const*>(argv),
+				envp ? const_cast<char* const*>(envp) : environ);
+		}
+
+		int execErrno = errno;
+
+		// The CLOEXEC write end closing on a successful exec is what tells
+		// the creator the image is up; a failure must carry its errno.
+		if (statusPipe[1] >= 0) {
+			// the creator may have given up on the pipe (suspended
+			// launch); the write must not kill us before the log line
+			signal(SIGPIPE, SIG_IGN);
+			status_t status = -execErrno;
+			write(statusPipe[1], &status, sizeof(status));
+		}
 
 		fprintf(stderr, "load_image child: exec failed for '%s': %s\n",
-			argv[0], strerror(errno));
+			argv[0], strerror(execErrno));
 
 		 // command not found
 		_exit(127);
 	}
+
+	if (statusPipe[1] >= 0)
+		close(statusPipe[1]);
 
 	int nexus = BKernelPrivate::Team::GetNexusDescriptor();
 	// Creator-side registration: nexus pre-creates the child's team, so a
 	// resume_thread() that lands before the child opens /dev/nexus is kept.
 	thread_id id = nexus_io(nexus, NEXUS_THREAD_REGISTER, (void*)(intptr_t)pid);
 	if (id < 0) {
+		// The child may be parked for a resume that never comes.
 		printf("Fork failed\n");
+		kill(pid, SIGKILL);
+		pthread_mutex_lock(&gLoadedPidsLock);
+		if (gLoadedPids.size() < kMaxTrackedPids)
+			gLoadedPids.insert(pid);
+		pthread_mutex_unlock(&gLoadedPidsLock);
+		CloseExecStatusPipe(statusPipe[0], -1);
 		return B_BAD_THREAD_ID;
 	}
 
@@ -423,6 +497,9 @@ Team::LoadImage(int32 argc, const char** argv, const char** envp)
 	if (gLoadedPids.size() < kMaxTrackedPids)
 		gLoadedPids.insert(pid);
 	pthread_mutex_unlock(&gLoadedPidsLock);
+
+	if (_execStatusFd != NULL)
+		*_execStatusFd = statusPipe[0];
 
 	TRACE("load_image: success\n");
 	return id;
@@ -446,62 +523,31 @@ _get_team_usage_info(team_id team, int32 who, team_usage_info* info, size_t size
 	info->user_time = 0;
 	info->kernel_time = 0;
 
-	int pidfd = (int)syscall(SYS_pidfd_open, (pid_t)team, 0);
-
-	if (pidfd < 0) {
-		char procdir[64];
-		snprintf(procdir, sizeof(procdir), "/proc/%d", team);
-		if (access(procdir, F_OK) != 0)
-			return B_BAD_TEAM_ID;
-	}
-
-	char path[64];
-	char buf[4096];
-
-	snprintf(path, sizeof(path), "/proc/%d/stat", team);
-	int fd = open(path, O_RDONLY | O_CLOEXEC);
-	if (fd < 0) {
-		if (pidfd >= 0)
-			close(pidfd);
+	// The pinned /proc/<team> directory keeps a reused pid out of the read.
+	struct proc_dir dir;
+	if (!proc_dir_open_pid(&dir, (pid_t)team))
 		return B_BAD_TEAM_ID;
-	}
 
-	ssize_t dataRead = read(fd, buf, sizeof(buf) - 1);
+	int fd = proc_dir_open_file(&dir, "stat");
+	proc_dir_close(&dir);
+	if (fd < 0)
+		return B_BAD_TEAM_ID;
+
+	char buffer[1024];
+	ssize_t dataRead = proc_read_all(fd, buffer, sizeof(buffer));
 	close(fd);
-	if (pidfd >= 0)
-		close(pidfd);
 	if (dataRead <= 0)
 		return B_ERROR;
 
-	buf[dataRead] = '\0';
-
-	char* paren = strrchr(buf, ')');
-	if (!paren)
+	struct proc_stat_info stat;
+	if (!proc_parse_stat(buffer, &stat))
 		return B_ERROR;
 
-	char* p = paren + 2;
-	unsigned long utime_ticks = 0, stime_ticks = 0;
-	int field = 3;
-	char* save = NULL;
-	char* token = strtok_r(p, " ", &save);
-
-	while (token) {
-		if (field == 14) {
-			utime_ticks = strtoul(token, NULL, 10);
-		} else if (field == 15) {
-			stime_ticks = strtoul(token, NULL, 10);
-			break;
-		}
-		field++;
-		token = strtok_r(NULL, " ", &save);
-	}
-
-	long hz = sysconf(_SC_CLK_TCK);
-	if (hz <= 0)
-		hz = 100;
-
-	info->user_time = (bigtime_t)((utime_ticks * 1000000ULL) / (unsigned long)hz);
-	info->kernel_time = (bigtime_t)((stime_ticks * 1000000ULL) / (unsigned long)hz);
+	long hz = proc_clk_tck();
+	info->user_time = (bigtime_t)((stat.utimeTicks * 1000000ULL)
+		/ (uint64)hz);
+	info->kernel_time = (bigtime_t)((stat.stimeTicks * 1000000ULL)
+		/ (uint64)hz);
 
 	return B_OK;
 }
@@ -518,14 +564,22 @@ kill_team(team_id team)
 }
 
 
+static status_t _GetTeamInfoFrom(int dirFd, const char* prefix, team_id id,
+	team_info* info, size_t size);
+
+
+static int
+_OpenPrefixed(int dirFd, const char* prefix, const char* name)
+{
+	char path[64];
+	snprintf(path, sizeof(path), "%s%s", prefix, name);
+	return proc_openat_file(dirFd, path);
+}
+
+
 status_t
 _get_team_info(team_id id, team_info* info, size_t size)
 {
-	#define UID_LINE 8
-	#define GID_LINE 9
-	#define MAX_BYTES 64
-	#define MAX_LINE_LENGTH 1024
-
 	if (id < 0 || info == NULL || size != sizeof(team_info))
 		return B_BAD_VALUE;
 
@@ -533,76 +587,52 @@ _get_team_info(team_id id, team_info* info, size_t size)
 	if (id == 0)
 		id = getpid();
 
-	int pidfd = (int)syscall(SYS_pidfd_open, (pid_t)id, 0);
+	proc_refresh_boot_time();
 
-	if (pidfd < 0) {
-		char procdir[64];
-		snprintf(procdir, sizeof(procdir), "/proc/%d", id);  // use id, not pidfd
-		if (access(procdir, F_OK) != 0)
-			return B_BAD_TEAM_ID;
-	}
-
-	memset(info, 0, sizeof(team_info));
-
-	char procPath[B_PATH_NAME_LENGTH];
-	char buffer[MAX_LINE_LENGTH];
-	char commandProcPath[B_PATH_NAME_LENGTH];
-
-	snprintf(procPath, sizeof(procPath), "/proc/%d/status", id);
-	snprintf(commandProcPath, sizeof(commandProcPath), "/proc/%d/cmdline", id);
-	FILE* statusFile = fopen(procPath, "r");
-	if (statusFile == NULL) {
-		if (pidfd >= 0)
-			close(pidfd);
+	struct proc_dir dir;
+	if (!proc_dir_open_pid(&dir, (pid_t)id))
 		return B_BAD_TEAM_ID;
-	}
 
+	status_t result = _GetTeamInfoFrom(dir.dirFd, "", id, info, size);
+	proc_dir_close(&dir);
+	return result;
+}
+
+
+// dirFd is the pinned /proc/<id>, or the walk's /proc fd with prefix "<id>/".
+static status_t
+_GetTeamInfoFrom(int dirFd, const char* prefix, team_id id, team_info* info,
+	size_t size)
+{
+	memset(info, 0, sizeof(team_info));
 	info->team = id;
-	info->name[0] = '\0';
 
-	while (fgets(buffer, sizeof(buffer), statusFile) != NULL) {
-		if (strncmp(buffer, "Name:", 5) == 0) {
-			const char* name = buffer + 5;
-			while (*name == ' ' || *name == '\t')
-				name++;
+	char buffer[2048];
 
-			size_t length = 0;
-			while (length < B_OS_NAME_LENGTH - 1) {
-				unsigned char c = (unsigned char)name[length];
-				if (c == '\0' || c == '\n' || c == '\r'
-					|| c < 0x20 || c == 0x7f) {
-					break;
-				}
-				info->name[length] = name[length];
-				length++;
-			}
-			info->name[length] = '\0';
-		} else if (strncmp(buffer, "Uid:", 4) == 0) {
-			uid_t ruid = 0, euid = 0, suid = 0, fuid = 0;
-			sscanf(buffer + 4, "%u %u %u %u", &ruid, &euid, &suid, &fuid);
-			info->real_uid = ruid;
-			info->uid = euid;
-		} else if (strncmp(buffer, "Gid:", 4) == 0) {
-			gid_t rgid = 0, egid = 0, sgid = 0, fgid = 0;
-			sscanf(buffer + 4, "%u %u %u %u", &rgid, &egid, &sgid, &fgid);
-			info->real_gid = rgid;
-			info->gid = egid;
-		} else if (strncmp(buffer, "Threads:", 8) == 0) {
-			sscanf(buffer + 8, "%d", &info->thread_count);
-		} else if (strncmp(buffer, "PPid:", 5) == 0) {
-			pid_t ppid = (pid_t)atoi(buffer + 5);
-			info->parent = (team_id)ppid;
+	int statusFd = _OpenPrefixed(dirFd, prefix, "status");
+	if (statusFd < 0)
+		return B_BAD_TEAM_ID;
+
+	if (proc_read_all(statusFd, buffer, sizeof(buffer)) > 0) {
+		struct proc_status_info status;
+		if (proc_parse_status(buffer, &status)) {
+			strlcpy(info->name, status.name, sizeof(info->name));
+			info->real_uid = status.realUid;
+			info->uid = status.effectiveUid;
+			info->real_gid = status.realGid;
+			info->gid = status.effectiveGid;
+			info->thread_count = status.threadCount;
+			info->parent = (team_id)status.ppid;
 		}
 	}
-
-	fclose(statusFile);
+	close(statusFd);
 
 	info->argc = 0;
 	info->args[0] = '\0';
 
-	int cmdFd = open(commandProcPath, O_RDONLY | O_CLOEXEC);
+	int cmdFd = _OpenPrefixed(dirFd, prefix, "cmdline");
 	if (cmdFd >= 0) {
-		ssize_t length = read(cmdFd, buffer, sizeof(buffer) - 1);
+		ssize_t length = proc_read_all(cmdFd, buffer, sizeof(buffer));
 		close(cmdFd);
 
 		if (length > 0) {
@@ -636,27 +666,37 @@ _get_team_info(team_id id, team_info* info, size_t size)
 		info->argc = 1;
 	}
 
-	char mapsPath[B_PATH_NAME_LENGTH];
-	snprintf(mapsPath, sizeof(mapsPath), "/proc/%d/maps", id);
-	FILE* maps = fopen(mapsPath, "r");
-	if (maps != NULL) {
+	ProcLineReader maps;
+	if (maps.OpenFd(_OpenPrefixed(dirFd, prefix, "maps"))) {
 		int images = 0;
 		int areas = 0;
 		char lastPath[PATH_MAX] = {0};
-		while (fgets(buffer, sizeof(buffer), maps)) {
+		size_t lastPathLength = 0;
+		const char* line;
+		while ((line = maps.Next()) != NULL) {
+			// Only file-backed lines can be images; skip the parse otherwise.
 			areas++;
-			char* p = strchr(buffer, '/');
-			if (p != NULL) {
-				char* nl = strchr(p, '\n');
-				if (nl != NULL)
-					*nl = '\0';
-				if (lastPath[0] == '\0' || strcmp(p, lastPath) != 0) {
-					images++;
-					strlcpy(lastPath, p, sizeof(lastPath));
-				}
+			if (strchr(line, '/') == NULL)
+				continue;
+
+			struct proc_map_line map;
+			if (!proc_parse_map_header(line, &map))
+				continue;
+			if (map.pathLength == 0 || map.path[0] != '/')
+				continue;
+
+			// Consecutive mappings of the same file count as one image,
+			// matching the previous lastPath dedup.
+			if (lastPathLength != map.pathLength
+				|| memcmp(map.path, lastPath, map.pathLength) != 0) {
+				images++;
+				lastPathLength = map.pathLength;
+				if (lastPathLength > sizeof(lastPath) - 1)
+					lastPathLength = sizeof(lastPath) - 1;
+				memcpy(lastPath, map.path, lastPathLength);
+				lastPath[lastPathLength] = '\0';
 			}
 		}
-		fclose(maps);
 		info->image_count = images;
 		info->area_count = areas;
 	}
@@ -664,65 +704,44 @@ _get_team_info(team_id id, team_info* info, size_t size)
 	info->debugger_nub_thread = -1;
 	info->debugger_nub_port = 0;
 
-	char statPath[B_PATH_NAME_LENGTH];
-	snprintf(statPath, sizeof(statPath), "/proc/%d/stat", id);
-	FILE* statFile = fopen(statPath, "r");
-	if (statFile != NULL) {
-		char statBuffer[4096];
-		size_t length = fread(statBuffer, 1, sizeof(statBuffer) - 1, statFile);
-		statBuffer[length] = '\0';
-		fclose(statFile);
+	int statFd = _OpenPrefixed(dirFd, prefix, "stat");
+	if (statFd >= 0) {
+		char statBuffer[1024];
+		ssize_t length = proc_read_all(statFd, statBuffer,
+			sizeof(statBuffer));
+		close(statFd);
 
-		char* rparen = strrchr(statBuffer, ')');
-		if (rparen != NULL) {
-			char* saveptr = NULL;
-			(void)strtok_r(rparen + 2, " ", &saveptr);
-			(void)strtok_r(NULL, " ", &saveptr);
+		struct proc_stat_info stat;
+		if (length > 0 && proc_parse_stat(statBuffer, &stat)) {
+			info->group_id = stat.pgrp;
+			info->session_id = stat.session;
 
-			char* token = strtok_r(NULL, " ", &saveptr);
-			if (token != NULL)
-				info->group_id = (pid_t)strtol(token, NULL, 10);
-
-			token = strtok_r(NULL, " ", &saveptr);
-			if (token != NULL)
-				info->session_id = (pid_t)strtol(token, NULL, 10);
-
-			int field = 5;
-			while (field < 22 && (token = strtok_r(NULL, " ", &saveptr)))
-				field++;
-
-			if (token != NULL) {
-				unsigned long long starttime = strtoull(token, NULL, 10);
-				if (starttime != 0) {
-					long ticks = sysconf(_SC_CLK_TCK);
-					if (ticks <= 0)
-						ticks = 100;
-
-					double uptime = 0.0;
-					FILE* uptimeFile = fopen("/proc/uptime", "r");
-					if (uptimeFile != NULL) {
-						if (fscanf(uptimeFile, "%lf", &uptime) != 1)
-							uptime = 0.0;
-						fclose(uptimeFile);
-					}
-
-					struct timespec now;
-					if (clock_gettime(CLOCK_REALTIME, &now) == 0
-						&& uptime > 0.0) {
-						double bootTime = now.tv_sec - uptime;
-						double startSeconds = (double)starttime / (double)ticks;
-						info->start_time
-							= (bigtime_t)((bootTime + startSeconds) * 1e6);
-					}
+			if (stat.startTimeTicks != 0) {
+				uint64 bootTime = proc_boot_time_micros();
+				if (bootTime != 0) {
+					double startSeconds
+						= (double)stat.startTimeTicks
+							/ (double)proc_clk_tck();
+					info->start_time = (bigtime_t)(bootTime
+						+ (uint64)(startSeconds * 1e6));
 				}
 			}
 		}
 	}
 
-	if (pidfd >= 0)
-		close(pidfd);
 	return B_OK;
 }
+
+
+namespace {
+
+
+struct TeamEnumState {
+	ProcDirBatch	batch;
+};
+
+
+} // namespace
 
 
 status_t
@@ -733,38 +752,45 @@ _get_next_team_info(int32* cookie, team_info* info, size_t size)
 		return B_BAD_VALUE;
 	}
 
-	// The cookie holds the open /proc fd between calls, encoded as fd+1 so
-	// that 0 still means "start fresh".
-	int fd;
+	TeamEnumState* state;
 	if (*cookie == 0) {
-		fd = _kern_open_dir(-1, "/proc");
-		if (fd < 0)
+		state = new (std::nothrow) TeamEnumState();
+		if (state == NULL)
+			return B_NO_MEMORY;
+
+		if (!state->batch.Open("/proc")) {
+			delete state;
 			return B_ERROR;
-	} else
-		fd = *cookie - 1;
-
-	union {
-		struct dirent entry;
-		char buffer[sizeof(struct dirent) + NAME_MAX + 1];
-	} dirent;
-
-	while (true) {
-		ssize_t count = _kern_read_dir(fd, &dirent.entry, sizeof(dirent), 1);
-		if (count <= 0) {
-			_kern_close(fd);
-			*cookie = 0;
-			return B_BAD_VALUE;
 		}
 
-		pid_t pid = (pid_t)atoi(dirent.entry.d_name);
-		if (pid <= 0)
-			continue;
+		*cookie = proc_enum_alloc(state);
+		if (*cookie == 0) {
+			delete state;
+			return B_NO_MEMORY;
+		}
+		// One refresh covers every team of the walk.
+		proc_refresh_boot_time();
+	} else {
+		state = (TeamEnumState*)proc_enum_state(*cookie);
+		if (state == NULL)
+			return B_BAD_VALUE;
+	}
 
-		if (_get_team_info((team_id)pid, info, size) == B_OK) {
-			*cookie = fd + 1;
+	pid_t pid;
+	while (state->batch.NextPid(&pid)) {
+		// Files open relative to the enumeration's own /proc fd, with the
+		// pid as a path prefix; no per-team directory open.
+		char prefix[32];
+		snprintf(prefix, sizeof(prefix), "%d/", (int)pid);
+		if (_GetTeamInfoFrom(state->batch.Fd(), prefix, (team_id)pid, info,
+				size) == B_OK) {
 			return B_OK;
 		}
 	}
+
+	delete (TeamEnumState*)proc_enum_release(*cookie);
+	*cookie = -1;
+	return B_BAD_VALUE;
 }
 
 
@@ -784,49 +810,40 @@ get_memory_properties(team_id teamID, const void* address, uint32* _protected,
 	if (teamID == 0)
 		teamID = getpid();
 
-	int pidfd = (int)syscall(SYS_pidfd_open, (pid_t)teamID, 0);
+	struct proc_dir dir;
+	if (!proc_dir_open_pid(&dir, (pid_t)teamID))
+		return B_BAD_TEAM_ID;
 
-	if (pidfd < 0) {
-		char procdir[64];
-		snprintf(procdir, sizeof(procdir), "/proc/%d", teamID);
-		if (access(procdir, F_OK) != 0)
-			return B_BAD_TEAM_ID;
-	}
+	unsigned long long addr = (unsigned long long)(uintptr_t)address;
+	unsigned long long start = 0;
+	unsigned long long end = 0;
+	char perms[8] = {0};
+	bool found = false;
 
-	char maps_path[64];
-	snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", teamID);
-	FILE* maps = fopen(maps_path, "r");
-	if (maps == NULL) {
-		if (pidfd >= 0)
-			close(pidfd);
+	ProcLineReader maps;
+	if (!maps.Open(&dir, "maps")) {
+		proc_dir_close(&dir);
 		return B_BAD_TEAM_ID;
 	}
 
-	unsigned long long addr = (unsigned long long)(uintptr_t)address;
-	char line[512];
-	int found = 0;
-	char perms[8] = {0};
-	unsigned long long start = 0, end = 0;
-	char pathname[PATH_MAX] = {0};
+	const char* line;
+	while ((line = maps.Next()) != NULL) {
+		struct proc_map_line map;
+		if (!proc_parse_map_header(line, &map))
+			continue;
 
-	while (fgets(line, sizeof(line), maps)) {
-		// line format: start-end perms offset dev inode pathname
-		// e.g. 00400000-0040b000 r-xp 00000000 08:01 131073 /bin/cat
-		int fields = sscanf(line, "%llx-%llx %7s %*s %*s %*s %1023[^\n]",
-							&start, &end, perms, pathname);
-		if (fields >= 3) {
-			if (addr >= start && addr < end) {
-				found = 1;
-				break;
-			}
+		if (addr >= map.start && addr < map.end) {
+			found = true;
+			start = map.start;
+			end = map.end;
+			strlcpy(perms, map.perms, sizeof(perms));
+			break;
 		}
 	}
-
-	fclose(maps);
+	maps.Close();
 
 	if (!found) {
-		if (pidfd >= 0)
-			close(pidfd);
+		proc_dir_close(&dir);
 		return B_BAD_VALUE;
 	}
 
@@ -836,45 +853,27 @@ get_memory_properties(team_id teamID, const void* address, uint32* _protected,
 	if (perms[2] == 'x') prot |= B_EXECUTE_AREA;
 	*_protected = prot;
 
-	char smaps_path[64];
-	snprintf(smaps_path, sizeof(smaps_path), "/proc/%d/smaps", teamID);
-	FILE* smaps = fopen(smaps_path, "r");
-	if (smaps != NULL) {
-		while (fgets(line, sizeof(line), smaps)) {
-			unsigned long long s = 0, e = 0;
-			char p[8] = {0};
-			int hdr = sscanf(line, "%llx-%llx %7s", &s, &e, p);
-			if (hdr >= 2) {
-				if (s == start && e == end) {
-					while (fgets(line, sizeof(line), smaps)) {
-						if (strncmp(line, "Locked:", 7) == 0) {
-							long locked_kb = 0;
-							if (sscanf(line + 7, "%ld", &locked_kb) == 1) {
-								if (locked_kb > 0)
-									*_lock = 1;
-								else
-									*_lock = 0;
-							}
-							fclose(smaps);
-							if (pidfd >= 0)
-								close(pidfd);
-							return B_OK;
-						}
-						if (strchr(line, '-') && strstr(line, "kB") == NULL)
-							break;
-					}
-					break;
-				} else {
-					continue;
-				}
+	// The Locked: flag lives in smaps, which needs PTRACE rights for other
+	// teams; unreadable smaps just leaves the lock unknown (reported 0).
+	ProcLineReader smaps;
+	if (smaps.Open(&dir, "smaps")) {
+		bool inTarget = false;
+		while ((line = smaps.Next()) != NULL) {
+			struct proc_map_line map;
+			if (proc_parse_map_header(line, &map)) {
+				inTarget = (map.start == start && map.end == end);
+				continue;
+			}
+
+			if (inTarget && strncmp(line, "Locked:", 7) == 0) {
+				long lockedKb = strtol(line + 7, NULL, 10);
+				*_lock = lockedKb > 0 ? 1 : 0;
+				break;
 			}
 		}
-		fclose(smaps);
 	}
+	proc_dir_close(&dir);
 
-	if (pidfd >= 0)
-		close(pidfd);
-	*_lock = 0;
 	return B_OK;
 }
 
@@ -888,21 +887,26 @@ _kern_process_info(pid_t process, int32 which)
 		case GROUP_ID:
 			return getpgid(process);
 		case PARENT_ID: {
-			char path[64];
-			snprintf(path, sizeof(path), "/proc/%d/status", (int)process);
-			FILE* f = fopen(path, "r");
-			if (f == NULL)
+			struct proc_dir dir;
+			if (!proc_dir_open_pid(&dir, (pid_t)process))
 				return -1;
-			char line[256];
-			pid_t ppid = -1;
-			while (fgets(line, sizeof(line), f)) {
-				if (strncmp(line, "PPid:", 5) == 0) {
-					sscanf(line + 5, "%d", &ppid);
-					break;
-				}
+
+			int fd = proc_dir_open_file(&dir, "status");
+			proc_dir_close(&dir);
+			if (fd < 0)
+				return -1;
+
+			char buffer[1024];
+			if (proc_read_all(fd, buffer, sizeof(buffer)) <= 0) {
+				close(fd);
+				return -1;
 			}
-			fclose(f);
-			return ppid;
+			close(fd);
+
+			struct proc_status_info status;
+			if (!proc_parse_status(buffer, &status))
+				return -1;
+			return status.ppid;
 		}
 		default:
 			return -1;

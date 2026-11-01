@@ -40,8 +40,6 @@ virtual	void						GetMode(display_mode* mode);
 virtual	status_t					GetPreferredMode(display_mode* mode);
 
 virtual status_t					GetDeviceInfo(accelerant_device_info* info);
-virtual status_t					GetFrameBufferConfig(
-										frame_buffer_config& config);
 
 virtual status_t					GetModeList(display_mode** _modeList,
 										uint32* _count);
@@ -78,6 +76,7 @@ virtual	bool						IsDoubleBuffered() const;
 
 virtual	status_t					InvalidateRegion(const BRegion& region);
 virtual	status_t					Invalidate(const BRect& frame);
+		using HWInterface::CopyBackToFront;
 virtual	status_t					CopyBackToFront(const BRect& frame);
 
 		// drawing engine interface

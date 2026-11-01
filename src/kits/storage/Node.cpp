@@ -98,7 +98,7 @@ node_ref::node_ref(dev_t device, ino_t node)
 	if (cache_ticket == BPrivate::B_INVALID_VREF_TICKET)
 		return;
 
-	int fd = BPrivate::VRefCache::Open((vref_id)node);
+	int fd = BPrivate::VRefCache::OpenPath((vref_id)node);
 	if (fd < 0)
 		return;
 
@@ -377,7 +377,7 @@ BNode::SetTo(const BEntry* entry)
 status_t
 BNode::SetTo(const char* path)
 {
-	return _SetTo(-1, path, false);
+	return _SetTo(AT_FDCWD, path, false);
 }
 
 
@@ -527,10 +527,15 @@ BNode::GetNextAttrName(char* buffer)
 status_t
 BNode::RewindAttrs()
 {
+	if (fAttrFd >= 0) {
+		_kern_close(fAttrFd);
+		fAttrFd = -1;
+	}
+
 	if (InitAttrDir() != B_OK)
 		return B_FILE_ERROR;
 
-	return _kern_rewind_dir(fAttrFd);
+	return B_OK;
 }
 
 
@@ -814,10 +819,10 @@ BNode::_SetTo(const entry_ref* ref, bool traverse)
 
 		if (ref->is_virtual()) {
 			fFd = _kern_open_virtual_ref(ref->vdirectory(), ref->name,
-					O_CLOEXEC | traverseFlag, O_RDWR);
+					O_RDWR | O_CLOEXEC | traverseFlag, 0);
 			if (fFd < B_OK && fFd != B_ENTRY_NOT_FOUND) {
 				fFd = _kern_open_virtual_ref(ref->vdirectory(), ref->name,
-					O_CLOEXEC | traverseFlag, O_RDONLY);
+					O_RDONLY | O_CLOEXEC | traverseFlag, 0);
 			}
 		} else {
 			fFd = _kern_open_entry_ref(ref->device(), ref->directory(), ref->name,

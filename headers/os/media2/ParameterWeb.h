@@ -1,7 +1,7 @@
 /*
  * Copyright 2025-2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2025-2026, The Vitruvian Project. All Rights Reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #ifndef _MEDIA2_PARAMETER_WEB_H
@@ -20,6 +20,7 @@ class BParameterWeb;
 class BNullParameter;
 class BContinuousParameter;
 class BDiscreteParameter;
+class BControllable;
 
 
 
@@ -53,11 +54,15 @@ extern const char* const B_SIMPLE_TRANSPORT;
 extern const char* const B_INPUT_MUX;
 extern const char* const B_ENABLE;
 extern const char* const B_MUTE;
+extern const char* const B_SWITCH;
 
 
 
 enum {
-	B_HIDDEN_PARAMETER = 0x01
+	B_HIDDEN_PARAMETER = 0x01,
+	// Continuous value is mapped on a log scale by the theme; the stored
+	// value stays in the parameter's natural range.
+	B_LOGARITHMIC_PARAMETER = 0x02
 };
 
 
@@ -100,6 +105,11 @@ public:
 			BParameter*				OutputAt(int32 index) const;
 			status_t				AddOutput(BParameter* output);
 
+			// Set by BControllable when it owns this web; GetValue/SetValue
+			// then route through the controllable (the graph node when bound).
+			void					SetControllable(BControllable* controllable);
+			BControllable*			Controllable() const;
+
 	virtual	type_code				ValueType() = 0;
 
 protected:
@@ -109,6 +119,7 @@ protected:
 										const char* unit);
 
 	friend class BParameterGroup;
+	friend class BControllable;
 
 			int32					fId;
 			media_parameter_type	fType;
@@ -122,6 +133,7 @@ protected:
 			uint32					fFlags;
 			BObjectList<BParameter, false>	fInputs;
 			BObjectList<BParameter, false>	fOutputs;
+			BControllable*			fControllable;
 };
 
 
@@ -248,6 +260,10 @@ public:
 
 			uint32					Flags() const;
 			void					SetFlags(uint32 flags);
+
+			// Propagate a controllable to every parameter in this group
+			// and its subgroups.
+			void					SetControllable(BControllable* controllable);
 
 private:
 			BParameterWeb*			fWeb;

@@ -1,9 +1,10 @@
 /*
  * Copyright 2025-2026, Dario Casalinuovo. All rights reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #include <media2/MediaNode.h>
+#include <media2/MediaGraph.h>
 
 #include <new>
 #include <stdio.h>
@@ -19,44 +20,48 @@
 #include <pipewire/proxy.h>
 #include <spa/param/props.h>
 
+#include <MediaClientPrivate.h>
+#include <MediaNodePrivate.h>
+
 #include "PipeWireBackend.h"
 
 
 using namespace BPrivate::media;
 
 
-const struct pw_link_events BMediaNode::sLinkEvents = {
-	PW_VERSION_LINK_EVENTS,
-	.info = &BMediaNode::_OnLinkInfo
-};
-
-
-void
-BMediaNode::_OnLinkInfo(void* data, const struct pw_link_info* info)
+static void
+_OnLinkInfo(void* data, const struct pw_link_info* info)
 {
-	NodeLinkInfo* linkInfo = (NodeLinkInfo*)data;
+	NodeLinkState::Info* linkInfo = (NodeLinkState::Info*)data;
 
 	if (info == NULL || linkInfo == NULL || linkInfo->owner == NULL)
 		return;
 
 	{
-		BAutolock _(linkInfo->owner->fLinksLock);
+		BAutolock _(linkInfo->owner->lock);
 		linkInfo->state = info->state;
 	}
 
 	if (info->state == PW_LINK_STATE_ERROR || info->state == PW_LINK_STATE_UNLINKED) {
 		PipeWireBackend* backend = PipeWireBackend::GetInstance();
 		if (backend != NULL)
-			backend->_Broadcast('PWLC', pw_proxy_get_bound_id(linkInfo->proxy));
+			backend->_Broadcast(BMediaGraph::B_MEDIA_LINKS_CHANGED,
+				pw_proxy_get_bound_id(linkInfo->proxy));
 	}
 }
+
+static const struct pw_link_events sLinkEvents = {
+	PW_VERSION_LINK_EVENTS,
+	.info = &_OnLinkInfo
+};
 
 
 BMediaNode::BMediaNode(const char* name, media_type type,
 	media_client_kinds kinds)
 	:
 	BMediaClient(name, kinds),
-	fFormat()
+	fFormat(),
+	fLinkState(new NodeLinkState)
 {
 	fFormat.SetToDefault();
 	fFormat.format.type = type;
@@ -66,6 +71,7 @@ BMediaNode::BMediaNode(const char* name, media_type type,
 BMediaNode::~BMediaNode()
 {
 	Stop();
+	delete fLinkState;
 }
 
 
@@ -119,16 +125,21 @@ BMediaNode::_StartConnections(void* backendPtr)
 			continue;
 
 		BMediaFormat format = output->Format();
-		if (format.Type() == B_MEDIA_NO_TYPE)
+		if (format.Type() == B_MEDIA_NO_TYPE) {
 			format = fFormat;
+			// The process callback reads the connection's format; without
+			// this it saw no type and queued empty buffers forever.
+			output->fFormat = format;
+		}
 
-		if (!format.IsRawAudio())
+		if (!format.IsRawAudio() && !format.IsRawVideo())
 			return B_NOT_SUPPORTED;
 
 		pw_direction direction = PW_DIRECTION_OUTPUT;
 		pw_stream* stream = backend->CreateAndConnectStream(
 			output->Name(), direction, format,
-			_GetStreamEvents(), output);
+			ClientAccess::StreamEvents(),
+			static_cast<BMediaConnection*>(output), NULL, false, true);
 		if (stream == NULL)
 			return B_ERROR;
 
@@ -141,16 +152,21 @@ BMediaNode::_StartConnections(void* backendPtr)
 			continue;
 
 		BMediaFormat format = input->Format();
-		if (format.Type() == B_MEDIA_NO_TYPE)
+		if (format.Type() == B_MEDIA_NO_TYPE) {
 			format = fFormat;
+			// The process callback reads the connection's format; without
+			// this it saw no type and queued empty buffers forever.
+			input->fFormat = format;
+		}
 
-		if (!format.IsRawAudio())
+		if (!format.IsRawAudio() && !format.IsRawVideo())
 			return B_NOT_SUPPORTED;
 
 		pw_direction direction = PW_DIRECTION_INPUT;
 		pw_stream* stream = backend->CreateAndConnectStream(
 			input->Name(), direction, format,
-			_GetStreamEvents(), input);
+			ClientAccess::StreamEvents(),
+			static_cast<BMediaConnection*>(input), NULL, false, false);
 		if (stream == NULL)
 			return B_ERROR;
 
@@ -212,12 +228,12 @@ BMediaNode::_StreamFault(BMediaConnection* conn)
 	// The dead stream's node is gone, so any link we had tracked for it is
 	// already gone on the graph side; just drop our bookkeeping.
 	{
-		BAutolock _(fLinksLock);
-		auto it = fLinks.find(badStream);
-		if (it != fLinks.end()) {
+		BAutolock _(fLinkState->lock);
+		auto it = fLinkState->links.find(badStream);
+		if (it != fLinkState->links.end()) {
 			for (size_t i = 0; i < it->second.size(); i++)
-				fLinkInfos.erase(it->second[i]);
-			fLinks.erase(it);
+				fLinkState->infos.erase(it->second[i]);
+			fLinkState->links.erase(it);
 		}
 	}
 
@@ -234,7 +250,10 @@ BMediaNode::_StreamFault(BMediaConnection* conn)
 	// A brand new stream also means a brand new clock/latency estimate
 	// instead of trying to make up for however long we were gone.
 	pw_stream* stream = backend->CreateAndConnectStream(conn->Name(),
-		direction, format, _GetStreamEvents(), conn);
+		direction, format, ClientAccess::StreamEvents(), conn, NULL, false,
+		direction == PW_DIRECTION_OUTPUT);
+	// conn is already the BMediaConnection*; callbacks cast userdata back
+	// to it, which is only valid for that exact pointer (virtual base).
 	if (stream == NULL)
 		return;
 
@@ -294,18 +313,18 @@ BMediaNode::Unbind(BMediaInput* input, BMediaOutput* output)
 	backend->Lock();
 	status_t result = B_ENTRY_NOT_FOUND;
 	{
-		BAutolock _(fLinksLock);
-		auto it = fLinks.find(output->fStream);
-		if (it != fLinks.end()) {
+		BAutolock _(fLinkState->lock);
+		auto it = fLinkState->links.find(output->fStream);
+		if (it != fLinkState->links.end()) {
 			for (size_t i = 0; i < it->second.size(); i++) {
-				auto infoIt = fLinkInfos.find(it->second[i]);
-				if (infoIt != fLinkInfos.end()) {
+				auto infoIt = fLinkState->infos.find(it->second[i]);
+				if (infoIt != fLinkState->infos.end()) {
 					spa_hook_remove(&infoIt->second.listener);
 					pw_proxy_destroy(infoIt->second.proxy);
-					fLinkInfos.erase(infoIt);
+					fLinkState->infos.erase(infoIt);
 				}
 			}
-			fLinks.erase(it);
+			fLinkState->links.erase(it);
 			result = B_OK;
 		}
 	}
@@ -321,8 +340,9 @@ BMediaNode::Unbind(BMediaInput* input, BMediaOutput* output)
 
 
 status_t
-BMediaNode::_CreateLink(BMediaOutput* output, BMediaInput* input, pw_core* core)
+BMediaNode::_CreateLink(BMediaOutput* output, BMediaInput* input, void* corePtr)
 {
+	pw_core* core = (pw_core*)corePtr;
 	PipeWireBackend* backend = PipeWireBackend::GetInstance();
 	if (backend == NULL)
 		return B_DEVICE_NOT_FOUND;
@@ -377,11 +397,11 @@ BMediaNode::_CreateLink(BMediaOutput* output, BMediaInput* input, pw_core* core)
 
 		uint32 key = pw_proxy_get_bound_id(proxy);
 		{
-			BAutolock linksLock(fLinksLock);
-			NodeLinkInfo& info = fLinkInfos[key];
+			BAutolock linksLock(fLinkState->lock);
+			NodeLinkState::Info& info = fLinkState->infos[key];
 			info.proxy = proxy;
 			info.state = PW_LINK_STATE_INIT;
-			info.owner = this;
+			info.owner = fLinkState;
 			memset(&info.listener, 0, sizeof(info.listener));
 			pw_link_add_listener((struct pw_link*)proxy, &info.listener,
 				&sLinkEvents, &info);
@@ -395,10 +415,10 @@ BMediaNode::_CreateLink(BMediaOutput* output, BMediaInput* input, pw_core* core)
 	}
 
 	if (result == B_OK) {
-		BAutolock linksLock(fLinksLock);
+		BAutolock linksLock(fLinkState->lock);
 		for (size_t j = 0; j < createdKeys.size(); j++) {
-			auto it = fLinkInfos.find(createdKeys[j]);
-			if (it != fLinkInfos.end() && it->second.state == PW_LINK_STATE_ERROR) {
+			auto it = fLinkState->infos.find(createdKeys[j]);
+			if (it != fLinkState->infos.end() && it->second.state == PW_LINK_STATE_ERROR) {
 				result = B_ERROR;
 				break;
 			}
@@ -406,13 +426,13 @@ BMediaNode::_CreateLink(BMediaOutput* output, BMediaInput* input, pw_core* core)
 	}
 
 	if (result != B_OK) {
-		BAutolock linksLock(fLinksLock);
+		BAutolock linksLock(fLinkState->lock);
 		for (size_t j = 0; j < createdKeys.size(); j++) {
-			auto it = fLinkInfos.find(createdKeys[j]);
-			if (it != fLinkInfos.end()) {
+			auto it = fLinkState->infos.find(createdKeys[j]);
+			if (it != fLinkState->infos.end()) {
 				spa_hook_remove(&it->second.listener);
 				pw_proxy_destroy(it->second.proxy);
-				fLinkInfos.erase(it);
+				fLinkState->infos.erase(it);
 			}
 		}
 		backend->Unlock();
@@ -420,8 +440,8 @@ BMediaNode::_CreateLink(BMediaOutput* output, BMediaInput* input, pw_core* core)
 	}
 
 	{
-		BAutolock linksLock(fLinksLock);
-		fLinks[output->fStream] = createdKeys;
+		BAutolock linksLock(fLinkState->lock);
+		fLinkState->links[output->fStream] = createdKeys;
 	}
 	backend->Unlock();
 
@@ -440,13 +460,13 @@ BMediaNode::_DestroyLinks()
 	if (backend != NULL)
 		backend->Lock();
 	{
-		BAutolock _(fLinksLock);
-		for (auto it = fLinkInfos.begin(); it != fLinkInfos.end(); ++it) {
+		BAutolock _(fLinkState->lock);
+		for (auto it = fLinkState->infos.begin(); it != fLinkState->infos.end(); ++it) {
 			spa_hook_remove(&it->second.listener);
 			pw_proxy_destroy(it->second.proxy);
 		}
-		fLinkInfos.clear();
-		fLinks.clear();
+		fLinkState->infos.clear();
+		fLinkState->links.clear();
 	}
 	if (backend != NULL)
 		backend->Unlock();

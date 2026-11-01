@@ -142,7 +142,7 @@ void
 EventQueue::Die()
 {
 	fTerminating = true;
-	if (delete_sem(fLooperControl) == B_OK) {
+	if (delete_sem(fLooperControl) == B_OK && fEventLooper >= 0) {
 		int32 dummy;
 		wait_for_thread(fEventLooper, &dummy);
 	}
@@ -158,7 +158,7 @@ EventQueue::Die()
 
 	\param event The event to be added.
 	\return \c true, if the event has been added successfully, \c false, if
-			an error occured.
+			an error occurred.
 */
 bool
 EventQueue::AddEvent(Event *event)
@@ -218,7 +218,7 @@ EventQueue::ModifyEvent(Event *event, bigtime_t newTime)
 
 	\param event The event to be added.
 	\return \c true, if the event has been added successfully, \c false, if
-			an error occured.
+			an error occurred.
 */
 bool
 EventQueue::_AddEvent(Event *event)

@@ -15,6 +15,7 @@
 
 #include <ctype.h>
 #include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 
 #include <Alert.h>
@@ -29,10 +30,10 @@
 #include "checkitout.h"
 
 
-const char* kAppSig = "application/x-vnd.Haiku-checkitout";
+const char* kAppSig = "application/x-vnd.vos-checkitout";
 const char* kTrackerSig = "application/x-vnd.Be-TRAK";
 #if defined(__VOS__)
-const char* kTerminalSig = "application/x-vnd.Haiku-Terminal";
+const char* kTerminalSig = "application/x-vnd.vos-Terminal";
 #else
 const char* kTerminalSig = "application/x-vnd.Be-SHEL";
 #endif
@@ -115,10 +116,17 @@ void
 CheckItOut::ArgvReceived(int32 argc, char** argv)
 {
 	if (argc <= 1) {
+		fprintf(stderr, "usage: %s <url>\n", argv[0]);
 		exit(1);
 		return;
 	}
-	
+
+	if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
+		fprintf(stderr, "usage: %s <url>\n", argv[0]);
+		exit(0);
+		return;
+	}
+
 	BUrl url(argv[1], true);
 	fUrlString = url;
 
@@ -132,6 +140,7 @@ CheckItOut::ArgvReceived(int32 argc, char** argv)
 
 	if (!url.IsValid()) {
 		fprintf(stderr, "malformed url: '%s'\n", url.UrlString().String());
+		exit(1);
 		return;
 	}
 	
@@ -155,7 +164,6 @@ status_t
 CheckItOut::_DoCheckItOut(entry_ref *ref, const char *name)
 {
 	const char* failc = " || read -p 'Press any key'";
-	const char* pausec = " ; read -p 'Press any key'";
 	char* args[] = { (char *)"/bin/sh", (char *)"-c", NULL, NULL};
 
 	BUrl url(fUrlString, true);

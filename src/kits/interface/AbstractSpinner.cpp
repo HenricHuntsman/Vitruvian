@@ -383,11 +383,17 @@ SpinnerButton::Draw(BRect updateRect)
 	uint32 flags = fIsMouseDown ? BControlLook::B_ACTIVATED : 0;
 	flags |= !fIsEnabled ? BControlLook::B_DISABLED : 0;
 
+	// set buttons flags for control look
+	flags |= BControlLook::B_IS_CONTROL;
+
 	// draw the button
 	be_control_look->DrawButtonFrame(this, rect, updateRect,
 		tint_color(bgColor, frameTint), bgColor, flags, borders);
 	be_control_look->DrawButtonBackground(this, rect, updateRect,
 		tint_color(bgColor, bgTint), flags, borders);
+
+	// set the color
+	SetHighUIColor(B_CONTROL_TEXT_COLOR);
 
 	switch (fParent->ButtonStyle()) {
 		case SPINNER_BUTTON_HORIZONTAL_ARROWS:
@@ -984,7 +990,7 @@ BAbstractSpinner::Archive(BMessage* data, bool deep) const
 status_t
 BAbstractSpinner::GetSupportedSuites(BMessage* message)
 {
-	message->AddString("suites", "suite/vnd.Haiku-spinner");
+	message->AddString("suites", "suite/x-vnd.vos-spinner");
 
 	BPropertyInfo prop_info(sProperties);
 	message->AddFlat("messages", &prop_info);
@@ -1011,6 +1017,7 @@ BAbstractSpinner::AttachedToWindow()
 	BControl::SetValue(Value());
 		// sets the text and enables or disables the arrows
 
+	AdoptParentColors();
 	_UpdateTextViewColors(IsEnabled());
 	fTextView->MakeEditable(IsEnabled());
 

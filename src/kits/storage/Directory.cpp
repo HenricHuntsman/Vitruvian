@@ -1,4 +1,5 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2002-2009, Haiku Inc.
  * Distributed under the terms of the MIT License.
  *
@@ -45,6 +46,7 @@ _validate_directory_fd(int fd)
 
 BDirectory::BDirectory()
 	:
+	fDentLastOffset(0),
 	fDirFd(-1),
 	fDentBuffer(NULL),
 	fDentBytes(0),
@@ -55,6 +57,7 @@ BDirectory::BDirectory()
 
 BDirectory::BDirectory(const BDirectory& dir)
 	:
+	fDentLastOffset(0),
 	fDirFd(-1),
 	fDentBuffer(NULL),
 	fDentBytes(0),
@@ -66,6 +69,7 @@ BDirectory::BDirectory(const BDirectory& dir)
 
 BDirectory::BDirectory(const entry_ref* ref)
 	:
+	fDentLastOffset(0),
 	fDirFd(-1),
 	fDentBuffer(NULL),
 	fDentBytes(0),
@@ -77,6 +81,7 @@ BDirectory::BDirectory(const entry_ref* ref)
 
 BDirectory::BDirectory(const node_ref* nref)
 	:
+	fDentLastOffset(0),
 	fDirFd(-1),
 	fDentBuffer(NULL),
 	fDentBytes(0),
@@ -88,6 +93,7 @@ BDirectory::BDirectory(const node_ref* nref)
 
 BDirectory::BDirectory(const BEntry* entry)
 	:
+	fDentLastOffset(0),
 	fDirFd(-1),
 	fDentBuffer(NULL),
 	fDentBytes(0),
@@ -99,6 +105,7 @@ BDirectory::BDirectory(const BEntry* entry)
 
 BDirectory::BDirectory(const char* path)
 	:
+	fDentLastOffset(0),
 	fDirFd(-1),
 	fDentBuffer(NULL),
 	fDentBytes(0),
@@ -110,6 +117,7 @@ BDirectory::BDirectory(const char* path)
 
 BDirectory::BDirectory(const BDirectory* dir, const char* path)
 	:
+	fDentLastOffset(0),
 	fDirFd(-1),
 	fDentBuffer(NULL),
 	fDentBytes(0),
@@ -209,7 +217,7 @@ status_t
 BDirectory::SetTo(const char* path)
 {
 	// open node
-	status_t error = _SetTo(-1, path, true);
+	status_t error = _SetTo(AT_FDCWD, path, true);
 	if (error != B_OK)
 		return error;
 
@@ -449,6 +457,7 @@ BDirectory::GetNextRef(entry_ref* ref)
 
 		linux_dirent64* entry = (linux_dirent64*)(fDentBuffer + fDentPos);
 		fDentPos += entry->d_reclen;
+		fDentLastOffset = entry->d_off;
 
 		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
 			continue;
@@ -466,6 +475,11 @@ BDirectory::GetNextDirents(dirent* buf, size_t bufSize, int32 count)
 		return B_BAD_VALUE;
 	if (InitCheck() != B_OK)
 		return B_FILE_ERROR;
+	if (fDentPos < (size_t)fDentBytes) {
+		_kern_seek(fDirFd, fDentLastOffset, SEEK_SET);
+		fDentBytes = 0;
+		fDentPos = 0;
+	}
 	return _kern_read_dir(fDirFd, buf, bufSize, count);
 }
 
@@ -694,7 +708,7 @@ create_directory(const char* path, mode_t mode)
 				return B_NOT_A_DIRECTORY;
 		} else {
 			// it doesn't exist -- create it
-			error = _kern_create_dir(-1, dirPath.Path(), mode & ~__gUmask);
+			error = _kern_create_dir(AT_FDCWD, dirPath.Path(), mode & ~__gUmask);
 			if (error != B_OK)
 				return error;
 		}

@@ -6,10 +6,10 @@ AddOn(
 	CharacterSetRoster.cpp
 	character_sets.cpp
 	utf8_conversions.cpp
-	LIBS localestub
+	LIBS be localestub
 
 	RDEF libtextencoding.rdef
 )
 
 UsePrivateHeaders( textencoding textencoding )
-DoCatalogs("x-vnd.Haiku-libtextencoding" kits/textencoding)
+DoCatalogs("x-vnd.vos-libtextencoding" kits/textencoding)

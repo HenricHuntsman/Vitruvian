@@ -1,6 +1,6 @@
 /*
  * Copyright 2025-2026, Dario Casalinuovo. All rights reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #include <media2/SoundPlayer.h>
@@ -454,6 +454,21 @@ BSoundPlayer::BSoundPlayer(const BMediaFormat* format, const char* name,
 	BMediaFormat fmt;
 	if (format != NULL)
 		fmt = *format;
+	else
+		fmt.SetToDefault();
+	fImpl = new(std::nothrow) Impl(this, fmt, name, playFunc, notifyFunc, cookie);
+}
+
+
+BSoundPlayer::BSoundPlayer(const media_raw_audio_format* format,
+	const char* name, BufferPlayerFunc playFunc, EventNotifierFunc notifyFunc,
+	void* cookie)
+	:
+	fImpl(NULL)
+{
+	BMediaFormat fmt;
+	if (format != NULL)
+		fmt = BMediaFormat(*format);
 	else
 		fmt.SetToDefault();
 	fImpl = new(std::nothrow) Impl(this, fmt, name, playFunc, notifyFunc, cookie);

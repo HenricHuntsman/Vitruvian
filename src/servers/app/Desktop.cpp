@@ -40,6 +40,7 @@
 #include <Messenger.h>
 #include <MessengerPrivate.h>
 #include <Path.h>
+#include <PthreadMutexLocker.h>
 #include <Region.h>
 #include <Roster.h>
 
@@ -626,6 +627,7 @@ Desktop::Init()
 	gScreenManager->Unlock();
 
 	status_t status = fVirtualScreen.SetConfiguration(*this,
+		fWorkspaces[0].StoredScreenConfiguration(),
 		fWorkspaces[0].CurrentScreenConfiguration());
 	if (status != B_OK) {
 		debug_printf("app_server: Failed to initialize virtual screen configuration: %s\n",
@@ -637,6 +639,35 @@ Desktop::Init()
 		debug_printf("Could not initialize graphics output. Exiting.\n");
 		return B_ERROR;
 	}
+
+	HWInterface()->SetDPMSMode(B_DPMS_ON);
+
+	// Restore brightness
+	{
+		Screen* screen = fVirtualScreen.ScreenAt(0);
+		monitor_info info;
+		bool hasInfo = (screen->GetMonitorInfo(info) == B_OK);
+
+		screen_configuration* stored = fWorkspaces[0]
+			.StoredScreenConfiguration().BestFit(screen->ID(),
+				hasInfo ? &info : NULL);
+		if (stored != NULL && stored->brightness > 0)
+			HWInterface()->SetBrightness(stored->brightness);
+		else {
+			// Firmware can leave the panel dark with no stored preference;
+			// light it rather than boot into a black screen. An unread
+			// brightness counts as dark so a failed read still recovers.
+			float current = 0.0f;
+			if (HWInterface()->GetBrightness(&current) != B_OK
+					|| current <= 0.0f)
+				HWInterface()->SetBrightness(1.0f);
+		}
+	}
+
+	float temperature = fWorkspaces[0].StoredScreenConfiguration().Temperature(0);
+	// Any stored non-neutral value is re-applied; the backend clamps.
+	if (temperature > 0 && temperature != 6500.0f)
+		HWInterface()->SetTemperature(temperature);
 
 	// now that the mode is set, see if we should increase the default font size
 	if (fSettings->DefaultPlainFont() == *gFontManager->DefaultPlainFont()
@@ -674,26 +705,6 @@ Desktop::Init()
 #endif
 
 	fCursorManager.InitializeCursors(fSettings->DefaultBoldFont().Size() / 12.0f);
-
-	HWInterface()->SetDPMSMode(B_DPMS_ON);
-
-	float brightness = fWorkspaces[0].StoredScreenConfiguration().Brightness(0);
-	if (brightness > 0)
-		HWInterface()->SetBrightness(brightness);
-	else {
-		// Firmware can leave the panel dark with no stored preference;
-		// light it rather than boot into a black screen. An unread
-		// brightness counts as dark so a failed read still recovers.
-		float current = 0.0f;
-		if (HWInterface()->GetBrightness(&current) != B_OK
-				|| current <= 0.0f)
-			HWInterface()->SetBrightness(1.0f);
-	}
-
-	float temperature = fWorkspaces[0].StoredScreenConfiguration().Temperature(0);
-	// Any stored non-neutral value is re-applied; the backend clamps.
-	if (temperature > 0 && temperature != 6500.0f)
-		HWInterface()->SetTemperature(temperature);
 
 	fVirtualScreen.HWInterface()->MoveCursorTo(
 		fVirtualScreen.Frame().Width() / 2,
@@ -1083,17 +1094,20 @@ Desktop::SetBrightness(int32 id, float brightness)
 	status_t result = HWInterface()->SetBrightness(brightness);
 
 	if (result == B_OK) {
-		if (fWorkspaces[0].StoredScreenConfiguration().CurrentByID(id) == NULL) {
-			// store the current configuration if empty
-			screen_configuration* current
-				= fWorkspaces[0].CurrentScreenConfiguration().CurrentByID(id);
+		screen_configuration* current
+			= fWorkspaces[0].CurrentScreenConfiguration().CurrentByID(id);
+		if (current != NULL) {
+			HWInterface()->GetBrightness(&brightness);
+			current->brightness = brightness;
+
+			// Save brightness for next boot
 			fWorkspaces[0].StoredScreenConfiguration().Set(id,
-				current->has_info ? &current->info : NULL, current->frame, current->mode);
+				current->has_info ? &current->info : NULL, current->frame,
+				current->mode);
+			fWorkspaces[0].StoredScreenConfiguration().SetBrightness(id,
+				brightness);
+			StoreWorkspaceConfiguration(0);
 		}
-		fWorkspaces[0].StoredScreenConfiguration().SetBrightness(id,
-			brightness);
-		// Save brightness for next boot
-		StoreWorkspaceConfiguration(0);
 	}
 
 	return result;
@@ -1103,9 +1117,12 @@ Desktop::SetBrightness(int32 id, float brightness)
 status_t
 Desktop::SetRotation(int32 id, int32 rotation)
 {
-	// Not locked: HWInterface notifies listeners synchronously and
-	// Desktop::ScreenChanged() takes the window lock for writing.
+	// The buffers are replaced before listeners hear of it; hold the window
+	// lock so nothing draws with the old clipping in between. The
+	// synchronous ScreenChanged() nests it.
+	AutoWriteLocker windowLocker(fWindowLock);
 	status_t result = HWInterface()->SetPanelOrientation(rotation);
+	windowLocker.Unlock();
 
 	// While an unconfirmed change is pending, only the live state moves;
 	// Confirm folds it into the stored configuration, so nothing
@@ -3067,7 +3084,7 @@ void
 Desktop::WriteWindowInfo(int32 serverToken, BPrivate::LinkSender& sender)
 {
 	AutoWriteLocker locker(fWindowLock);
-	BAutolock tokenLocker(BPrivate::gDefaultTokens);
+	PthreadMutexLocker tokenLocker(BPrivate::gDefaultTokens.GetLock());
 
 	::ServerWindow* window;
 	if (BPrivate::gDefaultTokens.GetToken(serverToken,
@@ -3232,13 +3249,13 @@ Desktop::_LaunchInputServer()
 	if (entryStatus == B_OK)
 		entryStatus = roster.Launch(&ref);
 	if (entryStatus == B_OK || entryStatus == B_ALREADY_RUNNING) {
-		syslog(LOG_ERR, "Failed to launch the input server by signature: %s!\n",
-			strerror(status));
+		// the registrar is not reachable yet at early boot, so the launch
+		// by signature fails; the fallback succeeded, nothing to report
 		return;
 	}
 
-	syslog(LOG_ERR, "Failed to launch the input server: %s!\n",
-		strerror(entryStatus));
+	syslog(LOG_ERR, "Failed to launch the input server by signature (%s) "
+		"and by path (%s)!\n", strerror(status), strerror(entryStatus));
 }
 
 
@@ -3899,9 +3916,9 @@ Desktop::_HideWindow(Window* window)
 
 
 /*!	Updates the workspaces of all subset windows with regard to the
-	specifed window.
+	specified window.
 	If newIndex is not -1, it will move all subset windows that belong to
-	the specifed window to the new workspace; this form is only called by
+	the specified window to the new workspace; this form is only called by
 	SetWorkspace().
 */
 void
@@ -4187,7 +4204,7 @@ Desktop::_TriggerWindowRedrawing(BRegion& dirtyRegion, BRegion& exposeRegion)
 void
 Desktop::_SetBackground(BRegion& background)
 {
-	// NOTE: the drawing operation is caried out
+	// NOTE: the drawing operation is carried out
 	// in the clipping region rebuild, but it is
 	// ok actually, because it also avoids trails on
 	// moving windows
@@ -4465,6 +4482,7 @@ Desktop::_SetCurrentWorkspaceConfiguration()
 
 	uint32 changedScreens;
 	fVirtualScreen.SetConfiguration(*this,
+		fWorkspaces[fCurrentWorkspace].StoredScreenConfiguration(),
 		fWorkspaces[fCurrentWorkspace].CurrentScreenConfiguration(),
 		&changedScreens);
 

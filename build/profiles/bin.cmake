@@ -9,6 +9,7 @@
 	rc
 	jam
 	catarea
+	error
 	chop
 	driveinfo
 	finddir
@@ -37,12 +38,15 @@
 	listres
 	message
 	mkindex
+	launch_roster
 	modifiers
+	open
 	mvattr
 	quit
 	roster
 	trash
 	version
+	waitfor
 	WindowShade
 	alert
 	dstcheck
@@ -66,6 +70,7 @@
 	notify
 	translate
 	filepanel
+	vos-signature-migrate
 	screen_blanker
 	screenshot_cli
 )

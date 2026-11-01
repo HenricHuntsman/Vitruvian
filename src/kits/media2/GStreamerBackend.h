@@ -1,6 +1,6 @@
 /*
  * Copyright 2025-2026, Dario Casalinuovo. All rights reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #ifndef _VITRUVIAN_MEDIA2_GSTREAMER_BACKEND_H
@@ -37,8 +37,22 @@ public:
 
 	GstElement*					CreateDecodePipeline(const char* uri);
 
+	static bool					LinkEncodeSource(GstElement* pipeline);
 	GstElement*					CreateEncodePipeline(const char* path,
-									const BMediaFormat& outputFormat);
+									const BMediaFormat& outputFormat,
+									uint32 sampleRate = 0,
+									uint32 channelCount = 0,
+									const char* sampleFormatName = NULL);
+
+	// Raw-side appsrcs are named "vsrc" (video) and "asrc" (audio); NULL
+	// formats drop that leg. VP8/Opus go to webm, H264/AAC to mp4.
+	GstElement*					CreateAVEncodePipeline(const char* path,
+									const BMediaFormat* videoFormat,
+									const BMediaFormat* audioFormat);
+
+	static bool					IsEncoderAvailable(int32 encoding);
+	static int					ApplyEncoderQuality(GstElement* pipeline,
+									float quality);
 
 private:
 								GStreamerBackend();

@@ -1,4 +1,5 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2002-2013 Haiku, Inc. All rights reserved.
  * Distributed under the terms of the MIT license.
  *
@@ -64,6 +65,7 @@
 #include "ResizeMoveWindow.h"
 #include "Support.h"
 
+#include "DefragmentJob.h"
 #include "DiskDeviceJobQueue.h"
 #include "MoveJob.h"
 #include "PartitionCapabilities.h"
@@ -91,6 +93,7 @@ enum {
 	MSG_RESIZE_MOVE				= 'rszm',
 	MSG_SET_FLAGS				= 'sflg',
 	MSG_CHECK					= 'chck',
+	MSG_DEFRAG					= 'dfrg',
 	MSG_ERASE					= 'eras',
 	MSG_WIPE					= 'wipe',
 	MSG_RENAME					= 'renm',
@@ -277,6 +280,9 @@ MainWindow::MainWindow()
 	fCheckMenuItem = new BMenuItem(
 		B_TRANSLATE("Check filesystem"),
 		new BMessage(MSG_CHECK));
+	fDefragMenuItem = new BMenuItem(
+		B_TRANSLATE("Defragment"),
+		new BMessage(MSG_DEFRAG));
 	fEraseMenuItem = new BMenuItem(
 		B_TRANSLATE("Erase filesystem"),
 		new BMessage(MSG_ERASE));
@@ -341,6 +347,7 @@ MainWindow::MainWindow()
 	fPartitionMenu->AddItem(fResizeMenuItem);
 	fPartitionMenu->AddItem(fRenameMenuItem);
 	fPartitionMenu->AddItem(fCheckMenuItem);
+	fPartitionMenu->AddItem(fDefragMenuItem);
 	fPartitionMenu->AddItem(fEraseMenuItem);
 	fPartitionMenu->AddItem(fWipeMenuItem);
 	fPartitionMenu->AddItem(fDeleteMenuItem);
@@ -433,7 +440,7 @@ MainWindow::MainWindow()
 	fNotification->SetGroup(BString(B_TRANSLATE_SYSTEM_NAME("DriveSetup")));
 
 	app_info info;
-	be_roster->GetAppInfo("application/x-vnd.Haiku-DriveSetup", &info);
+	be_roster->GetAppInfo("application/x-vnd.vos-DriveSetup", &info);
 	BBitmap icon(BRect(0, 0, 32, 32), B_RGBA32);
 	BNode node(&info.ref);
 	if (BIconUtils::GetVectorIcon(&node, "BEOS:ICON", &icon) == B_OK)
@@ -538,6 +545,10 @@ MainWindow::MessageReceived(BMessage* message)
 			_CheckFilesystem(fCurrentDisk, fCurrentPartitionID);
 			break;
 
+		case MSG_DEFRAG:
+			_Defragment(fCurrentDisk, fCurrentPartitionID);
+			break;
+
 		case MSG_ERASE:
 			_Erase(fCurrentDisk, fCurrentPartitionID);
 			break;
@@ -573,7 +584,7 @@ MainWindow::MessageReceived(BMessage* message)
 				fListView->CurrentSelection());
 			const char* args[] = { row->DevicePath(), NULL };
 
-			be_roster->Launch("application/x-vnd.Haiku-DiskProbe", 1,
+			be_roster->Launch("application/x-vnd.vos-DiskProbe", 1,
 				(char**)args);
 
 			break;
@@ -1366,6 +1377,10 @@ MainWindow::_UpdateMenus(BDiskDevice* disk,
 			message->AddString("disk system", diskSystem.PrettyName());
 
 			BString label = diskSystem.PrettyName();
+			bool recommended = !diskSystem.IsFileSystem()
+				&& label == "GUID Partition Table";
+			if (recommended)
+				label << B_TRANSLATE(" (recommended)");
 			label << B_UTF8_ELLIPSIS;
 			BMenuItem* item = new BMenuItem(label.String(), message);
 
@@ -1376,7 +1391,10 @@ MainWindow::_UpdateMenus(BDiskDevice* disk,
 			if (disk->ID() == selectedPartition
 				&& !diskSystem.IsFileSystem()) {
 				// Disk is selected, and DiskSystem is a partition map
-				fDiskInitMenu->AddItem(item);
+				if (recommended)
+					fDiskInitMenu->AddItem(item, 0);
+				else
+					fDiskInitMenu->AddItem(item);
 			} else if (diskSystem.IsFileSystem()) {
 				// Otherwise a filesystem
 				fFormatMenu->AddItem(item);
@@ -1398,6 +1416,8 @@ MainWindow::_UpdateMenus(BDiskDevice* disk,
 			bool writable = !partition->IsReadOnly()
 				&& partition->Device()->HasMedia();
 			bool notMountedAndWritable = !partition->IsMounted() && writable;
+			bool canChangeParameters = partition->CanEditParameters()
+				|| partition->CanSetType() || partition->CanSetName();
 
 			fFormatMenu->SetEnabled(writable && fFormatMenu->CountItems() > 0);
 
@@ -1405,10 +1425,9 @@ MainWindow::_UpdateMenus(BDiskDevice* disk,
 				&& partition->IsDevice()
 				&& fDiskInitMenu->CountItems() > 0);
 
-			fChangeMenuItem->SetEnabled(writable
-				&& partition->CanEditParameters());
+			fChangeMenuItem->SetEnabled(writable && canChangeParameters);
 			fChangeContextMenuItem->SetEnabled(writable
-				&& partition->CanEditParameters());
+				&& canChangeParameters);
 			fFlagsMenuItem->SetEnabled(writable
 				&& partition->Parent() != NULL);
 
@@ -1435,6 +1454,9 @@ MainWindow::_UpdateMenus(BDiskDevice* disk,
 				}
 			}
 			fCheckMenuItem->SetEnabled(canCheck);
+			// both defragment tools walk a mounted filesystem
+			fDefragMenuItem->SetEnabled(hasContent && writable
+				&& partition->IsMounted() && partition->CanDefragment());
 			fEraseMenuItem->SetEnabled(contentOpsPossible);
 			fWipeMenuItem->SetEnabled(notMountedAndWritable
 				&& !partition->IsDevice());
@@ -1487,6 +1509,7 @@ MainWindow::_UpdateMenus(BDiskDevice* disk,
 			fResizeMenuItem->SetEnabled(false);
 			fFlagsMenuItem->SetEnabled(false);
 			fCheckMenuItem->SetEnabled(false);
+			fDefragMenuItem->SetEnabled(false);
 			fEraseMenuItem->SetEnabled(false);
 			fWipeMenuItem->SetEnabled(false);
 			fRenameMenuItem->SetEnabled(false);
@@ -1531,7 +1554,8 @@ MainWindow::_UpdateMenus(BDiskDevice* disk,
 			}
 			fprintf(stderr, "[DriveSetup menus]   enabled: create=%d "
 				"format=%d delete=%d change=%d mount=%d unmount=%d "
-				"erase=%d wipe=%d check=%d rename=%d resize=%d\n",
+				"erase=%d wipe=%d check=%d defrag=%d rename=%d "
+				"resize=%d\n",
 				fCreateContextMenuItem->IsEnabled(),
 				fFormatContextMenuItem->IsEnabled(),
 				fDeleteContextMenuItem->IsEnabled(),
@@ -1540,6 +1564,7 @@ MainWindow::_UpdateMenus(BDiskDevice* disk,
 				fUnmountContextMenuItem->IsEnabled(),
 				fEraseMenuItem->IsEnabled(), fWipeMenuItem->IsEnabled(),
 				fCheckMenuItem->IsEnabled(),
+				fDefragMenuItem->IsEnabled(),
 				fRenameMenuItem->IsEnabled(), fResizeMenuItem->IsEnabled());
 		}
 
@@ -1557,6 +1582,7 @@ MainWindow::_UpdateMenus(BDiskDevice* disk,
 		fResizeMenuItem->SetEnabled(false);
 		fFlagsMenuItem->SetEnabled(false);
 		fCheckMenuItem->SetEnabled(false);
+		fDefragMenuItem->SetEnabled(false);
 		fEraseMenuItem->SetEnabled(false);
 		fWipeMenuItem->SetEnabled(false);
 		fRenameMenuItem->SetEnabled(false);
@@ -2190,8 +2216,8 @@ MainWindow::_ChangeParameters(BDiskDevice* disk, partition_id selectedPartition)
 
 	ChangeParametersPanel* panel = new ChangeParametersPanel(this, partition);
 
-	BString name, type, parameters;
-	status = panel->Go(name, type, parameters);
+	BString name, type, parameters, contentParameters;
+	status = panel->Go(name, type, parameters, contentParameters);
 	if (status != B_OK) {
 		if (status != B_CANCELED) {
 			_DisplayPartitionError(B_TRANSLATE("The panel experienced a "
@@ -2222,12 +2248,24 @@ MainWindow::_ChangeParameters(BDiskDevice* disk, partition_id selectedPartition)
 	if (choice == 1)
 		return;
 
+	// an untouched field must not turn into a plan op
+	BString currentParameters(
+		partition->Parameters() != NULL ? partition->Parameters() : "");
+	BString currentContentParameters(partition->ContentParameters() != NULL
+		? partition->ContentParameters() : "");
+
 	if (partition->CanSetType())
 		status = partition->SetType(type.String());
 	if (status == B_OK && partition->CanSetName())
 		status = partition->SetName(name.String());
-	if (status == B_OK && partition->CanEditParameters())
+	if (status == B_OK && partition->CanEditParameters()
+		&& parameters != currentParameters) {
 		status = partition->SetParameters(parameters.String());
+	}
+	if (status == B_OK && partition->CanEditContentParameters()
+		&& contentParameters != currentContentParameters) {
+		status = partition->SetContentParameters(contentParameters.String());
+	}
 
 	if (status != B_OK) {
 		_DisplayPartitionError(
@@ -2349,11 +2387,7 @@ MainWindow::_ResizeMove(BDiskDevice* disk, partition_id selectedPartition)
 		return;
 	}
 
-	if (partition->IsMounted()) {
-		_DisplayPartitionError(B_TRANSLATE("Unmount the partition before "
-			"resizing or moving it."));
-		return;
-	}
+	bool mounted = partition->IsMounted();
 
 	const char* filesystem = partition->ContentType();
 	PartitionCapabilities caps;
@@ -2365,7 +2399,7 @@ MainWindow::_ResizeMove(BDiskDevice* disk, partition_id selectedPartition)
 	}
 
 	bool canResize = caps.grow != "none" || caps.shrink != "none";
-	bool canMoveType = caps.move != "none";
+	bool canMoveType = caps.move != "none" && !mounted;
 	if (!canResize && !canMoveType) {
 		_DisplayPartitionError(B_TRANSLATE("This filesystem does not "
 			"support resizing or moving."));
@@ -2393,6 +2427,22 @@ MainWindow::_ResizeMove(BDiskDevice* disk, partition_id selectedPartition)
 			canResize = false;
 			minSizeMiB = maxSizeMiB = currentSizeMiB;
 			usedMiB = -1;
+		}
+	}
+
+	BString note;
+	if (canResize && mounted) {
+		BString fs(filesystem);
+		if (fs == "xfs") {
+			note = B_TRANSLATE("XFS cannot be shrunk");
+			minSizeMiB = currentSizeMiB;
+		} else if (fs != "btrfs") {
+			note = B_TRANSLATE("Shrinking requires unmounting");
+			minSizeMiB = currentSizeMiB;
+		}
+		if (minSizeMiB >= maxSizeMiB) {
+			canResize = false;
+			maxSizeMiB = currentSizeMiB;
 		}
 	}
 
@@ -2436,7 +2486,7 @@ MainWindow::_ResizeMove(BDiskDevice* disk, partition_id selectedPartition)
 	ResizeMoveWindow* panel = new ResizeMoveWindow(this,
 		B_TRANSLATE("Resize/move partition"), currentSizeMiB, minSizeMiB,
 		maxSizeMiB, canResize, currentStartMiB, minStartMiB, maxStartMiB,
-		canMove, usedMiB);
+		canMove, usedMiB, note.String());
 
 	off_t newSizeMiB = currentSizeMiB;
 	off_t newStartMiB = currentStartMiB;
@@ -2529,6 +2579,51 @@ MainWindow::_CheckFilesystem(BDiskDevice* disk, partition_id selectedPartition)
 		_DisplayPartitionError(B_TRANSLATE("Checking the selected "
 			"partition's filesystem failed, or found problems."), NULL,
 			status, &result);
+	}
+}
+
+
+void
+MainWindow::_Defragment(BDiskDevice* disk, partition_id selectedPartition)
+{
+	if (disk == NULL || (int64)selectedPartition < 0) {
+		_DisplayPartitionError(B_TRANSLATE("You need to select a partition "
+			"entry from the list."));
+		return;
+	}
+
+	BPartition* partition = disk->FindDescendant(selectedPartition);
+	if (partition == NULL) {
+		_DisplayPartitionError(B_TRANSLATE("Unable to find the selected "
+			"partition by ID."));
+		return;
+	}
+
+	PartitionReference* partitionRef
+		= new PartitionReference(partition->ID());
+
+	DefragmentJob* job = new DefragmentJob(partitionRef);
+
+	// without a filesystem the job maps to B_NOT_SUPPORTED, never a plan
+	BDiskSystem contentDiskSystem;
+	if (partition->GetDiskSystem(&contentDiskSystem) == B_OK
+		&& contentDiskSystem.IsFileSystem()) {
+		job->SetFileSystem(contentDiskSystem.Name());
+	}
+
+	partitionRef->ReleaseReference();
+
+	BMessage result;
+	DiskDeviceJobQueue jobQueue;
+	jobQueue.AddJob(job);
+	status_t status = jobQueue.ExecuteViaHelper(disk, &result);
+
+	ProgressWindow* progress = new ProgressWindow(this, result);
+	progress->Go();
+
+	if (status != B_OK) {
+		_DisplayPartitionError(B_TRANSLATE("Defragmenting the selected "
+			"partition failed."), NULL, status, &result);
 	}
 }
 

@@ -1,6 +1,6 @@
 /*
  * Copyright 2025-2026, Dario Casalinuovo. All rights reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #include <media2/MediaClient.h>
@@ -15,6 +15,8 @@
 
 #include <pipewire/loop.h>
 #include <pipewire/stream.h>
+
+#include <MediaClientPrivate.h>
 
 #include "PipeWireBackend.h"
 
@@ -102,6 +104,7 @@ media_client_id    BMediaClient::Id() const          { return fImpl->id; }
 const char*        BMediaClient::Name() const        { return fImpl->name.String(); }
 media_client_kinds BMediaClient::Kinds() const       { return fImpl->kinds; }
 status_t           BMediaClient::InitCheck() const   { return fImpl->initErr; }
+bool               BMediaClient::IsInProcessRouted() const { return false; }
 
 
 media_type_mask
@@ -129,6 +132,9 @@ BMediaClient::RegisterInput(BMediaInput* input)
 {
 	if (input == NULL)
 		return B_BAD_VALUE;
+	// The process callback finds the node through Client(); it was never
+	// set, so every audio callback returned before producing data.
+	input->fOwner = this;
 	fImpl->inputs->AddItem(input);
 	return B_OK;
 }
@@ -139,6 +145,9 @@ BMediaClient::RegisterOutput(BMediaOutput* output)
 {
 	if (output == NULL)
 		return B_BAD_VALUE;
+	// The process callback finds the node through Client(); it was never
+	// set, so every audio callback returned before producing data.
+	output->fOwner = this;
 	fImpl->outputs->AddItem(output);
 	return B_OK;
 }
@@ -147,6 +156,8 @@ BMediaClient::RegisterOutput(BMediaOutput* output)
 status_t
 BMediaClient::UnregisterInput(BMediaInput* input)
 {
+	if (input != NULL && input->fOwner == this)
+		input->fOwner = NULL;
 	fImpl->inputs->RemoveItem(input);
 	return B_OK;
 }
@@ -155,6 +166,8 @@ BMediaClient::UnregisterInput(BMediaInput* input)
 status_t
 BMediaClient::UnregisterOutput(BMediaOutput* output)
 {
+	if (output != NULL && output->fOwner == this)
+		output->fOwner = NULL;
 	fImpl->outputs->RemoveItem(output);
 	return B_OK;
 }
@@ -262,14 +275,12 @@ BMediaClient::Start()
 		return B_BAD_VALUE;
 
 	PipeWireBackend* backend = PipeWireBackend::GetInstance();
-	if (backend == NULL)
-		return B_DEVICE_NOT_FOUND;
 
 	status_t result = _StartConnections(backend);
 	if (result != B_OK)
 		return result;
 
-	if (fImpl->faultEvent == NULL) {
+	if (backend != NULL && fImpl->faultEvent == NULL) {
 		backend->Lock();
 		fImpl->faultLoop = backend->GetMainLoop();
 		fImpl->faultEvent = pw_loop_add_event(fImpl->faultLoop,
@@ -278,7 +289,7 @@ BMediaClient::Start()
 	}
 
 	fImpl->running = true;
-	HandleStart(0);
+	HandleStart(PipeWireBackend::PerformanceTime());
 	return B_OK;
 }
 
@@ -287,7 +298,7 @@ status_t
 BMediaClient::Stop()
 {
 	if (fImpl->running)
-		HandleStop(0);
+		HandleStop(PipeWireBackend::PerformanceTime());
 	// Clear before tearing streams down: destroying a pw_stream can reenter state_changed, which
 	// uses IsStarted() to tell an intentional stop from a graph-side drop.
 	fImpl->running = false;
@@ -312,6 +323,8 @@ BMediaClient::Stop()
 status_t
 BMediaClient::Seek(bigtime_t mediaTime, bigtime_t performanceTime)
 {
+	if (performanceTime == 0)
+		performanceTime = PipeWireBackend::PerformanceTime();
 	HandleSeek(mediaTime, performanceTime);
 	return B_OK;
 }
@@ -320,6 +333,8 @@ BMediaClient::Seek(bigtime_t mediaTime, bigtime_t performanceTime)
 void BMediaClient::HandleStart(bigtime_t) {}
 void BMediaClient::HandleStop(bigtime_t)  {}
 void BMediaClient::HandleSeek(bigtime_t, bigtime_t) {}
+void BMediaClient::HandleLink(BMediaConnection*, BMediaConnection*) {}
+void BMediaClient::HandleUnlink(BMediaConnection*, BMediaConnection*) {}
 
 
 status_t
@@ -342,9 +357,9 @@ BMediaClient::_StreamFault(BMediaConnection*)
 
 
 const pw_stream_events*
-BMediaClient::_GetStreamEvents()
+ClientAccess::StreamEvents()
 {
-	return &Impl::kStreamEvents;
+	return &BMediaClient::Impl::kStreamEvents;
 }
 
 
@@ -411,21 +426,33 @@ BMediaClient::Impl::_OnProcess(void* userdata)
 	BMediaOutput* output = dynamic_cast<BMediaOutput*>(conn);
 	if (output != NULL) {
 		const size_t bytes = maxFrames * stride;
-		size_t filled = output->FillBuffer(data, bytes);
-		if (filled < bytes)
-			memset(data + filled, 0, bytes - filled);
+		// Through the node's virtual hook: process-hook nodes (the player,
+		// the synth) produce their data there; the default falls back to
+		// the output's FillBuffer.
+		conn->Client()->ProcessCallback(conn, data, bytes, maxFrames);
 		spaBuf->datas[0].chunk->offset = 0;
 		spaBuf->datas[0].chunk->stride = stride;
 		spaBuf->datas[0].chunk->size   = bytes;
 	} else {
 		BMediaInput* input = dynamic_cast<BMediaInput*>(conn);
 		if (input != NULL) {
-			const uint32 actual = stride > 0
-				? spaBuf->datas[0].chunk->size / stride : 0;
+			// A silent buffer may carry chunk size 0; it still counts as
+			// maxFrames of zeros so recorders keep advancing.
+			const spa_chunk* chunk = spaBuf->datas[0].chunk;
+			uint32 actual = stride > 0 ? chunk->size / stride : 0;
+			if (actual == 0 || (chunk->flags & SPA_CHUNK_FLAG_EMPTY) != 0) {
+				if (pb->requested == 0 && actual == 0)
+					maxFrames = 0;
+				actual = maxFrames;
+				memset(data, 0, maxFrames * stride);
+			}
 			if (actual < maxFrames)
 				maxFrames = actual;
 			const size_t bytes = maxFrames * stride;
-			input->HandleBuffer(data, bytes, format);
+			// Through the node's virtual hook so process-hook nodes
+			// (the recorder) receive their buffers.
+			if (bytes > 0)
+				conn->Client()->ProcessCallback(conn, data, bytes, maxFrames);
 		}
 	}
 

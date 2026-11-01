@@ -1,7 +1,7 @@
 /*
  * Copyright 2025-2026, The Vitruvian Project. All Rights Reserved.
  * Copyright 2025-2026, Dario Casalinuovo. All rights reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #ifndef _MEDIA2_MEDIA_GRAPH_H
@@ -14,6 +14,7 @@
 #include <String.h>
 
 
+class BMediaClient;
 class BMediaConnection;
 class BMediaInput;
 class BMediaOutput;
@@ -32,6 +33,7 @@ public:
 										BMediaInput* input);
 
 
+	// Mask bits for StartWatching; the same values arrive as message what.
 	enum {
 		B_MEDIA_CLIENT_ADDED      = 1 << 0,
 		B_MEDIA_CLIENT_REMOVED    = 1 << 1,
@@ -49,10 +51,21 @@ public:
 			status_t				GetClients(BObjectList<media_client_id, true>* clients);
 			status_t				GetClientInfo(media_client_id id, BMessage* info);
 
+			struct AudioDevice {
+				media_client_id		id;
+				BString				name;
+			};
+
+			// Capture devices (audio sources that are not cameras).
+			status_t				GetAudioInputs(
+										BObjectList<AudioDevice, true>* outDevices);
+
 			status_t				GetDefaultAudioOutput(media_client_id* id);
 			status_t				GetDefaultAudioInput(media_client_id* id);
+			status_t				GetDefaultCamera(media_client_id* id);
 			status_t				SetDefaultAudioOutput(media_client_id id);
 			status_t				SetDefaultAudioInput(media_client_id id);
+			status_t				SetDefaultCamera(media_client_id id);
 
 
 	struct StreamInfo {
@@ -74,6 +87,9 @@ public:
 
 			status_t				GetDeviceVolume(media_client_id id,
 										float* outMaster, bool* outMute);
+			status_t				GetDeviceChannelVolumes(media_client_id id,
+										float* outVolumes, size_t maxCount,
+										size_t* outCount);
 			status_t				SetDeviceVolume(media_client_id id,
 										float master);
 			status_t				SetDeviceChannelVolumes(media_client_id id,
@@ -127,10 +143,48 @@ public:
 		BString			name;
 		BString			direction;
 		BString			format;
+		BString			channel;	// audio.channel ("FL"), may be empty
 	};
 			status_t				GetForeignNodes(
 										BObjectList<ForeignNode, true>* outNodes);
 			status_t				GetForeignPorts(uint32 nodeId,
+										BObjectList<ForeignPort, true>* outPorts);
+
+	// Every link in the server graph, created by this process or any
+	// other client. Port ids are the same globals GetForeignPorts
+	// reports; 0 means the link spans the whole node.
+	struct GraphLink {
+		uint32			id;
+		uint32			outputNodeId;
+		uint32			outputPortId;
+		uint32			inputNodeId;
+		uint32			inputPortId;
+	};
+			status_t				GetLinks(
+										BObjectList<GraphLink, true>* outLinks);
+			// Destroys a link by its registry id, whoever created it.
+			status_t				DestroyLink(uint32 linkId);
+
+	// Server ids behind an in-process connection. Both are 0 until
+	// the client is started and bound to the server.
+			uint32					GetConnectionNodeId(
+										const BMediaConnection* connection);
+			uint32					GetConnectionPortIds(
+										const BMediaConnection* connection,
+										uint32* outIds, uint32 maxCount);
+
+
+	// MIDI-class registry nodes (media.class "Midi/..."). Distinct from
+	// GetForeignNodes so the audio mixer view does not pick them up.
+	struct MidiNode {
+		uint32			id;
+		BString			name;
+		BString			description;
+		BString			mediaClass;
+	};
+			status_t				GetMidiNodes(
+										BObjectList<MidiNode, true>* outNodes);
+			status_t				GetMidiPorts(uint32 nodeId,
 										BObjectList<ForeignPort, true>* outPorts);
 
 
@@ -139,18 +193,52 @@ public:
 
 			status_t				Connect(const ForeignPort* foreignPort,
 										BMediaInput* input);
+			// inPortId 0 means the input's first port.
+			status_t				Connect(const ForeignPort* foreignPort,
+										BMediaInput* input, uint32 inPortId);
+			// Waits for the input to be bound, then links every channel.
+			status_t				ConnectChannels(uint32 foreignNodeId,
+										BMediaInput* input);
+
+			status_t				Connect(const ForeignPort* outputPort,
+										const ForeignPort* inputPort);
 
 
 			status_t				Disconnect(BMediaOutput* output,
 										const ForeignPort* foreignPort);
+
 			status_t				Disconnect(const ForeignPort* foreignPort,
 										BMediaInput* input);
+			status_t				Disconnect(const ForeignPort* outputPort,
+										const ForeignPort* inputPort);
+
+
+	struct Link {
+		bool			inProcess;
+		uint32			outputNodeId;
+		uint32			outputPortId;
+		uint32			inputNodeId;
+		uint32			inputPortId;
+		BMediaOutput*	output;
+		BMediaInput*	input;
+	};
+			status_t				GetLinks(BObjectList<Link, true>* outLinks);
+
+			// Dev tool: text dump of nodes, streams, foreign ports and links.
+			status_t				DumpGraph(BString& out) const;
 
 private:
 									BMediaGraph();
 									~BMediaGraph();
 									BMediaGraph(const BMediaGraph&) = delete;
 			BMediaGraph&			operator=(const BMediaGraph&) = delete;
+
+	static	status_t				_ResolveDetached(BMediaClient* outClient,
+										BMediaClient* inClient, bool* detached);
+	static	status_t				_ConnectInProcess(BMediaOutput* output,
+										BMediaInput* input);
+	static	status_t				_DisconnectInProcess(BMediaOutput* output,
+										BMediaInput* input);
 };
 
 

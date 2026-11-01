@@ -1,6 +1,6 @@
 /*
  * Copyright 2025-2026, Dario Casalinuovo. All rights reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #include <media2/MediaConnection.h>
@@ -87,7 +87,8 @@ BMediaConnection::BMediaConnection(media_connection_kinds kinds, const char* nam
 	fConnected(false),
 	fStreamFault(false),
 	fStream(NULL),
-	fFilterPort(NULL)
+	fFilterPort(NULL),
+	fDetachedUnit(NULL)
 {
 }
 
@@ -154,6 +155,23 @@ BMediaConnection::SetAcceptedFormat(const BMediaFormat& format)
 }
 
 
+status_t
+BMediaConnection::SetFormat(const BMediaFormat& format)
+{
+	if (fConnected)
+		return B_NOT_ALLOWED;
+	fFormat = format;
+	return B_OK;
+}
+
+
+const BMediaFormat&
+BMediaConnection::AcceptedFormat() const
+{
+	return fAcceptedFormat;
+}
+
+
 media_type_mask
 BMediaConnection::AcceptedTypes() const
 {
@@ -181,7 +199,9 @@ BMediaConnection::_GetNodeId() const
 {
 	if (fStream != NULL) {
 		pw_stream* stream = (pw_stream*)fStream;
-		return pw_stream_get_node_id(stream);
+		uint32 id = pw_stream_get_node_id(stream);
+		// SPA_ID_INVALID until the stream is bound: not ready.
+		return id == SPA_ID_INVALID ? 0 : id;
 	}
 	if (fFilterPort != NULL) {
 		BMediaClient* client = Client();
@@ -197,7 +217,8 @@ BMediaConnection::_GetNodeId() const
 			return 0;
 
 		pw_filter* filterPtr = (pw_filter*)filter;
-		return pw_filter_get_node_id(filterPtr);
+		uint32 id = pw_filter_get_node_id(filterPtr);
+		return id == SPA_ID_INVALID ? 0 : id;
 	}
 	return 0;
 }
@@ -238,12 +259,44 @@ BMediaConnection::_GetPortIds(uint32* outIds, uint32 maxCount) const
 	}
 
 	if (fFilterPort != NULL) {
-		pw_proxy* portProxy = (pw_proxy*)fFilterPort;
-		uint32 id = pw_proxy_get_bound_id(portProxy);
-		if (id == 0)
+		// A filter port is user data, not a proxy: resolve the global id
+		// from the registry by the port's index among its direction.
+		BMediaClient* client = Client();
+		PipeWireBackend* backend = PipeWireBackend::GetInstance();
+		uint32 nodeId = _GetNodeId();
+		if (client == NULL || backend == NULL || nodeId == 0)
+			return 0;
+
+		const bool isOutput = dynamic_cast<const BMediaOutput*>(this) != NULL;
+		int32 index = -1;
+		if (isOutput) {
+			for (int32 i = 0; i < client->CountOutputs(); i++) {
+				if (client->OutputAt(i) == (const void*)dynamic_cast<
+						const BMediaOutput*>(this)) {
+					index = i;
+					break;
+				}
+			}
+		} else {
+			for (int32 i = 0; i < client->CountInputs(); i++) {
+				if (client->InputAt(i) == (const void*)dynamic_cast<
+						const BMediaInput*>(this)) {
+					index = i;
+					break;
+				}
+			}
+		}
+		if (index < 0)
+			return 0;
+
+		std::vector<uint32> ports;
+		if (backend->ResolveNodePorts(nodeId, isOutput
+				? PW_DIRECTION_OUTPUT : PW_DIRECTION_INPUT, ports) != B_OK)
+			return 0;
+		if ((size_t)index >= ports.size())
 			return 0;
 		if (maxCount > 0)
-			outIds[0] = id;
+			outIds[0] = ports[index];
 		return 1;
 	}
 
@@ -309,6 +362,25 @@ BMediaInput::~BMediaInput()
 }
 
 
+static status_t
+_CheckAcceptedType(const BMediaConnection* connection,
+	const BMediaFormat* format)
+{
+	if (format == NULL || format->Type() == B_MEDIA_NO_TYPE)
+		return B_BAD_VALUE;
+	if ((connection->AcceptedTypes() & B_MEDIA_TYPE_BIT(format->Type())) == 0)
+		return B_BAD_VALUE;
+	return B_OK;
+}
+
+
+status_t
+BMediaInput::AcceptFormat(BMediaFormat* format)
+{
+	return _CheckAcceptedType(this, format);
+}
+
+
 void
 BMediaInput::HandleBuffer(void* /*buffer*/, size_t /*size*/,
 	const BMediaFormat& /*format*/)
@@ -348,9 +420,44 @@ BMediaOutput::~BMediaOutput()
 
 
 status_t
-BMediaOutput::SendBuffer(void* /*buffer*/, size_t /*size*/)
+BMediaOutput::PrepareToConnect(BMediaFormat* format)
 {
-	// Filled in once pw_filter port handling lands.
+	return _CheckAcceptedType(this, format);
+}
+
+
+status_t
+BMediaOutput::FormatProposal(BMediaFormat* format)
+{
+	if (format == NULL)
+		return B_BAD_VALUE;
+	if (Format().Type() != B_MEDIA_NO_TYPE)
+		*format = Format();
+	return B_OK;
+}
+
+
+status_t
+BMediaOutput::SendBuffer(void* buffer, size_t size)
+{
+	return _SendBuffer(buffer, size, Format());
+}
+
+
+status_t
+BMediaOutput::_SendBuffer(void* buffer, size_t size,
+	const BMediaFormat& format)
+{
+	// In-process clients push straight to the bound input; PipeWire clients
+	// move data on the realtime thread instead.
+	BMediaInput* input = dynamic_cast<BMediaInput*>(Binding());
+	if (input != NULL && input->fDetachedUnit != NULL)
+		return input->fDetachedUnit->_DetachedDeliver(input, buffer, size,
+			format);
+	if (input != NULL) {
+		input->HandleBuffer(buffer, size, format);
+		return B_OK;
+	}
 	return B_NOT_SUPPORTED;
 }
 
@@ -961,7 +1068,7 @@ BMidiOutput::FillBuffer(void* buffer, size_t maxSize)
 			continue;
 		if (spa_pod_builder_bytes(&b, event.data, event.length) < 0)
 			continue;
-		written += sizeof(struct spa_pod_control) + SPA_POD_BODY_SIZE(event.length);
+		written = b.state.offset;
 	}
 
 	uint8 sysExChunk[256];
@@ -969,7 +1076,7 @@ BMidiOutput::FillBuffer(void* buffer, size_t maxSize)
 	if (sysExLength > 0 && written < (maxSize - 128)) {
 		if (spa_pod_builder_control(&b, 0, SPA_CONTROL_Midi) >= 0
 				&& spa_pod_builder_bytes(&b, sysExChunk, sysExLength) >= 0) {
-			written += sizeof(struct spa_pod_control) + SPA_POD_BODY_SIZE(sysExLength);
+			written = b.state.offset;
 		}
 	}
 

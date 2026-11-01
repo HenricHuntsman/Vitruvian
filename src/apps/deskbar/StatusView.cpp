@@ -1,4 +1,7 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
+ */
+/*
 Open Tracker License
 
 Terms and Conditions
@@ -465,7 +468,7 @@ TReplicantTray::ShowHideTime()
 	static_cast<TBarApp*>(be_app)->Settings()->showClock = showClock;
 
 	// Send a message to Time preferences telling it to update
-	BMessenger messenger("application/x-vnd.Haiku-Time");
+	BMessenger messenger("application/x-vnd.vos-Time");
 	BMessage message(kShowHideTime);
 	message.AddBool("showClock", showClock);
 	messenger.SendMessage(&message);
@@ -1190,11 +1193,14 @@ TReplicantTray::LocationForReplicant(int32 index, float replicantWidth)
 		// try to find free space in every row
 		for (int32 row = 0; ; loc.y += fMaxReplicantHeight + sIconGap, row++) {
 			// determine free space in this row
+			bool emptyRow = true;
 			BRect rowRect(loc.x, loc.y,
 				loc.x + Bounds().Width() - fTrayPadding,
 				loc.y + fMaxReplicantHeight);
-			if (row == 0 && !fTime->IsHidden(fTime))
+			if (row == 0 && !fTime->IsHidden(fTime)) {
 				rowRect.right -= fClockMargin + fTime->Frame().Width();
+				emptyRow = false;
+			}
 
 			BRect replicantRect = rowRect;
 			for (int32 i = 0; i < index; i++) {
@@ -1203,6 +1209,7 @@ TReplicantTray::LocationForReplicant(int32 index, float replicantWidth)
 				if (view == NULL || view->Frame().top != rowRect.top)
 					continue;
 
+				emptyRow = false;
 				// push this replicant placement past the last one
 				replicantRect.left = view->Frame().right + sIconGap + 1;
 			}
@@ -1221,6 +1228,17 @@ TReplicantTray::LocationForReplicant(int32 index, float replicantWidth)
 			// A replicant too wide for even an empty row fits nowhere; without
 			// this the search never terminates and freezes the window thread.
 			if (replicantRect.left == rowRect.left) {
+				loc = replicantRect.LeftTop();
+				break;
+			}
+
+			if (emptyRow) {
+				// this row is EMPTY: if it doesn't fit there it won't fit anywhere!
+				// Probably due to error in advertised max replicant width.
+				// Anyway, don't loop forever looking for a row which will NEVER
+				// be large enough.
+				// Even if it means this replicant will be clipped, it's better than
+				// a frozen Deskbar eating CPU like crazy in search for unobtainium.
 				loc = replicantRect.LeftTop();
 				break;
 			}
@@ -1554,7 +1572,7 @@ TDragRegion::SwitchModeForRegion(BPoint where, BRegion region,
 		return true;
 	}
 
-	fBarView->ChangeState(newState, newVertical, newLeft, newTop, true);
+	fBarView->ChangeState(newVertical, newLeft, newTop, newState, true);
 
 	return true;
 }

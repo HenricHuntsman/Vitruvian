@@ -1,7 +1,7 @@
 /*
  * Copyright 2015-2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2025-2026, The Vitruvian Project. All Rights Reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #ifndef _MEDIA2_MEDIA_CONNECTION_H
@@ -21,6 +21,11 @@ class BLocker;
 class BMallocIO;
 class BMediaGraph;
 class BMediaUnit;
+class BMediaOutput;
+
+namespace BPrivate { namespace media {
+	class PipeWireBackend;
+} }
 
 class BMediaConnection {
 public:
@@ -33,7 +38,9 @@ public:
 			BMediaConnection*		Binding() const;
 
 			const BMediaFormat&		Format() const;
+			status_t				SetFormat(const BMediaFormat& format);
 			status_t				SetAcceptedFormat(const BMediaFormat& format);
+			const BMediaFormat&		AcceptedFormat() const;
 
 			media_type_mask			AcceptedTypes() const;
 			void					SetAcceptedTypes(media_type_mask types);
@@ -51,6 +58,9 @@ protected:
 										const char* name = NULL);
 	virtual							~BMediaConnection();
 
+			// Hooks run on the caller's thread or the media thread (e.g. a
+			// device went away): return quickly, never block or call back
+			// into BMediaGraph synchronously.
 	virtual	void					Connected(const BMediaFormat& format);
 	virtual	void					Disconnected();
 
@@ -68,12 +78,15 @@ private:
 			size_t					fBufferSize;
 			bool					fConnected;
 
-			// Set by the PipeWire loop thread when the stream died unexpectedly, and consumed later on the
-			// same thread by the deferred fault handler, so the callback itself never allocates or locks.
+			// Set by the realtime thread when the stream died unexpectedly, and consumed later on the
+			// same thread by the deferred fault handler, so the callback never allocates or locks.
 			std::atomic<bool>		fStreamFault;
 
 			void*					fStream;
 			void*					fFilterPort;
+
+			// Set while the owning unit runs detached (no pw_filter).
+			BMediaUnit*				fDetachedUnit;
 
 			void*					_GetStream() const { return fStream; }
 			void*					_GetFilterPort() const { return fFilterPort; }
@@ -90,6 +103,8 @@ private:
 	friend class BMidiUnit;
 	friend class BSimpleMediaNode;
 	friend class BMediaGraph;
+	friend class BMediaOutput;
+	friend class BPrivate::media::PipeWireBackend;
 };
 
 
@@ -101,7 +116,8 @@ public:
 			size_t					BufferSize() const;
 
 protected:
-	virtual	status_t				AcceptFormat(BMediaFormat* format) = 0;
+	// Default: accept any format whose type is in AcceptedTypes().
+	virtual	status_t				AcceptFormat(BMediaFormat* format);
 	virtual	void					HandleBuffer(void* buffer, size_t size,
 										const BMediaFormat& format);
 	virtual	void					Connected(const BMediaFormat& format) override;
@@ -109,6 +125,9 @@ protected:
 
 	friend class BMediaClient;
 	friend class BMediaUnit;
+	friend class BCameraSource;
+	friend class BMediaGraph;
+	friend class BMediaOutput;
 };
 
 
@@ -122,19 +141,27 @@ public:
 			size_t					BufferSize() const;
 
 protected:
-	virtual	status_t				PrepareToConnect(BMediaFormat* format) = 0;
-	virtual	status_t				FormatProposal(BMediaFormat* format) = 0;
+	// Defaults: accept a format whose type is in AcceptedTypes(), and
+	// propose the format set on the output.
+	virtual	status_t				PrepareToConnect(BMediaFormat* format);
+	virtual	status_t				FormatProposal(BMediaFormat* format);
 	virtual	void					Connected(const BMediaFormat& format) override;
 	virtual	void					Disconnected() override;
 
 	virtual	size_t					FillBuffer(void* buffer, size_t maxSize);
 
 private:
+			// In-process delivery with an explicit format.
+			status_t				_SendBuffer(void* buffer, size_t size,
+										const BMediaFormat& format);
+
 			bool					fEnabled;
 			uint64					fFramesSent;
 
 	friend class BMediaClient;
 	friend class BMediaUnit;
+	friend class BCameraSource;
+	friend class BMediaGraph;
 };
 
 

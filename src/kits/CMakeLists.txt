@@ -4,7 +4,7 @@ AddOn(
 	be
 	SHARED
 
-	LIBS root icon ${ICU_LIBRARIES} agg ${ZLIB_LIBRARIES} pthread localestub shared systemd
+	LIBS root icon ${ICU_LIBRARIES} agg ${ZLIB_LIBRARIES} ${OPENSSL_LIBRARIES} pthread localestub shared systemd
 
 	RDEF
 	CountryFlags.rdef
@@ -48,6 +48,8 @@ add_subdirectory(game)
 add_subdirectory(interface)
 add_subdirectory(locale)
 add_subdirectory(media2)
+add_subdirectory(midi)
+add_subdirectory(midi2)
 add_subdirectory(network)
 add_subdirectory(opengl)
 add_subdirectory(package)
@@ -58,4 +60,5 @@ add_subdirectory(support)
 add_subdirectory(textencoding)
 add_subdirectory(translation)
 add_subdirectory(tracker)
-DoCatalogs("x-vnd.Haiku-libbe" kits)
+add_subdirectory(web)
+DoCatalogs("x-vnd.vos-libbe" kits)

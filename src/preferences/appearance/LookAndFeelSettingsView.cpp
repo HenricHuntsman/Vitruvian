@@ -1,4 +1,5 @@
 /*
+ *  Copyright 2026, Dario Casalinuovo. All rights reserved.
  *  Copyright 2010-2020 Haiku, Inc. All rights reserved.
  *  Distributed under the terms of the MIT license.
  *
@@ -234,7 +235,7 @@ LookAndFeelSettingsView::MessageReceived(BMessage* message)
 
 		case kMsgControlLookInfo:
 		{
-			BString infoText(B_TRANSLATE("Default Haiku ControlLook"));
+			BString infoText(B_TRANSLATE("Default ControlLook"));
 			BString path;
 			if (!BPrivate::get_control_look(path))
 				break;

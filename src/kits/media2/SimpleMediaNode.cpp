@@ -1,6 +1,6 @@
 /*
  * Copyright 2015-2026, Dario Casalinuovo. All rights reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #include <media2/SimpleMediaNode.h>
@@ -70,6 +70,22 @@ BSimpleMediaNode::HandleSeek(bigtime_t mediaTime, bigtime_t performanceTime)
 {
 	if (fNotifyHook != NULL)
 		fNotifyHook(fNotifyCookie, B_WILL_SEEK, mediaTime, performanceTime);
+}
+
+
+status_t
+BSimpleMediaNode::Start()
+{
+	// Same contract as BSimpleMediaUnit: suggest once before streams exist.
+	if (fFormatHook != NULL) {
+		BMediaFormat format;
+		status_t result = fFormatHook(fFormatCookie, &format);
+		if (result != B_OK)
+			return result;
+		if (fNotifyHook != NULL)
+			fNotifyHook(fNotifyCookie, B_FORMAT_SUGGESTION, &format);
+	}
+	return BMediaNode::Start();
 }
 
 

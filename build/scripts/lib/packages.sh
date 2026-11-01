@@ -17,58 +17,76 @@ get_base_packages() {
         amd64)
             printf '%s' \
                 "apt-utils dialog linux-image-$(get_kernel_flavour) systemd-sysv systemd-timesyncd" \
-                " polkitd pkexec sudo dbus-user-session" \
+                " polkitd pkexec sudo dbus-user-session seatd zstd" \
                 " network-manager modemmanager bluez bluez-obexd net-tools wireless-tools wireless-regdb wpasupplicant rfkill curl openssh-client" \
-                " network-manager-openvpn network-manager-vpnc network-manager-l2tp network-manager-openconnect" \
+                " network-manager-openvpn network-manager-l2tp network-manager-openconnect" \
                 " procps vim-tiny libbinutils openssh-server locales libnss-myhostname xdg-user-dirs ca-certificates iputils-ping linux-sysctl-defaults xfsprogs" \
                 " fdisk e2fsprogs btrfs-progs cryptsetup dosfstools" \
                 " fortune-mod ncurses-bin rsync" \
-                " pipewire-audio pipewire-bin wireplumber gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav" \
+                " pipewire pipewire-alsa pipewire-bin wireplumber libspa-0.2-bluetooth gstreamer1.0-pipewire gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav" \
+                " alsa-ucm-conf alsa-topology-conf gstreamer1.0-gl mesa-va-drivers" \
+                " libcamera-ipa libspa-0.2-libcamera libcamera-v4l2 v4l-utils" \
+                " swh-plugins x42-plugins frei0r-plugins" \
                 " cups cups-filters printer-driver-gutenprint printer-driver-cups-pdf" \
+                " libsane1 libsane-common sane-utils sane-airscan ipp-usb" \
                 " firmware-iwlwifi firmware-atheros firmware-realtek firmware-libertas firmware-brcm80211 firmware-misc-nonfree" \
                 " firmware-intel-graphics firmware-amd-graphics firmware-nvidia-graphics firmware-mediatek bluez-firmware" \
                 " firmware-sof-signed firmware-intel-sound firmware-cirrus intel-microcode amd64-microcode" \
                 " firmware-ti-connectivity firmware-intel-misc firmware-samsung firmware-siano firmware-zd1211 firmware-ath9k-htc firmware-carl9170" \
+                " libwpewebkit-2.0-1 libwpe-1.0-1 libwpebackend-fdo-1.0-1" \
                 " grub-common grub2-common grub-efi-amd64-bin grub-efi-ia32-bin grub-pc-bin"
             ;;
         arm64)
             printf '%s' \
                 "apt-utils dialog linux-image-arm64 systemd-sysv systemd-timesyncd" \
-                " polkitd pkexec sudo dbus-user-session" \
+                " polkitd pkexec sudo dbus-user-session seatd zstd" \
                 " network-manager modemmanager bluez bluez-obexd net-tools wireless-tools wireless-regdb wpasupplicant rfkill curl openssh-client" \
-                " network-manager-openvpn network-manager-vpnc network-manager-l2tp network-manager-openconnect" \
+                " network-manager-openvpn network-manager-l2tp network-manager-openconnect" \
                 " procps vim-tiny libbinutils openssh-server locales libnss-myhostname xdg-user-dirs ca-certificates iputils-ping linux-sysctl-defaults xfsprogs" \
                 " fdisk e2fsprogs btrfs-progs cryptsetup dosfstools" \
                 " fortune-mod ncurses-bin rsync" \
-                " pipewire-audio pipewire-bin wireplumber gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav" \
+                " pipewire pipewire-alsa pipewire-bin wireplumber libspa-0.2-bluetooth gstreamer1.0-pipewire gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav" \
+                " alsa-ucm-conf alsa-topology-conf gstreamer1.0-gl mesa-va-drivers libgl1-mesa-dri" \
+                " libcamera-ipa libspa-0.2-libcamera libcamera-v4l2 v4l-utils" \
+                " swh-plugins x42-plugins frei0r-plugins" \
                 " cups cups-filters printer-driver-gutenprint printer-driver-cups-pdf" \
-                " firmware-brcm80211 firmware-realtek firmware-atheros firmware-libertas firmware-mediatek firmware-iwlwifi" \
-                " firmware-ti-connectivity firmware-zd1211 firmware-ath9k-htc firmware-carl9170 bluez-firmware firmware-misc-nonfree" \
-                " firmware-amd-graphics firmware-nvidia-graphics firmware-samsung firmware-siano" \
-                " raspi-firmware grub-common grub2-common grub-efi-arm64-bin"
+                " libsane1 libsane-common sane-utils sane-airscan ipp-usb" \
+                " libwpewebkit-2.0-1 libwpe-1.0-1 libwpebackend-fdo-1.0-1" \
+                " firmware-brcm80211 firmware-misc-nonfree firmware-realtek firmware-atheros firmware-libertas bluez-firmware" \
+                " grub-common grub2-common grub-efi-arm64-bin"
             ;;
         arm32)
             printf '%s' \
                 "apt-utils dialog linux-image-armmp systemd-sysv systemd-timesyncd" \
-                " polkitd pkexec sudo dbus-user-session" \
+                " polkitd pkexec sudo dbus-user-session seatd zstd" \
                 " network-manager modemmanager bluez bluez-obexd net-tools wireless-tools wireless-regdb wpasupplicant rfkill curl openssh-client" \
                 " procps vim-tiny libbinutils openssh-server locales libnss-myhostname xdg-user-dirs ca-certificates iputils-ping linux-sysctl-defaults" \
                 " fdisk e2fsprogs" \
                 " fortune-mod ncurses-bin rsync" \
-                " pipewire-audio pipewire-bin wireplumber gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav" \
+                " pipewire pipewire-alsa pipewire-bin wireplumber libspa-0.2-bluetooth gstreamer1.0-pipewire gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav" \
+                " alsa-ucm-conf alsa-topology-conf gstreamer1.0-gl mesa-va-drivers" \
+                " libcamera-ipa libspa-0.2-libcamera libcamera-v4l2 v4l-utils" \
+                " swh-plugins frei0r-plugins" \
                 " cups cups-filters printer-driver-gutenprint printer-driver-cups-pdf" \
+                " libsane1 libsane-common sane-utils sane-airscan ipp-usb" \
+                " libwpewebkit-2.0-1 libwpe-1.0-1 libwpebackend-fdo-1.0-1" \
                 " grub-common"
             ;;
         riscv64)
             printf '%s' \
                 "apt-utils dialog linux-image-riscv64 systemd-sysv systemd-timesyncd" \
-                " polkitd pkexec sudo dbus-user-session" \
+                " polkitd pkexec sudo dbus-user-session seatd zstd" \
                 " network-manager modemmanager bluez bluez-obexd net-tools wireless-tools wireless-regdb wpasupplicant rfkill curl openssh-client" \
                 " procps vim-tiny libbinutils openssh-server locales libnss-myhostname xdg-user-dirs ca-certificates iputils-ping linux-sysctl-defaults xfsprogs" \
                 " fdisk e2fsprogs btrfs-progs cryptsetup dosfstools" \
                 " fortune-mod ncurses-bin rsync" \
-                " pipewire-audio pipewire-bin wireplumber gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav" \
+                " pipewire pipewire-alsa pipewire-bin wireplumber libspa-0.2-bluetooth gstreamer1.0-pipewire gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav" \
+                " alsa-ucm-conf alsa-topology-conf gstreamer1.0-gl mesa-va-drivers" \
+                " libcamera-ipa libspa-0.2-libcamera libcamera-v4l2 v4l-utils" \
+                " swh-plugins frei0r-plugins" \
                 " cups cups-filters printer-driver-gutenprint printer-driver-cups-pdf" \
+                " libsane1 libsane-common sane-utils sane-airscan ipp-usb" \
+                " libwpewebkit-2.0-1 libwpe-1.0-1 libwpebackend-fdo-1.0-1" \
                 " grub-common grub2-common grub-efi-riscv64-bin"
             ;;
         *)
@@ -89,9 +107,11 @@ get_dev_packages() {
                 " libgl-dev libegl-dev libgbm-dev" \
                 " libxkbcommon-dev libsystemd-dev libpam0g-dev libpwquality-dev" \
                 " libgcrypt20-dev libapt-pkg-dev" \
-                " libjpeg-dev libpng-dev libtiff-dev libwebp-dev libicns-dev" \
-                " libpipewire-0.3-dev libspa-0.2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev" \
-                " libglu1-mesa-dev libnm-dev libbluetooth-dev"
+                " libjpeg-dev libpng-dev libtiff-dev libwebp-dev libicns-dev libavif-dev libssl-dev" \
+                " libsane1 libsane-common sane-utils sane-airscan ipp-usb" \
+                " libpipewire-0.3-dev libspa-0.2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libfluidsynth-dev libsane-dev liblilv-dev libsuil-dev lv2-dev" \
+                " libglu1-mesa-dev libnm-dev libbluetooth-dev" \
+                " libwpewebkit-2.0-dev libwpe-1.0-dev libwpebackend-fdo-1.0-dev"
             ;;
         arm64)
             printf '%s' \
@@ -102,9 +122,11 @@ get_dev_packages() {
                 " libgl-dev libegl-dev libgbm-dev" \
                 " libxkbcommon-dev libsystemd-dev libpam0g-dev libpwquality-dev" \
                 " libgcrypt20-dev libapt-pkg-dev" \
-                " libjpeg-dev libpng-dev libtiff-dev libwebp-dev libicns-dev" \
-                " libpipewire-0.3-dev libspa-0.2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev" \
-                " libglu1-mesa-dev libnm-dev libbluetooth-dev"
+                " libjpeg-dev libpng-dev libtiff-dev libwebp-dev libicns-dev libavif-dev libssl-dev" \
+                " libsane1 libsane-common sane-utils sane-airscan ipp-usb" \
+                " libpipewire-0.3-dev libspa-0.2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libfluidsynth-dev libsane-dev liblilv-dev libsuil-dev lv2-dev" \
+                " libglu1-mesa-dev libnm-dev libbluetooth-dev" \
+                " libwpewebkit-2.0-dev libwpe-1.0-dev libwpebackend-fdo-1.0-dev"
             ;;
         arm32)
             printf '%s' \
@@ -115,8 +137,10 @@ get_dev_packages() {
                 " libgl-dev libegl-dev libgbm-dev" \
                 " libxkbcommon-dev libsystemd-dev libpam0g-dev libpwquality-dev" \
                 " libgcrypt20-dev libapt-pkg-dev" \
-                " libjpeg-dev libpng-dev libtiff-dev libwebp-dev libicns-dev" \
-                " libpipewire-0.3-dev libspa-0.2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libglu1-mesa-dev libnm-dev libbluetooth-dev"
+                " libjpeg-dev libpng-dev libtiff-dev libwebp-dev libicns-dev libavif-dev libssl-dev" \
+                " libsane1 libsane-common sane-utils sane-airscan ipp-usb" \
+                " libpipewire-0.3-dev libspa-0.2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libfluidsynth-dev libsane-dev liblilv-dev libsuil-dev lv2-dev libglu1-mesa-dev libnm-dev libbluetooth-dev" \
+                " libwpewebkit-2.0-dev libwpe-1.0-dev libwpebackend-fdo-1.0-dev"
             ;;
         riscv64)
             printf '%s' \
@@ -127,8 +151,10 @@ get_dev_packages() {
                 " libgl-dev libegl-dev libgbm-dev" \
                 " libxkbcommon-dev libsystemd-dev libpam0g-dev libpwquality-dev" \
                 " libgcrypt20-dev libapt-pkg-dev" \
-                " libjpeg-dev libpng-dev libtiff-dev libwebp-dev libicns-dev" \
-                " libpipewire-0.3-dev libspa-0.2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libglu1-mesa-dev libnm-dev libbluetooth-dev"
+                " libjpeg-dev libpng-dev libtiff-dev libwebp-dev libicns-dev libavif-dev libssl-dev" \
+                " libsane1 libsane-common sane-utils sane-airscan ipp-usb" \
+                " libpipewire-0.3-dev libspa-0.2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libfluidsynth-dev libsane-dev liblilv-dev libsuil-dev lv2-dev libglu1-mesa-dev libnm-dev libbluetooth-dev" \
+                " libwpewebkit-2.0-dev libwpe-1.0-dev libwpebackend-fdo-1.0-dev"
             ;;
         *)
             die "No dev package list for architecture: $_arch"
@@ -208,12 +234,12 @@ _board_extra_packages() {
         rockchip)
             printf '%s' \
                 "systemd systemd-sysv dbus-user-session polkitd pkexec sudo accountsservice libpam-pwquality libpwquality-tools libpwquality-dev systemd-timesyncd locales console-setup keyboard-configuration xdg-user-dirs ca-certificates iputils-ping vim net-tools iproute2 openssh-server" \
-                " linux-image-arm64 linux-headers-arm64 u-boot-rockchip dosfstools rsync"
+                " linux-image-arm64 linux-headers-arm64 u-boot-rockchip dosfstools rsync firmware-brcm80211 bluez-firmware"
             ;;
         allwinner)
             printf '%s' \
                 "systemd systemd-sysv dbus-user-session polkitd pkexec sudo accountsservice libpam-pwquality libpwquality-tools libpwquality-dev systemd-timesyncd locales console-setup keyboard-configuration xdg-user-dirs ca-certificates iputils-ping vim net-tools iproute2 openssh-server" \
-                " linux-image-arm64 linux-headers-arm64 u-boot-sunxi dosfstools rsync"
+                " linux-image-arm64 linux-headers-arm64 u-boot-sunxi dosfstools rsync libgl1-mesa-dri"
             ;;
         allwinner-h3)
             printf '%s' \
@@ -238,18 +264,21 @@ _board_extra_packages() {
         amlogic)
             printf '%s' \
                 "systemd systemd-sysv dbus-user-session polkitd pkexec sudo accountsservice libpam-pwquality libpwquality-tools libpwquality-dev systemd-timesyncd locales console-setup keyboard-configuration xdg-user-dirs ca-certificates iputils-ping vim net-tools iproute2 openssh-server" \
-                " linux-image-arm64 dosfstools rsync"
+                " linux-image-arm64 linux-headers-arm64 dosfstools rsync"
             # No Debian Amlogic U-Boot since bookworm; fip.sh builds the blob.
+            # linux-headers-arm64 is load-bearing: nexus-dkms' preinst
+            # interlock refuses to unpack without a headers tree under
+            # /usr/src (2026-10-17 amlogic leg 20261017T171747Z-3395292).
             ;;
         visionfive2)
             printf '%s' \
                 "systemd systemd-sysv dbus-user-session polkitd pkexec sudo accountsservice libpam-pwquality libpwquality-tools libpwquality-dev systemd-timesyncd locales console-setup keyboard-configuration xdg-user-dirs ca-certificates iputils-ping vim net-tools iproute2 openssh-server" \
-                " linux-image-riscv64 u-boot-starfive dosfstools rsync"
+                " linux-image-riscv64 linux-headers-riscv64 u-boot-starfive dosfstools rsync"
             ;;
         licheerv)
             printf '%s' \
                 "systemd systemd-sysv dbus-user-session polkitd pkexec sudo accountsservice libpam-pwquality libpwquality-tools libpwquality-dev systemd-timesyncd locales console-setup keyboard-configuration xdg-user-dirs ca-certificates iputils-ping vim net-tools iproute2 openssh-server" \
-                " linux-image-riscv64 dosfstools rsync"
+                " linux-image-riscv64 linux-headers-riscv64 dosfstools rsync"
             ;;
         *)
             die "No board package list for: $_board"

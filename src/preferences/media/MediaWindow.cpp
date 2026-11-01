@@ -1,4 +1,5 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2026, Vitruvian Project.
  * Distributed under the terms of the MIT License.
  */
@@ -6,7 +7,6 @@
 #include "MediaWindow.h"
 
 #include <algorithm>
-#include <stdio.h>
 
 #include <Application.h>
 #include <Catalog.h>
@@ -33,6 +33,8 @@
 #include <TabView.h>
 
 #include <media2/MediaGraph.h>
+
+#include <MediaGraphPrivate.h>
 
 #include "DeviceListView.h"
 #include "DeviceMixerView.h"
@@ -121,13 +123,10 @@ MediaWindow::~MediaWindow()
 		path.Append(kMediaSettingsFile);
 		BFile file(path.Path(), B_READ_WRITE | B_CREATE_FILE | B_ERASE_FILE);
 		if (file.InitCheck() == B_OK) {
-			BRect rect = Frame();
-			char buffer[128];
-			int len = snprintf(buffer, sizeof(buffer),
-				"rect = %d,%d,%d,%d\nsection = %d\n",
-				(int)rect.left, (int)rect.top, (int)rect.right,
-				(int)rect.bottom, (int)fShownSection);
-			file.Write(buffer, len);
+			BMessage settings;
+			settings.AddRect("frame", Frame());
+			settings.AddInt32("section", fShownSection);
+			settings.Flatten(&file);
 		}
 	}
 
@@ -152,10 +151,8 @@ MediaWindow::_BuildSidebar()
 	fSidebarSections.push_back(kInputSection);
 	fSidebar->AddItem(new BStringItem(B_TRANSLATE("Application volumes")));
 	fSidebarSections.push_back(kStreamsSection);
-#if MEDIA_PREFS_ENABLE_HARDWARE
 	fSidebar->AddItem(new BStringItem(B_TRANSLATE("Hardware")));
 	fSidebarSections.push_back(kHardwareSection);
-#endif
 	fSidebar->AddItem(new BStringItem(B_TRANSLATE("Sounds")));
 	fSidebarSections.push_back(kSoundsSection);
 
@@ -473,28 +470,27 @@ MediaWindow::_OnPipeWireChanged(uint32 what, uint32 deviceId)
 	if (fInputView)   fInputView->Refresh();
 	if (fStreamsView) ((StreamListView*)fStreamsView)->Refresh();
 
-	if (what == kMsgPWDeviceVolumeChanged || what == kMsgPWDefaultChanged
-			|| what == kMsgPWDevicePortChanged) {
+	if (what == BMediaGraph::B_MEDIA_VOLUME_CHANGED
+			|| what == BMediaGraph::B_MEDIA_DEFAULTS_CHANGED
+			|| what == kMsgDevicePortChanged) {
 		if (fCurrentSection != NULL) {
 			DeviceMixerView* mixer = dynamic_cast<DeviceMixerView*>(
 				fCurrentSection->FindView("DeviceMixer"));
 			if (mixer != NULL
-					&& (what == kMsgPWDefaultChanged
+					&& (what == BMediaGraph::B_MEDIA_DEFAULTS_CHANGED
 						|| deviceId == 0 || mixer->DeviceId() == deviceId)) {
 				mixer->ExternalChangeHint();
 			}
 		}
 	}
 
-#if MEDIA_PREFS_ENABLE_HARDWARE
-
-	if (what == kMsgPWDeviceProfileChanged || what == kMsgPWDevicePortChanged)
+	if (what == kMsgDeviceProfileChanged || what == kMsgDevicePortChanged)
 		_PopulateHardwareProfiles();
 
-	if (what == kMsgPWDevicesChanged) {
+	if (what == BMediaGraph::B_MEDIA_CLIENT_ADDED
+			|| what == BMediaGraph::B_MEDIA_CLIENT_REMOVED) {
 		_PopulateHardwareDeviceMenu();
 	}
-#endif
 }
 
 
@@ -607,10 +603,13 @@ MediaWindow::MessageReceived(BMessage* msg)
 		break;
 		}
 
-		case kMsgPWDevicesChanged:
-		case kMsgPWStreamsChanged:
-		case kMsgPWDefaultChanged:
-		case kMsgPWDeviceVolumeChanged:
+		case BMediaGraph::B_MEDIA_CLIENT_ADDED:
+		case BMediaGraph::B_MEDIA_CLIENT_REMOVED:
+		case BMediaGraph::B_MEDIA_STREAMS_CHANGED:
+		case BMediaGraph::B_MEDIA_DEFAULTS_CHANGED:
+		case BMediaGraph::B_MEDIA_VOLUME_CHANGED:
+		case kMsgDevicePortChanged:
+		case kMsgDeviceProfileChanged:
 			_OnPipeWireChanged(msg->what,
 				msg->GetUInt32("device_id", 0));
 			break;

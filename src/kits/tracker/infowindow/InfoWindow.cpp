@@ -180,8 +180,11 @@ BInfoWindow::Quit()
 	fStopCalc = true;
 
 	// wait until CalcSize thread has terminated before closing window
-	status_t result;
-	wait_for_thread(fCalcThreadID, &result);
+	if (fCalcThreadID >= 0) {
+		status_t result;
+		wait_for_thread(fCalcThreadID, &result);
+		fCalcThreadID = -1;
+	}
 
 	_inherited::Quit();
 }
@@ -290,8 +293,11 @@ BInfoWindow::MessageReceived(BMessage* message)
 			fStopCalc = true;
 			// Wait until any current CalcSize thread has terminated before
 			// starting a new one
-			status_t result;
-			wait_for_thread(fCalcThreadID, &result);
+			if (fCalcThreadID >= 0) {
+				status_t result;
+				wait_for_thread(fCalcThreadID, &result);
+				fCalcThreadID = -1;
+			}
 
 			// Start recalculating..
 			fStopCalc = false;
@@ -549,6 +555,7 @@ BInfoWindow::CalcSize(void* castToWindow)
 		BVolumeRoster volRoster;
 		volRoster.Rewind();
 		BVolume volume;
+		BObjectList<node_ref, true> seen(4);
 		while (volRoster.GetNextVolume(&volume) == B_OK) {
 			if (!volume.IsPersistent())
 				continue;
@@ -558,7 +565,8 @@ BInfoWindow::CalcSize(void* castToWindow)
 			currentDirCount = 0;
 
 			BDirectory trashDir;
-			if (FSGetTrashDir(&trashDir, volume.Device()) == B_OK) {
+			if (FSGetTrashDir(&trashDir, volume.Device()) == B_OK
+				&& FSRecordTrashDir(&seen, &trashDir)) {
 				CopyLoopControl loopControl;
 				FSRecursiveCalcSize(window, &loopControl, &trashDir,
 					&currentSize, &currentFileCount, &currentDirCount);

@@ -6,8 +6,11 @@
 #include "LinuxVolume.h"
 
 #include <fs_info.h>
+#include <drivers/fs_interface.h>
 #include <syscalls.h>
 #include <fcntl.h>
+#include <errno.h>
+#include <linux/fs.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/statvfs.h>
@@ -132,6 +135,21 @@ LinuxVolume::FillVolumeInfo(const BPrivate::MountEntry& entry, fs_info* info)
 		isPersistent = true;
 	if (isPersistent)
 		info->flags |= B_FS_IS_PERSISTENT;
+
+	static const char* const kSharedTypes[] = {
+		"nfs", "nfs4", "cifs", "smb3", "fuse.sshfs", "sshfs", "9p", NULL
+	};
+	static const char* const kXattrTypes[] = {
+		"ext4", "xfs", "btrfs", "f2fs", NULL
+	};
+	for (int i = 0; kSharedTypes[i] != NULL; i++) {
+		if (strcmp(fsType, kSharedTypes[i]) == 0)
+			info->flags |= B_FS_IS_SHARED;
+	}
+	for (int i = 0; kXattrTypes[i] != NULL; i++) {
+		if (strcmp(fsType, kXattrTypes[i]) == 0)
+			info->flags |= B_FS_HAS_MIME;
+	}
 
 	if ((vfs.f_flag & ST_RDONLY) != 0
 			|| (entry.flags & MS_RDONLY) != 0
@@ -259,8 +277,51 @@ _kern_read_fs_info(dev_t device, fs_info* info)
 status_t
 _kern_write_fs_info(dev_t device, const struct fs_info* info, int mask)
 {
-	UNIMPLEMENTED();
-	return B_NOT_SUPPORTED;
+	CALLED();
+
+	if (info == NULL)
+		return B_BAD_VALUE;
+	if ((mask & ~FS_WRITE_FSINFO_NAME) != 0)
+		return B_NOT_SUPPORTED;
+	if ((mask & FS_WRITE_FSINFO_NAME) == 0)
+		return B_OK;
+
+	BPrivate::MountEntry entry;
+	if (!BPrivate::MountInfo::FindByDev(device, &entry))
+		return B_BAD_VALUE;
+
+	char label[FSLABEL_MAX];
+	memset(label, 0, sizeof(label));
+	strlcpy(label, info->volume_name, sizeof(label));
+
+	int fd = open(entry.mount_point.String(),
+		O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (fd < 0)
+		return errno == EACCES ? B_PERMISSION_DENIED : B_ENTRY_NOT_FOUND;
+
+	int result = ioctl(fd, FS_IOC_SETFSLABEL, label);
+	int error = errno;
+	close(fd);
+
+	if (result < 0) {
+		switch (error) {
+			case EPERM:
+			case EACCES:
+				return B_PERMISSION_DENIED;
+			case EINVAL:
+			case ERANGE:
+				return B_BAD_VALUE;
+			case EROFS:
+				return B_READ_ONLY_DEVICE;
+			default:
+				return B_NOT_SUPPORTED;
+		}
+	}
+
+	pthread_mutex_lock(&sInfoCache.lock);
+	sInfoCache.valid = false;
+	pthread_mutex_unlock(&sInfoCache.lock);
+	return B_OK;
 }
 
 

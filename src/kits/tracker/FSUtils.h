@@ -76,7 +76,7 @@ public:
 									bool allowContinue);
 
 	virtual	void				UpdateStatus(const char* name,
-									const entry_ref& ref, int32 count,
+									const entry_ref& ref, int32 bytes,
 									bool optional = false);
 
 	//! \return \c true if canceled
@@ -134,7 +134,7 @@ public:
 									bool allowContinue);
 
 	virtual	void				UpdateStatus(const char* name,
-									const entry_ref& ref, int32 count,
+									const entry_ref& ref, int32 bytes,
 									bool optional = false);
 
 	virtual	bool				CheckUserCanceled();
@@ -172,7 +172,7 @@ _IMPEXP_TRACKER void FSDuplicate(BObjectList<entry_ref, true>* srcList,
 _IMPEXP_TRACKER void FSMoveToFolder(BObjectList<entry_ref, true>* srcList, BEntry*,
 	uint32 moveMode, BList* pointList = NULL);
 _IMPEXP_TRACKER void FSMakeOriginalName(char* name, BDirectory* destDir,
-	const char* suffix);
+	const char* suffix, size_t suffixLength);
 _IMPEXP_TRACKER bool FSIsTrashDir(const BEntry*);
 _IMPEXP_TRACKER bool FSIsPrintersDir(const BEntry*);
 _IMPEXP_TRACKER bool FSIsDeskDir(const BEntry*);
@@ -213,6 +213,8 @@ bool FSInDeskDir(const entry_ref*);
 bool FSIsQueriesDir(const entry_ref*);
 bool FSInRootDir(const entry_ref*);
 bool FSInTrashDir(const entry_ref*);
+// false if the user cannot unlink entries from ref's parent directory
+bool FSParentIsWritable(const entry_ref*);
 
 // doesn't need to be exported
 bool FSGetPoseLocation(const BNode* node, BPoint* point);
@@ -243,10 +245,12 @@ ReadAttrResult ReadAttr(const BNode*, const char* hostAttrName,
 ReadAttrResult GetAttrInfo(const BNode*, const char* hostAttrName,
 	const char* foreignAttrName, type_code* = NULL, size_t* = NULL);
 
+status_t FSCreateNewFileTemplate(entry_ref* fileRef, entry_ref* templateRef);
 status_t FSCreateNewFolder(entry_ref*);
 status_t FSRecursiveCreateFolder(const char* path);
-void FSMakeOriginalName(BString &name, const BDirectory* destDir,
-	const char* suffix = 0);
+void FSMakeOriginalName(char* name, const BDirectory* destDir, BString &suffix);
+void FSMakeOriginalName(char* name, const BDirectory* destDir,
+	const char* suffix = NULL, size_t suffixLength = 0);
 
 status_t FSGetParentVirtualDirectoryAware(const BEntry& entry, entry_ref& _ref);
 status_t FSGetParentVirtualDirectoryAware(const BEntry& entry, BEntry& _entry);
@@ -277,6 +281,10 @@ status_t ShouldEditRefName(const entry_ref* ref, const char* name, size_t);
 	// return B_OK if name should be edited
 
 bool CheckDevicesEqual(const entry_ref* entry, const Model* targetModel);
+
+// true if a boot-critical system entry would leave the system directory
+bool IsSystemDragOutOfSystem(const BObjectList<entry_ref, true>* srcList,
+	const Model* targetModel);
 
 // Deprecated calls use newer calls above instead
 _IMPEXP_TRACKER void FSLaunchItem(const entry_ref* appRef,

@@ -260,7 +260,10 @@ public:
 	~ShutdownWindow()
 	{
 		atomic_set(&fAnimationActive, false);
-		wait_for_thread(fAnimationWorker, NULL);
+		if (fAnimationWorker >= 0) {
+			wait_for_thread(fAnimationWorker, NULL);
+			fAnimationWorker = -1;
+		}
 
 		delete fNormalIconBitmap;
 		delete fTintedIconBitmap;
@@ -573,6 +576,7 @@ private:
 		} else {
 			atomic_set(&fAnimationActive, false);
 			wait_for_thread(fAnimationWorker, NULL);
+			fAnimationWorker = -1;
 
 			fCurrentAnimationRow = -1;
 			fAnimationLightenPhase = true;
@@ -743,7 +747,7 @@ ShutdownProcess::Init(BMessage* request)
 	if (!fInternalEvents)
 		RETURN_ERROR(B_NO_MEMORY);
 
-	// create the event sempahore
+	// create the event semaphore
 	fInternalEventSemaphore = create_sem(0, "shutdown events");
 	if (fInternalEventSemaphore < 0)
 		RETURN_ERROR(fInternalEventSemaphore);

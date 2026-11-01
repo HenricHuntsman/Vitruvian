@@ -1,4 +1,5 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2007-2018, Haiku, Inc. All rights reserved.
  * Distributed under the terms of the MIT License.
  *
@@ -60,7 +61,9 @@
 static const char* kMountServerSettings = "mount_server";
 static const char* kMountFlagsKeyExtension = " mount flags";
 
+#ifndef __VOS__
 static const char* kInitialMountEvent = "initial_volumes_mounted";
+#endif
 
 
 static uid_t

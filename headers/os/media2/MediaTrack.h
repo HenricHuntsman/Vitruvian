@@ -1,7 +1,7 @@
 /*
  * Copyright 2025-2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2025-2026, The Vitruvian Project. All Rights Reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #ifndef _MEDIA2_MEDIA_TRACK_H
@@ -12,6 +12,14 @@
 
 
 class BView;
+
+
+// SeekToTime/SeekToFrame flags. Default (no flags) is an accurate seek:
+// key frame plus refinement so the track lands at the requested time.
+enum media_seek_flags {
+	B_MEDIA_SEEK_ACCURATE	= 1 << 0,
+	B_MEDIA_SEEK_KEY_UNIT	= 1 << 1,
+};
 
 
 struct media_header {
@@ -29,6 +37,10 @@ struct media_header {
 };
 
 
+// BMediaTrack is always owned by the BMediaFile that produced it
+// (TrackAt() or CreateTrack()). BMediaFile::ReleaseTrack() validates
+// ownership; it does not free the object. Deleting a track yourself
+// while the file still holds it is undefined.
 class BMediaTrack {
 public:
 	virtual						~BMediaTrack();
@@ -36,7 +48,11 @@ public:
 			status_t			InitCheck() const;
 
 			status_t			DecodedFormat(BMediaFormat* format);
-			status_t			EncodedFormat(BMediaFormat* format);
+			status_t			DecodedFormat(media_format* format,
+									uint32 flags = 0);
+
+			status_t			EncodedFormat(BMediaFormat* format) const;
+			status_t			EncodedFormat(media_format* format) const;
 
 			int64				CountFrames() const;
 			bigtime_t			Duration() const;
@@ -51,8 +67,16 @@ public:
 			status_t			SeekToFrame(int64* inOutFrame, int32 flags = 0);
 
 
-			status_t			WriteFrames(const void* buffer, int64 frameCount,
-									const media_header* mh = NULL);
+			// Media Kit 1.0 shape: frameCount is a frame/sample count and
+			// flags carries media_frame_flags. The writer
+			// ignores flags; it is accepted for source compatibility.
+			status_t			WriteFrames(const void* data, int64 frameCount,
+									int32 flags = 0);
+
+			// Swaps the raw chunk most recently handed to WriteFrames
+			// while it is still pending (raw write tracks only).
+			status_t			ReplaceFrames(const void* data,
+									int64 frameCount, int32 flags = 0);
 
 
 			status_t			GetCodecInfo(media_codec_info* info) const;

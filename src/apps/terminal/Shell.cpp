@@ -1,4 +1,5 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2007-2013, Haiku, Inc. All rights reserved.
  * Copyright (c) 2003-4 Kian Duffy <myob@users.sourceforge.net>
  * Copyright (c) 2004 Daniel Furrer <assimil8or@users.sourceforge.net>
@@ -38,7 +39,7 @@
 #include <OS.h>
 #include <Path.h>
 
-#include <util/KMessage.h>
+#include <kernel/util/KMessage.h>
 
 #include <extended_system_info.h>
 #include <extended_system_info_defs.h>
@@ -141,10 +142,13 @@ Shell::Close()
 	fTermParse = NULL;
 
 	if (fFd >= 0) {
+		pid_t processID = fShellInfo.ProcessID();
 		close(fFd);
 		fShellInfo.SetProcessID(-1);
 		int status;
-		wait(&status);
+		if (processID > 0)
+			waitpid(processID, &status, 0);
+			// wait() would reap some other tab's shell
 		fFd = -1;
 	}
 }
@@ -241,35 +245,16 @@ Shell::GetActiveProcessInfo(ActiveProcessInfo& _info) const
 	if (error != B_OK)
 		return false;
 
-	dev_t dev;
-	ino_t ino;
-	char refName[B_PATH_NAME_LENGTH];
+	// fallback to cwd path and name
+	const char* cwdName;
+	if (info.FindString("name", &cwdName) != B_OK)
+		return false;
 
-#if 0
-	if (info.FindRef("virtual:cwd directory", &dev, &ino, refName,
-			B_PATH_NAME_LENGTH) == B_OK) {
-		// convert the node ref into a path
-		BPath cwdPath;
-		entry_ref cwdRef(dev, ino, ".");
-		if (cwdPath.SetTo(&cwdRef) != B_OK)
-			return false;
+	const char* path;
+	if (info.FindString("cwd path", &path) != B_OK)
+		return false;
 
-		_info.SetTo(process, refName, cwdPath.Path());
-	} else {
-#endif
-		// fallback to cwd path and name
-		const char* cwdName;
-		if (info.FindString("name", &cwdName) != B_OK)
-			return false;
-
-		const char* path;
-		if (info.FindString("cwd path", &path) != B_OK)
-			return false;
-
-		_info.SetTo(process, cwdName, path);
-#if 0
-	}
-#endif
+	_info.SetTo(process, cwdName, path);
 
 	return true;
 }
@@ -452,7 +437,7 @@ Shell::_Spawn(int row, int col, const ShellParameters& parameters)
 			snprintf(handshake.msg, sizeof(handshake.msg),
 				"could not set session leader.");
 			send_handshake_message(terminalThread, handshake);
-			exit(1);
+			_exit(1);
 		}
 
 		/* open slave pty */
@@ -462,7 +447,7 @@ Shell::_Spawn(int row, int col, const ShellParameters& parameters)
 			snprintf(handshake.msg, sizeof(handshake.msg),
 				"can't open tty (%s).", ttyName);
 			send_handshake_message(terminalThread, handshake);
-			exit(1);
+			_exit(1);
 		}
 
 		/* set signal default */
@@ -507,7 +492,7 @@ Shell::_Spawn(int row, int col, const ShellParameters& parameters)
 			snprintf(handshake.msg, sizeof(handshake.msg),
 				"failed set terminal interface (TERMIOS).");
 			send_handshake_message(terminalThread, handshake);
-			exit(1);
+			_exit(1);
 		}
 
 		/*
@@ -523,7 +508,7 @@ Shell::_Spawn(int row, int col, const ShellParameters& parameters)
 			snprintf(handshake.msg, sizeof(handshake.msg),
 				"mismatch handshake.");
 			send_handshake_message(terminalThread, handshake);
-			exit(1);
+			_exit(1);
 		}
 
 		struct winsize ws = { handshake.row, handshake.col };
@@ -573,7 +558,7 @@ Shell::_Spawn(int row, int col, const ShellParameters& parameters)
 				"-l", NULL);
 		}
 
-		exit(1);
+		_exit(1);
 	}
 
 	/*
@@ -610,6 +595,10 @@ Shell::_Spawn(int row, int col, const ShellParameters& parameters)
 
 	if (done <= 0) {
 		close(master);
+		int status;
+		waitpid(fShellInfo.ProcessID(), &status, 0);
+			// the child exits after the failed handshake; reap it
+		fShellInfo.SetProcessID(-1);
 		return B_ERROR;
 	}
 

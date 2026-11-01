@@ -10,6 +10,7 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -33,6 +34,24 @@ join_path(const char* dir, const char* leaf, char* buffer, size_t bufferSize)
 		return B_BUFFER_OVERFLOW;
 
 	return B_OK;
+}
+
+
+// O_NOTRAVERSE is a V\OS-private bit: open the link itself if the leaf is a
+// symlink (O_PATH, usable for stat/readlink/chown only), else open normally.
+static int
+open_at_mode(int dirFd, const char* path, int openMode, int perms)
+{
+	bool noTraverse = (openMode & O_NOTRAVERSE) != 0;
+	openMode &= ~O_NOTRAVERSE;
+
+	if (!noTraverse)
+		return openat(dirFd, path, openMode, perms);
+
+	int ret = openat(dirFd, path, openMode | O_NOFOLLOW, perms);
+	if (ret < 0 && errno == ELOOP)
+		ret = openat(dirFd, path, O_PATH | O_NOFOLLOW | O_CLOEXEC);
+	return ret;
 }
 
 
@@ -63,7 +82,7 @@ _kern_read_statx(int fd, const char* path, bool traverseLink,
 		return -errno;
 
 	struct stat st;
-	if (fstatat(fd, path, &st, flags & ~AT_EMPTY_PATH) < 0)
+	if (fstatat(fd, path, &st, flags) < 0)
 		return -errno;
 
 	memset(stx, 0, sizeof(*stx));
@@ -95,6 +114,9 @@ _kern_read_stat(int fd, const char* path, bool traverseLink,
 	struct stat* st, size_t _ignored)
 {
 	CALLED();
+
+	if (st == NULL)
+		return B_BAD_VALUE;
 
 	struct statx stx;
 	status_t err = _kern_read_statx(fd, path, traverseLink,
@@ -131,24 +153,25 @@ _kern_open(int fd, const char* path, int openMode, int perms)
 	if (fd < 0 && path == NULL)
 		return B_BAD_VALUE;
 
+	char fdPath[64];
+	if (path == NULL || path[0] == '\0') {
+		if (fd < 0)
+			return B_ENTRY_NOT_FOUND;
+
+		snprintf(fdPath, sizeof(fdPath), "/proc/self/fd/%d", fd);
+		path = fdPath;
+		fd = AT_FDCWD;
+	}
+
 	if (fd < 0)
 		fd = AT_FDCWD;
-
-	// AT_EMPTY_PATH opens the fd itself; treat empty string same as NULL.
-	if (path == NULL || path[0] == '\0') {
-		openMode |= AT_EMPTY_PATH;
-		path = "";
-	}
 
 	// Always set O_CLOEXEC so fds don't leak across exec() boundaries,
 	// especially when load_image() uses clone()+exec().
 	openMode |= O_CLOEXEC;
 
-	int ret;
-	if (openMode & O_CREAT)
-		ret = openat(fd, path, openMode, perms);
-	else
-		ret = openat(fd, path, openMode);
+	int ret = open_at_mode(fd, path, openMode,
+		(openMode & O_CREAT) != 0 ? perms : 0);
 
 	if (ret < 0)
 		return -errno;
@@ -258,17 +281,32 @@ _kern_open_parent_dir(int fd, char* name, size_t length)
 }
 
 
+// A gone node resolves through /proc as "<path> (deleted)".
+static status_t
+_reject_deleted_path(const char* path)
+{
+	static const char kSuffix[] = " (deleted)";
+	size_t len = strlen(path);
+	if (len >= sizeof(kSuffix) - 1
+		&& strcmp(path + len - (sizeof(kSuffix) - 1), kSuffix) == 0)
+		return B_ENTRY_NOT_FOUND;
+	return B_OK;
+}
+
+
 int
 _kern_open_dir_virtual_ref(vref_id id, const char* name)
 {
 	if (id < 0)
 		return B_BAD_VALUE;
 
-	int fd = BPrivate::VRefCache::Open(id);
+	bool hasName = name != NULL && strlen(name) != 0 && strcmp(name, ".") != 0;
+	int fd = hasName ? BPrivate::VRefCache::OpenPath(id)
+		: BPrivate::VRefCache::Open(id);
 	if (fd < 0)
 		return fd;
 
-	if (name == NULL || strlen(name) == 0 || (strcmp(name, ".") == 0)) {
+	if (!hasName) {
 		struct stat st;
 		if (fstat(fd, &st) == 0 && !S_ISDIR(st.st_mode)) {
 			close(fd);
@@ -316,14 +354,16 @@ _kern_open_virtual_ref(vref_id id, const char* name,
 	if (id < 0)
 		return B_BAD_VALUE;
 
-	int fd = BPrivate::VRefCache::Open(id);
+	bool hasName = name != NULL && strlen(name) != 0 && strcmp(name, ".") != 0;
+	int fd = hasName ? BPrivate::VRefCache::OpenPath(id)
+		: BPrivate::VRefCache::Open(id);
 	if (fd < 0)
 		return fd;
 
-	if (name == NULL || strlen(name) == 0 || (strcmp(name, ".") == 0))
+	if (!hasName)
 		return fd;
 
-	int retFd = openat(fd, name, openMode, perms);
+	int retFd = open_at_mode(fd, name, openMode, perms);
 	if (retFd < 0 && errno == EISDIR)
 		retFd = openat(fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
 	close(fd);
@@ -350,7 +390,7 @@ _kern_open_entry_ref(dev_t device, ino_t node, const char* name,
 	if (ret != B_OK)
 		return ret;
 
-	int fd = open(path, openMode, perms);
+	int fd = open_at_mode(AT_FDCWD, path, openMode, perms);
 	if (fd < 0 && errno == EISDIR)
 		fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
 	return (fd < 0) ? -errno : fd;
@@ -381,7 +421,7 @@ _kern_entry_ref_to_path(dev_t device, ino_t node, const char* leaf,
 		if (id < 0)
 			return B_ENTRY_NOT_FOUND;
 
-		int fd = BPrivate::VRefCache::Open(id);
+		int fd = BPrivate::VRefCache::OpenPath(id);
 		if (fd < 0)
 			return fd;
 
@@ -440,8 +480,10 @@ _kern_entry_ref_to_path_by_fd(int fd, team_id team, const char* name,
 {
 	// NULL or "." both mean "the fd itself" — "." is the sentinel used by
 	// BEntry for the filesystem root (where the directory is its own parent).
-	if (name == NULL || strcmp(name, ".") == 0)
-		return _kern_fd_to_path(fd, team, buffer, bufferSize);
+	if (name == NULL || strcmp(name, ".") == 0) {
+		status_t ret = _kern_fd_to_path(fd, team, buffer, bufferSize);
+		return ret == B_OK ? _reject_deleted_path(buffer) : ret;
+	}
 
 	if (name != NULL && name[0] == '/') {
 		if (strlcpy(buffer, name, bufferSize) >= bufferSize)
@@ -454,6 +496,10 @@ _kern_entry_ref_to_path_by_fd(int fd, team_id team, const char* name,
 	status_t ret = _kern_fd_to_path(fd, team,
 		resolvedPath, sizeof(resolvedPath));
 
+	if (ret != B_OK)
+		return ret;
+
+	ret = _reject_deleted_path(resolvedPath);
 	if (ret != B_OK)
 		return ret;
 
@@ -509,11 +555,14 @@ _kern_read_link(int fd, const char* path, char* buffer, size_t* _bufferSize)
 	if (*_bufferSize == 0)
 		return B_BAD_VALUE;
 
-	ssize_t size = readlinkat(fd, path, buffer, *_bufferSize - 1);
+	char target[PATH_MAX];
+	ssize_t size = readlinkat(fd, path, target, sizeof(target));
 	if (size < 0)
-		return -errno;
+		return (errno == ENOENT && path[0] == '\0') ? B_BAD_VALUE : -errno;
 
-	buffer[size] = '\0';
+	memcpy(buffer, target, (size_t)size < *_bufferSize ? (size_t)size : *_bufferSize);
+	if ((size_t)size < *_bufferSize)
+		buffer[size] = '\0';
 	*_bufferSize = (size_t)size;
 	return B_OK;
 }
@@ -553,10 +602,14 @@ _kern_write_stat(int fd, const char* path, bool traverseLink,
 		// When path is NULL we operate directly on the fd.
 		if (path == NULL) {
 			if (fchmod(fd, st->st_mode) < 0)
-				return -errno;
+				return (errno == EBADF) ? B_NOT_SUPPORTED : -errno;
 		} else {
-			if (fchmodat(fd, path, st->st_mode, 0) < 0)
+			if (fchmodat(fd, path, st->st_mode,
+					traverseLink ? 0 : AT_SYMLINK_NOFOLLOW) < 0) {
+				if (errno == EOPNOTSUPP || errno == ENOTSUP)
+					return B_NOT_SUPPORTED;
 				return -errno;
+			}
 		}
 	}
 
@@ -564,8 +617,11 @@ _kern_write_stat(int fd, const char* path, bool traverseLink,
 		uid_t uid = (statMask & B_STAT_UID) ? st->st_uid : (uid_t)-1;
 		gid_t gid = (statMask & B_STAT_GID) ? st->st_gid : (gid_t)-1;
 		if (path == NULL) {
-			if (fchown(fd, uid, gid) < 0)
-				return -errno;
+			if (fchown(fd, uid, gid) < 0) {
+				if (errno != EBADF || fchownat(fd, "", uid, gid,
+						AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW) < 0)
+					return -errno;
+			}
 		} else {
 			if (fchownat(fd, path, uid, gid, flags) < 0)
 				return -errno;
@@ -604,8 +660,11 @@ _kern_write_stat(int fd, const char* path, bool traverseLink,
 		}
 
 		if (path == NULL) {
-			if (futimens(fd, times) < 0)
-				return -errno;
+			if (futimens(fd, times) < 0) {
+				if (errno != EBADF
+					|| utimensat(fd, "", times, AT_EMPTY_PATH) < 0)
+					return -errno;
+			}
 		} else {
 			if (utimensat(fd, path, times, flags) < 0)
 				return -errno;
@@ -630,10 +689,13 @@ _kern_read_dir(int fd, struct dirent* buffer, size_t bufferSize, uint32 maxCount
 	// linux_dirent64 header (LP64): d_ino(8) + d_off(8) + d_reclen(2) + d_type(1) = 19 bytes
 	const size_t LINUX_DIRENT64_HEADER = 8 + 8 + 2 + 1;
 
-	if (NAME_MAX == 0)
-		return B_BAD_VALUE;
-	if (maxCount > SIZE_MAX / (LINUX_DIRENT64_HEADER + NAME_MAX))
-		return B_BAD_VALUE;
+	// Callers pass INT32_MAX for "as many as fit": clamp before sizing.
+	uint32 maxEntriesInBuffer = bufferSize / sizeof(dirent);
+	if (maxEntriesInBuffer == 0)
+		return B_BUFFER_OVERFLOW;
+	if (maxCount > maxEntriesInBuffer)
+		maxCount = maxEntriesInBuffer;
+
 	size_t bufSize = maxCount * (LINUX_DIRENT64_HEADER + NAME_MAX);
 
 	void* direntBuffer = malloc(bufSize);
@@ -654,9 +716,6 @@ _kern_read_dir(int fd, struct dirent* buffer, size_t bufferSize, uint32 maxCount
 
 	int i = 0;
 	size_t pos = 0;
-	uint32 maxEntriesInBuffer = bufferSize / sizeof(dirent);
-	if (maxCount > maxEntriesInBuffer)
-		maxCount = maxEntriesInBuffer;
 
 	while (pos < (size_t)ret && i < (int)maxCount) {
 		if ((size_t)ret - pos < LINUX_DIRENT64_HEADER)
@@ -679,8 +738,10 @@ _kern_read_dir(int fd, struct dirent* buffer, size_t bufferSize, uint32 maxCount
 		size_t name_len = reclen - LINUX_DIRENT64_HEADER;
 		size_t dst_size = sizeof(buffer[i].d_name);
 		size_t to_copy = name_len;
-		if (to_copy >= dst_size)
+		if (to_copy >= dst_size) {
+			free(direntBuffer);
 			return B_BUFFER_OVERFLOW;
+		}
 		memcpy(buffer[i].d_name, base + LINUX_DIRENT64_HEADER, to_copy);
 		buffer[i].d_name[to_copy] = '\0';
 
@@ -880,8 +941,14 @@ _kern_lock_node(int fd)
 	lock.l_start = 0;
 	lock.l_len = 0;
 
-	if (fcntl(fd, F_SETLK, &lock) == -1)
-		return -errno;
+	if (fcntl(fd, F_SETLK, &lock) == -1) {
+		if (errno != EBADF)
+			return -errno;
+
+		lock.l_type = F_RDLCK;
+		if (fcntl(fd, F_SETLK, &lock) == -1)
+			return -errno;
+	}
 
 	return B_OK;
 }

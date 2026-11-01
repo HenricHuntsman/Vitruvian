@@ -35,8 +35,9 @@ endif()
 # An explicit .interp section makes ld emit PT_INTERP for a -shared link (which
 # -Wl,--dynamic-linker does not); same trick glibc uses to make libc.so.6 runnable.
 set(VOS_RUNNABLE_INTERP_S "${CMAKE_BINARY_DIR}/runnable_addon_interp.S")
-# Without the GNU-stack note the link asks for an executable stack, which
-# glibc 2.41 refuses to dlopen.
+# The GNU-stack note keeps the object from asking for an executable stack:
+# without it older binutils mark the whole link RWE, and glibc 2.41 refuses
+# to dlopen such an object, so Deskbar could not load these add-ons.
 file(WRITE "${VOS_RUNNABLE_INTERP_S}"
 	".section .interp,\"a\"\n.asciz \"${VOS_DYNAMIC_LINKER}\"\n"
 	".section .note.GNU-stack,\"\",%progbits\n")
@@ -54,7 +55,7 @@ endif()
 # TODO: Add possibility to set compiler defs for a target
 # TODO: Document macros
 
-macro( DoCatalogs signature subdir )
+function( DoCatalogs signature subdir )
 	set( _catalogs_src "${CMAKE_SOURCE_DIR}/data/catalogs/${subdir}" )
 	if( NOT EXISTS "${_catalogs_src}" )
 		return()
@@ -96,7 +97,7 @@ macro( DoCatalogs signature subdir )
 		COMPONENT data
 		FILES_MATCHING PATTERN "*.catalog"
 	)
-endmacro()
+endfunction()
 
 # Compile a single .rdef to a .rsrc file (POST_BUILD), and record the output
 # path in the target property RDEF_RSRC_FILES so LinkRdefs can embed them all
@@ -151,6 +152,15 @@ function( LinkRdefs target )
 	get_property(_rsrc_files TARGET ${target} PROPERTY RDEF_RSRC_FILES)
 	get_property(_staging    TARGET ${target} PROPERTY RDEF_STAGING)
 
+	# attrs-staging placeholder for apps_attrs (build/profiles/base.cmake);
+	# must run BEFORE the no-rsrcs early return below.
+	if(_staging)
+		add_custom_command(TARGET ${target} POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/apps_attrs_staging"
+			COMMAND ${CMAKE_COMMAND} -E touch           "${CMAKE_BINARY_DIR}/apps_attrs_staging/${target}"
+		)
+	endif()
+
 	if(NOT _rsrc_files)
 		return()
 	endif()
@@ -167,10 +177,6 @@ function( LinkRdefs target )
 	endforeach()
 
 	if(_staging)
-		add_custom_command(TARGET ${target} POST_BUILD
-			COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/apps_attrs_staging"
-			COMMAND ${CMAKE_COMMAND} -E touch           "${CMAKE_BINARY_DIR}/apps_attrs_staging/${target}"
-		)
 		foreach(_rsrc IN LISTS _rsrc_files)
 			add_custom_command(TARGET ${target} POST_BUILD
 				COMMAND "${_rsattr}" -O -o "${CMAKE_BINARY_DIR}/apps_attrs_staging/${target}" "${_rsrc}"
@@ -220,6 +226,9 @@ macro( Application name )
 	foreach( RDEF_FILE ${_APPLICATION_RDEF} )
 		CompileRdef(${name} ${RDEF_FILE} STAGING)
 	endforeach()
+	# Ship-invariant: every Application stages an attrs placeholder, even
+	# without RDEF (build/profiles/base.cmake cp's it for listed apps).
+	set_property(TARGET ${name} PROPERTY RDEF_STAGING TRUE)
 	LinkRdefs(${name})
 endmacro()
 
@@ -268,7 +277,10 @@ macro( AddOn name type )
 
 	# -fvisibility-inlines-hidden: keep inline/template instantiations add-on-local
 	# so they don't collide with same-named symbols exported by libbe.so.
-	set_target_properties(${name} PROPERTIES COMPILE_FLAGS "-include LinuxBuildCompatibility.h -fvisibility-inlines-hidden")
+	# The flag is C++-only; passing it to C sources makes cc1 warn.
+	target_compile_options(${name} PRIVATE
+		-include LinuxBuildCompatibility.h
+		"$<$<COMPILE_LANGUAGE:CXX>:-fvisibility-inlines-hidden>")
 
 	foreach( RDEF_FILE ${_ADDON_RDEF} )
 		CompileRdef(${name} ${RDEF_FILE} STAGING)
@@ -411,10 +423,12 @@ function( UsePrivateHeaders target )
 		libroot
 		libroot2
 		locale
+		media2
 		mount
 		notification
 		print
 		runtime_loader
+		scan
 		shared
 		storage
 		storage/mime

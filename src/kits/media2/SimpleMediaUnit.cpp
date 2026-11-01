@@ -1,6 +1,6 @@
 /*
  * Copyright 2015-2026, Dario Casalinuovo. All rights reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #include <media2/SimpleMediaUnit.h>
@@ -69,6 +69,23 @@ BSimpleMediaUnit::HandleSeek(bigtime_t mediaTime, bigtime_t performanceTime)
 {
 	if (fNotifyHook != NULL)
 		fNotifyHook(fNotifyCookie, B_WILL_SEEK, mediaTime, performanceTime);
+}
+
+
+status_t
+BSimpleMediaUnit::Start()
+{
+	// Format suggestion runs before the filter is built so a client can
+	// reject or adjust the unit's format once, not per connection.
+	if (fFormatHook != NULL) {
+		BMediaFormat format;
+		status_t result = fFormatHook(fFormatCookie, &format);
+		if (result != B_OK)
+			return result;
+		if (fNotifyHook != NULL)
+			fNotifyHook(fNotifyCookie, B_FORMAT_SUGGESTION, &format);
+	}
+	return BMediaUnit::Start();
 }
 
 

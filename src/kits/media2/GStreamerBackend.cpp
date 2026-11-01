@@ -1,11 +1,12 @@
 /*
  * Copyright 2025-2026, Dario Casalinuovo. All rights reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #include "GStreamerBackend.h"
 
 #include <mutex>
+#include <string>
 #include <stdlib.h>
 #include <string.h>
 
@@ -399,8 +400,8 @@ static const CodecMime kCodecMimeTable[] = {
 	{ B_CODEC_TYPE_OGG,  "audio/x-vorbis",                               "application/ogg" },
 	{ B_CODEC_TYPE_OPUS, "audio/x-opus",                                 "application/ogg" },
 	{ B_CODEC_TYPE_FLAC, "audio/x-flac",                                 "audio/x-flac" },
-	{ B_CODEC_TYPE_WAV,  "audio/x-raw",                                  "audio/x-wav" },
-	{ B_CODEC_TYPE_PCM,  "audio/x-raw",                                  "audio/x-wav" }
+	{ B_CODEC_TYPE_WAV,  "audio/x-raw, format=(string)S16LE",                                 "audio/x-wav" },
+	{ B_CODEC_TYPE_PCM,  "audio/x-raw, format=(string)S16LE",                                 "audio/x-wav" }
 };
 
 
@@ -416,7 +417,7 @@ LookupCodecMime(int32 encoding)
 
 
 static GstEncodingProfile*
-BuildEncodingProfile(const BMediaFormat& fmt)
+BuildEncodingProfile(const BMediaFormat& fmt, const char* sampleFormatName)
 {
 	if (!fmt.IsEncodedAudio())
 		return NULL;
@@ -428,7 +429,16 @@ BuildEncodingProfile(const BMediaFormat& fmt)
 		"vitruvian-out", NULL, containerCaps, NULL);
 	gst_caps_unref(containerCaps);
 
-	GstCaps* audioCaps = gst_caps_from_string(m->audioCaps);
+	GstCaps* audioCaps = NULL;
+	if (sampleFormatName != NULL
+			&& (enc.encoding == B_CODEC_TYPE_WAV
+				|| enc.encoding == B_CODEC_TYPE_PCM)) {
+		// WAV is raw PCM in a container; the sample format picks the
+		// bit depth the wavenc encoder sees.
+		audioCaps = gst_caps_new_simple("audio/x-raw",
+			"format", G_TYPE_STRING, sampleFormatName, NULL);
+	} else
+		audioCaps = gst_caps_from_string(m->audioCaps);
 	GstEncodingAudioProfile* ap = gst_encoding_audio_profile_new(audioCaps,
 		NULL, NULL, 1);
 	gst_caps_unref(audioCaps);
@@ -470,7 +480,7 @@ GStreamerBackend::_BoostHwEncoderRanks()
 			kHwEncoders[i].name);
 		if (feat == NULL)
 			continue;
-		kHwEncoders[i].original = gst_plugin_feature_get_rank(feat);
+		kHwEncoders[i].original = (GstRank)gst_plugin_feature_get_rank(feat);
 		gst_plugin_feature_set_rank(feat,
 			(GstRank)(GST_RANK_PRIMARY + 10));
 		kHwEncoders[i].boosted = true;
@@ -506,7 +516,7 @@ GStreamerBackend::_BoostHwDecoderRanks()
 			kHwDecoders[i].name);
 		if (feat == NULL)
 			continue;
-		kHwDecoders[i].original = gst_plugin_feature_get_rank(feat);
+		kHwDecoders[i].original = (GstRank)gst_plugin_feature_get_rank(feat);
 		gst_plugin_feature_set_rank(feat,
 			(GstRank)(GST_RANK_PRIMARY + 10));
 		kHwDecoders[i].boosted = true;
@@ -533,9 +543,148 @@ GStreamerBackend::_RestoreDecoderRanks()
 }
 
 
+// appsrc is linked to encodebin once its caps are known; without caps
+// encodebin finds no compatible stream profile and the link fails. The
+// capsfilter in the conversion pipeline is the element that must be
+// linked for the same reason: encodebin picks its encoder from the
+// profile when the first caps arrive.
+bool
+GStreamerBackend::LinkEncodeSource(GstElement* pipeline)
+{
+	GstElement* src = gst_bin_get_by_name(GST_BIN(pipeline), "src");
+	GstElement* enc = gst_bin_get_by_name(GST_BIN(pipeline), "enc");
+	GstElement* filter = gst_bin_get_by_name(GST_BIN(pipeline), "outcaps");
+	GstElement* tail = filter != NULL ? filter : src;
+	if (src == NULL || enc == NULL) {
+		if (src != NULL)
+			gst_object_unref(src);
+		if (enc != NULL)
+			gst_object_unref(enc);
+		if (filter != NULL)
+			gst_object_unref(filter);
+		return false;
+	}
+	GstPad* pad = gst_element_get_static_pad(tail, "src");
+	bool already = pad != NULL && gst_pad_is_linked(pad);
+	if (pad != NULL)
+		gst_object_unref(pad);
+	bool ok = already || gst_element_link(tail, enc);
+	gst_object_unref(src);
+	gst_object_unref(enc);
+	if (filter != NULL)
+		gst_object_unref(filter);
+	return ok;
+}
+
+
+bool
+GStreamerBackend::IsEncoderAvailable(int32 encoding)
+{
+	if (GetInstance() == NULL)
+		return false;
+	const char* names[4] = { NULL, NULL, NULL, NULL };
+	switch (encoding) {
+		case B_CODEC_TYPE_WAV:
+		case B_CODEC_TYPE_PCM:
+			names[0] = "wavenc";
+			break;
+		case B_CODEC_TYPE_FLAC:
+			names[0] = "flacenc";
+			break;
+		case B_CODEC_TYPE_OGG:
+			names[0] = "vorbisenc";
+			names[1] = "oggmux";
+			break;
+		case B_CODEC_TYPE_OPUS:
+			names[0] = "opusenc";
+			names[1] = "oggmux";
+			break;
+		case B_CODEC_TYPE_MP3:
+			names[0] = "lamemp3enc";
+			names[1] = "shines";
+			names[2] = "avenc_mp3";
+			break;
+		case B_CODEC_TYPE_AAC:
+			names[0] = "avenc_aac";
+			names[1] = "faacenc";
+			names[2] = "fdkaacenc";
+			break;
+		default:
+			return false;
+	}
+	GstRegistry* reg = gst_registry_get();
+	for (int32 i = 0; i < 4 && names[i] != NULL; i++) {
+		if (gst_registry_lookup_feature(reg, names[i]) != NULL)
+			return true;
+	}
+	return false;
+}
+
+
+// Encodebin hides its encoders; poke the quality knobs once the elements
+// exist. Returns how many encoder properties were set.
+int
+GStreamerBackend::ApplyEncoderQuality(GstElement* pipeline, float quality)
+{
+	if (pipeline == NULL || quality < 0.0f)
+		return 0;
+	if (quality > 1.0f)
+		quality = 1.0f;
+
+	int set = 0;
+	GstIterator* it = gst_bin_iterate_recurse(GST_BIN(pipeline));
+	GValue item = G_VALUE_INIT;
+	bool done = false;
+	while (!done) {
+		switch (gst_iterator_next(it, &item)) {
+			case GST_ITERATOR_OK:
+			{
+				GstElement* e = GST_ELEMENT(g_value_get_object(&item));
+				const char* name = GST_OBJECT_NAME(e);
+				if (name == NULL)
+					break;
+				if (strstr(name, "lamemp3") != NULL
+						|| strstr(name, "shine") != NULL) {
+					// lamemp3enc wants kbit/s.
+					g_object_set(e, "bitrate",
+						(gint)(96 + quality * 224), NULL);
+					set++;
+				} else if (strstr(name, "opus") != NULL) {
+					g_object_set(e, "bitrate",
+						(gint)(32000 + quality * 128000), NULL);
+					set++;
+				} else if (strstr(name, "vorbis") != NULL) {
+					g_object_set(e, "quality", (gdouble)quality, NULL);
+					set++;
+				} else if (strstr(name, "aac") != NULL
+						&& g_object_class_find_property(
+							G_OBJECT_GET_CLASS(e), "bitrate") != NULL) {
+					g_object_set(e, "bitrate",
+						(gint)(32000 + quality * 96000), NULL);
+					set++;
+				}
+				break;
+			}
+			case GST_ITERATOR_RESYNC:
+				gst_iterator_resync(it);
+				break;
+			case GST_ITERATOR_ERROR:
+			case GST_ITERATOR_DONE:
+				done = true;
+				break;
+		}
+		g_value_reset(&item);
+	}
+	g_value_unset(&item);
+	gst_iterator_free(it);
+	return set;
+}
+
+
 GstElement*
 GStreamerBackend::CreateEncodePipeline(const char* path,
-	const BMediaFormat& outputFormat)
+	const BMediaFormat& outputFormat, uint32 sampleRate,
+	uint32 channelCount, const char* sampleFormatName)
 {
 	if (path == NULL)
 		return NULL;
@@ -544,17 +693,27 @@ GStreamerBackend::CreateEncodePipeline(const char* path,
 	if (boost)
 		_BoostHwEncoderRanks();
 
-	GstEncodingProfile* profile = BuildEncodingProfile(outputFormat);
+	GstEncodingProfile* profile = BuildEncodingProfile(outputFormat,
+		sampleFormatName);
 	if (profile == NULL) {
 		if (boost)
 			_RestoreEncoderRanks();
 		return NULL;
 	}
 
+	const bool convert = sampleRate != 0 || channelCount != 0
+		|| sampleFormatName != NULL;
+	// The conversion elements live in the encode pipeline; the app only
+	// states the target it wants. capsfilter stays unlinked from
+	// encodebin until the caps are known (see LinkEncodeSource).
+	const char* launch = convert
+		? "appsrc name=src ! audioconvert ! audioresample"
+			" ! capsfilter name=outcaps encodebin name=enc"
+			" ! filesink name=sink"
+		: "appsrc name=src encodebin name=enc ! filesink name=sink";
+
 	GError* err = NULL;
-	GstElement* pipeline = gst_parse_launch(
-		"appsrc name=src ! encodebin name=enc ! filesink name=sink",
-		&err);
+	GstElement* pipeline = gst_parse_launch(launch, &err);
 	if (err != NULL) {
 		g_error_free(err);
 		err = NULL;
@@ -564,6 +723,27 @@ GStreamerBackend::CreateEncodePipeline(const char* path,
 		if (boost)
 			_RestoreEncoderRanks();
 		return NULL;
+	}
+
+	if (convert) {
+		GstCaps* outCaps = gst_caps_new_simple("audio/x-raw",
+			"layout", G_TYPE_STRING, "interleaved", NULL);
+		if (sampleFormatName != NULL)
+			gst_caps_set_simple(outCaps, "format", G_TYPE_STRING,
+				sampleFormatName, NULL);
+		if (sampleRate != 0)
+			gst_caps_set_simple(outCaps, "rate", G_TYPE_INT,
+				(int)sampleRate, NULL);
+		if (channelCount != 0)
+			gst_caps_set_simple(outCaps, "channels", G_TYPE_INT,
+				(int)channelCount, NULL);
+		GstElement* filter = gst_bin_get_by_name(GST_BIN(pipeline),
+			"outcaps");
+		if (filter != NULL) {
+			g_object_set(filter, "caps", outCaps, NULL);
+			gst_object_unref(filter);
+		}
+		gst_caps_unref(outCaps);
 	}
 
 	GstElement* enc = gst_bin_get_by_name(GST_BIN(pipeline), "enc");
@@ -582,6 +762,109 @@ GStreamerBackend::CreateEncodePipeline(const char* path,
 	if (boost)
 		_RestoreEncoderRanks();
 
+	return pipeline;
+}
+
+
+static bool
+_ElementAvailable(const char* name)
+{
+	GstElementFactory* factory = gst_element_factory_find(name);
+	if (factory == NULL)
+		return false;
+	gst_object_unref(factory);
+	return true;
+}
+
+
+static const char*
+_VideoEncoderChain(int32 encoding)
+{
+	if (encoding == B_CODEC_TYPE_H264) {
+		if (_ElementAvailable("x264enc"))
+			return "x264enc tune=zerolatency speed-preset=ultrafast";
+		if (_ElementAvailable("openh264enc"))
+			return "openh264enc";
+		return NULL;
+	}
+	return _ElementAvailable("vp8enc") ? "vp8enc deadline=1" : NULL;
+}
+
+
+static const char*
+_AudioEncoderChain(int32 encoding)
+{
+	if (encoding == B_CODEC_TYPE_AAC) {
+		static const char* const kCandidates[] = { "avenc_aac", "voaacenc",
+			"fdkaacenc", NULL };
+		for (int32 i = 0; kCandidates[i] != NULL; i++) {
+			if (_ElementAvailable(kCandidates[i]))
+				return kCandidates[i];
+		}
+		return NULL;
+	}
+	return _ElementAvailable("opusenc") ? "opusenc" : NULL;
+}
+
+
+GstElement*
+GStreamerBackend::CreateAVEncodePipeline(const char* path,
+	const BMediaFormat* videoFormat, const BMediaFormat* audioFormat)
+{
+	if (path == NULL || (videoFormat == NULL && audioFormat == NULL))
+		return NULL;
+
+	const char* videoChain = NULL;
+	const char* audioChain = NULL;
+	const char* muxer = NULL;
+
+	if (videoFormat != NULL) {
+		const int32 encoding = videoFormat->format.u.encoded_video.encoding;
+		videoChain = _VideoEncoderChain(encoding);
+		if (videoChain == NULL)
+			return NULL;
+		muxer = encoding == B_CODEC_TYPE_H264 ? "mp4mux" : "webmmux";
+	}
+
+	if (audioFormat != NULL) {
+		const int32 encoding = audioFormat->format.u.encoded_audio.encoding;
+		audioChain = _AudioEncoderChain(encoding);
+		if (audioChain == NULL)
+			return NULL;
+		if (muxer == NULL)
+			muxer = encoding == B_CODEC_TYPE_AAC ? "mp4mux" : "webmmux";
+	}
+
+	std::string description;
+	if (videoChain != NULL) {
+		description += "appsrc name=vsrc is-live=true format=time block=true"
+			" ! queue ! videoconvert ! video/x-raw,format=I420 ! ";
+		description += videoChain;
+		description += " ! queue ! mux. ";
+	}
+	if (audioChain != NULL) {
+		description += "appsrc name=asrc is-live=true format=time block=true"
+			" ! queue ! audioconvert ! audioresample ! ";
+		description += audioChain;
+		description += " ! queue ! mux. ";
+	}
+	description += muxer;
+	description += " name=mux ! filesink name=sink";
+
+	GError* error = NULL;
+	GstElement* pipeline = gst_parse_launch(description.c_str(), &error);
+	if (error != NULL)
+		g_error_free(error);
+	if (pipeline == NULL)
+		return NULL;
+
+	GstElement* sink = gst_bin_get_by_name(GST_BIN(pipeline), "sink");
+	if (sink == NULL) {
+		gst_object_unref(pipeline);
+		return NULL;
+	}
+	g_object_set(sink, "location", path, NULL);
+	gst_object_unref(sink);
 	return pipeline;
 }
 

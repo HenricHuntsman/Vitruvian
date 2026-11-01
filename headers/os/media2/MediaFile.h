@@ -1,7 +1,7 @@
 /*
  * Copyright 2025-2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2025-2026, The Vitruvian Project. All Rights Reserved.
- * Distributed under the terms of the MIT License.
+ * Distributed under the terms of the LGPL License.
  */
 
 #ifndef _MEDIA2_MEDIA_FILE_H
@@ -14,6 +14,7 @@
 #include <media2/MediaFormat.h>
 
 
+class BDataIO;
 class BMediaTrack;
 
 
@@ -22,6 +23,8 @@ public:
 								BMediaFile(const entry_ref* ref);
 								BMediaFile(const entry_ref* ref, int32 flags);
 								BMediaFile(const BUrl& url);
+								// 'source' must outlive the file; seekable if a BPositionIO
+								BMediaFile(BDataIO* source, int32 flags = 0);
 								BMediaFile(const entry_ref* outputRef,
 									const media_file_format* fileFormat,
 									int32 flags = 0);
@@ -31,12 +34,18 @@ public:
 
 			int32				CountTracks() const;
 			BMediaTrack*		TrackAt(int32 index);
+
+			// Tracks are owned by this BMediaFile. ReleaseTrack() checks
+			// that 'track' came from TrackAt()/CreateTrack() and returns
+			// B_OK; it does not free the object. The file destructor
+			// deletes every track it still holds.
 			status_t			ReleaseTrack(BMediaTrack* track);
 
 			BMediaTrack*		CreateTrack(const BMediaFormat& outputFormat);
 
 			BMediaTrack*		CreateTrack(media_format* mf,
-									const media_codec_info* codecInfo);
+									const media_codec_info* codecInfo,
+									uint32 flags = 0);
 
 			status_t			CommitHeader();
 			status_t			CloseFile();

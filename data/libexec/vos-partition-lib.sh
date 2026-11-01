@@ -83,7 +83,7 @@ _partlib_gpt_type_guid() {
         esp)        printf '%s\n' "C12A7328-F81F-11D2-BA4B-00A0C93EC93B" ;;
         linux)      printf '%s\n' "0FC63DAF-8483-4772-8E79-3D69D8477DE4" ;;
         linux_swap) printf '%s\n' "0657FD6D-A4AB-43C4-84E5-0933C84B4F4F" ;;
-        bios_boot)  printf '%s\n' "21686148-6449-6E6F-744F-656E63656453" ;;
+        bios_boot)  printf '%s\n' "21686148-6449-6E6F-744E-656564454649" ;;
         *)          printf '%s\n' "$1" ;;
     esac
 }
@@ -474,6 +474,205 @@ _partlib_set_gpt_name() {
     _err="$(sfdisk --part-label "$_disk" "$_partno" "$_name" 2>&1 >/dev/null)"
     if [ $? -ne 0 ]; then
         log "set_gpt_name: sfdisk --part-label failed on $_disk#$_partno: $_err"
+        return 1
+    fi
+    return 0
+}
+
+_partlib_set_type() {
+    _disk="$1"
+    _target="$2"
+    _type="$3"
+
+    _partno="$(_partlib_partno "$_disk" "$_target")"
+    if [ -z "$_partno" ]; then
+        log "set_type: could not find partition number for $_target on $_disk"
+        return 1
+    fi
+    if [ "$(_partlib_table_type "$_disk")" = "dos" ]; then
+        # sfdisk silently writes type 0 for a GUID on a dos label
+        case "$_type" in
+            *-*) log "set_type: refusing a GUID type on an mbr table: $_type"
+                 return 1 ;;
+        esac
+        _type="$(_partlib_mbr_type_hex "$_type")"
+    else
+        _type="$(_partlib_gpt_type_guid "$_type")"
+    fi
+    _rc=0
+    _err="$(sfdisk --part-type "$_disk" "$_partno" "$_type" 2>&1 >/dev/null)" \
+        || _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        log "set_type: sfdisk --part-type failed on $_disk#$_partno: $_err"
+        return 1
+    fi
+    _partlib_settle "$_disk"
+    return 0
+}
+
+# sfdisk --part-attrs replaces the whole attribute list, so read it back
+# and write the list with the one bit toggled.
+_partlib_gpt_attr_toggle() {
+    _disk="$1"
+    _partno="$2"
+    _attr="$3"
+    _want="$4"
+
+    _target="$(sfdisk --dump "$_disk" 2>/dev/null | awk -v n="$_partno" '
+        /^\// { c++; if (c == n) print $1 }')"
+    if [ -z "$_target" ]; then
+        log "set_parameters: could not find partition #$_partno on $_disk"
+        return 1
+    fi
+    _attrs="$(sfdisk --dump "$_disk" 2>/dev/null | awk -v want="$_target" '
+        $1 == want {
+            if (match($0, /attrs="[^"]*"/))
+                print substr($0, RSTART + 7, RLENGTH - 8)
+        }')"
+
+    if [ "$_want" -eq 1 ]; then
+        case ",$_attrs," in
+            *",$_attr,"*) _new="$_attrs" ;;
+            *) _new="${_attrs:+$_attrs,}$_attr" ;;
+        esac
+    elif [ -z "$_attrs" ]; then
+        _new=""
+    else
+        _new="$(printf '%s\n' "$_attrs" | tr ',' '\n' | grep -vx "$_attr" \
+            | paste -sd, -)"
+    fi
+
+    if ! sfdisk --part-attrs "$_disk" "$_partno" "$_new" >/dev/null 2>&1; then
+        log "set_parameters: sfdisk --part-attrs failed on $_disk#$_partno ($_new)"
+        return 1
+    fi
+    return 0
+}
+
+# Partition parameters are the driver-settings string the partition list
+# parses; "active" is the MBR boot flag, LegacyBIOSBootable on gpt.
+_partlib_set_parameters() {
+    _disk="$1"
+    _target="$2"
+    _params="$3"
+
+    _partno="$(_partlib_partno "$_disk" "$_target")"
+    if [ -z "$_partno" ]; then
+        log "set_parameters: could not find partition number for $_target on $_disk"
+        return 1
+    fi
+
+    _active=0
+    if [ -n "$_params" ]; then
+        _pk="$(printf '%s' "${_params%%:*}" | sed 's/^ *//; s/ *$//')"
+        _pv="$(printf '%s' "${_params#*:}" | sed 's/^ *//; s/ *$//')"
+        case "$_pk" in
+            active) ;;
+            *) log "set_parameters: unknown parameter: $_pk"; return 1 ;;
+        esac
+        case "$_pv" in
+            1|true|yes|on)  _active=1 ;;
+            0|false|no|off) _active=0 ;;
+            *) log "set_parameters: invalid value for $_pk: $_pv"; return 1 ;;
+        esac
+    fi
+
+    _table="$(_partlib_table_type "$_disk")"
+    case "$_table" in
+        dos)
+            _rc=0
+            if [ "$_active" -eq 1 ]; then
+                _err="$(sfdisk --activate "$_disk" "$_partno" 2>&1 >/dev/null)" \
+                    || _rc=$?
+            else
+                # "-" clears every partition; otherwise keep the others set
+                _others="$(sfdisk --dump "$_disk" 2>/dev/null | awk -v n="$_partno" '
+                    /^\// { c++; if (c != n) printf "%s ", c }')"
+                if [ -n "$_others" ]; then
+                    _err="$(sfdisk --activate "$_disk" $_others 2>&1 >/dev/null)" \
+                        || _rc=$?
+                else
+                    _err="$(sfdisk --activate "$_disk" - 2>&1 >/dev/null)" \
+                        || _rc=$?
+                fi
+            fi
+            if [ "$_rc" -ne 0 ]; then
+                log "set_parameters: sfdisk --activate failed on $_disk#$_partno: $_err"
+                return 1
+            fi
+            ;;
+        gpt)
+            _partlib_gpt_attr_toggle "$_disk" "$_partno" LegacyBIOSBootable \
+                "$_active" || return 1
+            ;;
+        *)
+            log "set_parameters: unsupported table type: ${_table:-none}"
+            return 1
+            ;;
+    esac
+    _partlib_settle "$_disk"
+    return 0
+}
+
+# Only tune2fs can change these in place; the others have no such tool.
+_partlib_set_content_parameters() {
+    _devnode="$1"
+    _fs="$2"
+    _params="$3"
+
+    if [ "$_fs" != "ext4" ]; then
+        log "set_content_parameters: unsupported filesystem: ${_fs:-none}"
+        return 1
+    fi
+
+    for _cp in $_params; do
+        _cpk="${_cp%%=*}"
+        _cpv="${_cp#*=}"
+        case "$_cpk" in
+            reserved_percent) _opt="-m" ;;
+            max_mount_count)  _opt="-c" ;;
+            check_interval)   _opt="-i" ;;
+            *) log "set_content_parameters: unknown parameter: $_cpk"
+               return 1 ;;
+        esac
+        _rc=0
+        _err="$(tune2fs $_opt "$_cpv" "$_devnode" 2>&1 >/dev/null)" || _rc=$?
+        if [ "$_rc" -ne 0 ]; then
+            log "set_content_parameters: tune2fs $_opt $_cpv failed for $_devnode: $_err"
+            return 1
+        fi
+    done
+    return 0
+}
+
+# Both tools walk a mounted filesystem, so the helper only ever runs them
+# on a mount point it resolved itself.
+_partlib_defrag() {
+    _devnode="$1"
+    _fs="$2"
+    _rc=0
+
+    case "$_fs" in
+        ext4)
+            _out="$(e4defrag "$_devnode" 2>&1)" || _rc=$?
+            ;;
+        btrfs)
+            _mnt="$(findmnt -n -o TARGET --source "$_devnode" 2>/dev/null \
+                | head -n1)"
+            if [ -z "$_mnt" ]; then
+                log "defrag: $_devnode is not mounted"
+                return 1
+            fi
+            _out="$(btrfs filesystem defragment -r "$_mnt" 2>&1)" \
+                || _rc=$?
+            ;;
+        *)
+            log "defrag: unsupported filesystem: ${_fs:-none}"
+            return 1
+            ;;
+    esac
+    if [ "$_rc" -ne 0 ]; then
+        log "defrag: failed for $_devnode (fs=$_fs): $_out"
         return 1
     fi
     return 0
@@ -920,6 +1119,9 @@ _partlib_table_resize() {
         log "resize: sfdisk table resize failed on $_disk#$_partno: $_err"
         return 1
     fi
+    # --no-reread leaves the kernel on the old size; a mounted or unmounted
+    # fs grow reads it from the block device.
+    command -v partx >/dev/null 2>&1 && partx -u "$_disk" >/dev/null 2>&1 || true
     _partlib_settle "$_disk"
     return 0
 }
@@ -959,6 +1161,20 @@ _partlib_safe_umount() {
 _partlib_btrfs_resize_mounted() {
     _target="$1"
     _size_mib="$2"
+
+    _live_mnt="$(findmnt -n -o TARGET --source "$_target" 2>/dev/null | head -n1)"
+    if [ -n "$_live_mnt" ]; then
+        if [ -n "$_size_mib" ]; then
+            _err="$(btrfs filesystem resize "${_size_mib}M" "$_live_mnt" 2>&1 >/dev/null)"
+        else
+            _err="$(btrfs filesystem resize max "$_live_mnt" 2>&1 >/dev/null)"
+        fi
+        if [ $? -ne 0 ]; then
+            log "resize: btrfs filesystem resize failed: $_err"
+            return 1
+        fi
+        return 0
+    fi
 
     mkdir -p /run/vos-partition-helper 2>/dev/null || true
     _mnt="$(mktemp -d /run/vos-partition-helper/mnt-XXXXXX 2>/dev/null)"
@@ -1013,12 +1229,23 @@ _partlib_resize() {
     _fs="$3"
     _new_size_mib="$4"
 
-    if [ "$_fs" != "btrfs" ]; then
-        if _mnt="$(findmnt -n -o TARGET --source "$_target" 2>/dev/null)" \
-                && [ -n "$_mnt" ]; then
-            log "resize: $_target is mounted at $_mnt; unmount it first"
-            return 1
-        fi
+    # ext4 and xfs grow online; every other case needs the fs unmounted.
+    _mnt=""
+    _mnt="$(findmnt -n -o TARGET --source "$_target" 2>/dev/null | head -n1)" || true
+    if [ "$_fs" != "btrfs" ] && [ -n "$_mnt" ]; then
+        _cur_mib="$(_partlib_part_size_mib "$_disk" "$_target")"
+        case "$_fs" in
+            ext4|xfs)
+                if [ -z "$_cur_mib" ] || [ "$_new_size_mib" -le "$_cur_mib" ]; then
+                    log "resize: $_target is mounted at $_mnt; unmount it to shrink"
+                    return 1
+                fi
+                ;;
+            *)
+                log "resize: $_target is mounted at $_mnt; unmount it first"
+                return 1
+                ;;
+        esac
     fi
 
     _partno="$(_partlib_partno "$_disk" "$_target")"
@@ -1064,7 +1291,7 @@ _partlib_resize() {
             ;;
         xfs:1)
             _partlib_table_resize "$_disk" "$_partno" "$_new_size_mib" || return 1
-            _err="$(xfs_growfs "$_target" 2>&1 >/dev/null)"
+            _err="$(xfs_growfs "${_mnt:-$_target}" 2>&1 >/dev/null)"
             if [ $? -ne 0 ]; then
                 log "resize: xfs_growfs failed on $_target: $_err"
                 return 1
@@ -1113,6 +1340,15 @@ _partlib_ext4_exclude_opt() {
     printf '%s\n' "${_str%,}"
 }
 
+# Runs a mkfs tool, logging its own message on failure instead of dropping it.
+_partlib_mkfs() {
+    _mk_out="$("$@" 2>&1)" || {
+        log "format: $1 failed: $_mk_out"
+        return 1
+    }
+    return 0
+}
+
 _partlib_format() {
     _devnode="$1"
     _fs="$2"
@@ -1123,40 +1359,44 @@ _partlib_format() {
         ext4)
             _optstr="$(_partlib_ext4_exclude_opt "$_ext4_extra")"
             if [ -n "$_label" ]; then
-                mkfs.ext4 -q -F -O "$_optstr" -L "$_label" "$_devnode" >/dev/null 2>&1
+                _partlib_mkfs mkfs.ext4 -q -F -O "$_optstr" -L "$_label" "$_devnode"
             else
-                mkfs.ext4 -q -F -O "$_optstr" "$_devnode" >/dev/null 2>&1
+                _partlib_mkfs mkfs.ext4 -q -F -O "$_optstr" "$_devnode"
             fi
             ;;
         fat32)
+            # FAT labels are capped at 11 bytes; mkfs.fat refuses longer ones.
+            _label="$(printf '%.11s' "$_label")"
             if [ -n "$_label" ]; then
-                mkfs.fat -F 32 -n "$_label" "$_devnode" >/dev/null 2>&1
+                _partlib_mkfs mkfs.fat -F 32 -n "$_label" "$_devnode"
             else
-                mkfs.fat -F 32 "$_devnode" >/dev/null 2>&1
+                _partlib_mkfs mkfs.fat -F 32 "$_devnode"
             fi
             ;;
         btrfs)
             if [ -n "$_label" ]; then
-                mkfs.btrfs -f -q -L "$_label" "$_devnode" >/dev/null 2>&1
+                _partlib_mkfs mkfs.btrfs -f -q -L "$_label" "$_devnode"
             else
-                mkfs.btrfs -f -q "$_devnode" >/dev/null 2>&1
+                _partlib_mkfs mkfs.btrfs -f -q "$_devnode"
             fi
             ;;
         xfs)
             # XFS labels are capped at 12 bytes; a longer one makes
             # mkfs.xfs fail outright, so clamp instead of losing the fs.
             _label="$(printf '%.12s' "$_label")"
+            # GRUB 2.12 misreads files on reflink/nrext64 filesystems.
             if [ -n "$_label" ]; then
-                mkfs.xfs -f -L "$_label" "$_devnode" >/dev/null 2>&1
+                _partlib_mkfs mkfs.xfs -f -m reflink=0 -i nrext64=0 \
+                    -L "$_label" "$_devnode"
             else
-                mkfs.xfs -f "$_devnode" >/dev/null 2>&1
+                _partlib_mkfs mkfs.xfs -f -m reflink=0 -i nrext64=0 "$_devnode"
             fi
             ;;
         swap)
             if [ -n "$_label" ]; then
-                mkswap -L "$_label" "$_devnode" >/dev/null 2>&1
+                _partlib_mkfs mkswap -L "$_label" "$_devnode"
             else
-                mkswap "$_devnode" >/dev/null 2>&1
+                _partlib_mkfs mkswap "$_devnode"
             fi
             ;;
         *)

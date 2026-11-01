@@ -210,7 +210,7 @@ _kern_open(int fd, const char* path, int openMode, int perms)
 		return BKernelPrivate::posixError(errno);
 
 	struct stat st;
-	if (_kern_read_stat(ret, path, false, &st, 0) != B_OK) {
+	if (_kern_read_stat(ret, NULL, false, &st, 0) != B_OK) {
 		if (!(openMode & O_CREAT)) {
 			close(ret);
 			return B_ENTRY_NOT_FOUND;
@@ -822,7 +822,8 @@ _kern_unlink(int fd, const char* path)
 		fd = AT_FDCWD;
 
 	int flags = (path == NULL ? AT_EMPTY_PATH : 0);
-	return (unlinkat(fd, path, flags | AT_SYMLINK_NOFOLLOW) < 0)
+	// unlinkat takes no AT_SYMLINK_NOFOLLOW; it is EINVAL.
+	return (unlinkat(fd, path, flags) < 0)
 		? BKernelPrivate::posixError(errno) : B_OK;
 }
 
