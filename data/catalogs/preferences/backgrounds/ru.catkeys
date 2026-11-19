@@ -1,4 +1,4 @@
-1	russian	x-vnd.Haiku-Backgrounds	681978856
+1	russian	x-vnd.vos-Backgrounds	681978856
 Backgrounds	System name		Фон
 X:	Main View		X:
 Setting the background image failed:	Main View		Не удалось установить фоновое изображение:
@@ -10,7 +10,7 @@ Folder: %path	Main View		Папка: %path
 Manual	Main View		Вручную
 Set background image error	Main View		Ошибка установки фона
 Default folder	Main View		Папка по умолчанию
-Revert	Main View		Вернуть
+Revert	Main View		Откатить
 None	Main View		Не выбрано
 All workspaces	Main View		Все рабочие столы
 Icon label outline	Main View		Контурный текст значков

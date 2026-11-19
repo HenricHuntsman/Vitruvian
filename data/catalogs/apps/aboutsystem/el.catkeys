@@ -1,4 +1,4 @@
-1	greek, modern (1453-)	x-vnd.Haiku-About	786946692
+1	greek, modern (1453-)	x-vnd.vos-About	506608794
 The Haikuware team and their bounty program\n	AboutView		Η ομάδα της Haikuware και το πρόγραμμα επιδοτήσεων της\n
 Copyright © 1999-2007 Michael C. Ring. All rights reserved.	AboutView		Πνευματική ιδιοκτησία © 1999-2007 Michael C. Ring. Με επιφύλαξη παντός δικαιώματος.
 \n\nSpecial thanks to:\n	AboutView		\n\nΙδιαίτερες ευχαριστίες στους:\n
@@ -31,6 +31,7 @@ Time running:	AboutView		Χρόνος λειτουργίας:
 Visit the Haiku website	AboutView		Επικεφθείτε τον ιστότοπο του Haiku
 Version: %s	AboutView	Version: R1 or hrev99999	Έκδοση:  %s
 Make a donation	AboutView		Πραγματοποιήστε μια δωρεά
+Contains software developed by the NetBSD Foundation, Inc. and its contributors:\nnetresolv\nCopyright © 1998-2023 The NetBSD Project, Copyright © 2004-2009 by Internet Systems Consortium, Inc. (\"ISC\"), Copyright © 1996-2003 by Internet Software Consortium. All rights reserved.	AboutView		Περιέχει λογισμικό που αναπτύχθηκε από το NetBSD Foundation, Inc. και τους συνεισφέροντές του:\nnetresolv\nCopyright © 1998-2023 The NetBSD Project, Copyright © 2004-2009 by Internet Systems Consortium, Inc. (\"ISC\"), Copyright © 1996-2003 by Internet Software Consortium. Με επιφύλαξη παντός νομίμου δικαιώματος.
 %d MiB Memory:	AboutView	2048 MiB Memory:	%d MiB Μνήμη RAM:
 Copyright © 1996-2005 Julian R Seward. All rights reserved.	AboutView		Πνευματική ιδιοκτησία © 1996-2005 Julian R Seward. Με επιφύλαξη παντός δικαιώματος.
 GNU LGPL v2	AboutWindow		GNU LGPL v2
@@ -74,6 +75,7 @@ Copyright © 1995-2004 Jean-loup Gailly and Mark Adler.	AboutView		Πνευμα�
 Copyright © 2001-2003 Expat maintainers.	AboutView		Πνευματική ιδιοκτησία © 2001-2003 Expat maintainers.
 Copyright © 2002-2006 Maxim Shemanarev (McSeem).	AboutView		Πνευματική ιδιοκτησία © 2002-2006 Maxim Shemanarev (McSeem).
 Translations:\n	AboutView		Μεταφράσεις:\n
+Copyright © 2014-2024 Florian Bernd and Joel Höner. All rights reserved.	AboutView		Copyright © 2014-2024 Florian Bernd and Joel Höner. Με επιφύλαξη παντός νομίμου δικαιώματος.
 \n…and probably some more we forgot to mention (sorry!)\n\n	AboutView		\n…και μάλλον αρκετά άλλα άτομα που ξεχάσαμε να αναφέρουμε (συγγνώμη!)\n\n
 Copyright © 2006-2015 Intel Corporation. All rights reserved.	AboutView		Copyright © 2006-2015 Intel Corporation. Με επιφύλαξη παντός δικαιώματος.
 BSD (2-clause)	AboutWindow		BSD (2-όρων)

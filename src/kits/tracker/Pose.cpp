@@ -90,7 +90,7 @@ BPose::BPose(Model* model, BPoseView* view, uint32 clipboardMode, bool selected)
 
 	if (model->IsVolume() && !model->IsRoot()) {
 		fs_info info;
-		dev_t device = model->NodeRef()->dereference().dev();
+		dev_t device = model->NodeRef()->device();
 		BVolume* volume = new BVolume(device);
 		if (volume->InitCheck() == B_OK && fs_stat_dev(device, &info) == B_OK) {
 			// Philosophy here:
@@ -196,17 +196,12 @@ BPose::Commit(bool saveChanges, BPoint loc, BPoseView* poseView, int32 poseIndex
 
 
 inline bool
-OneMouseUp(BTextWidget* widget, BPose* pose, BPoseView* poseView,
-	BColumn* column, BPoint poseLoc, BPoint where)
+OneMouseUp(BTextWidget* widget, BPose* pose, BPoseView* poseView, BColumn* column,
+	BPoint poseLoc, BPoint where)
 {
-	BRect rect;
-	if (poseView->ViewMode() == kListMode)
-		rect = widget->CalcClickRect(poseLoc, column, poseView);
-	else
-		rect = widget->CalcClickRect(pose->Location(poseView), NULL, poseView);
-
+	BRect rect(widget->CalcClickRect(poseLoc, column, poseView));
 	if (rect.Contains(where)) {
-		widget->MouseUp(rect, poseView, pose, where);
+		widget->DoMouseUp(poseView, pose);
 		return true;
 	}
 
@@ -215,7 +210,7 @@ OneMouseUp(BTextWidget* widget, BPose* pose, BPoseView* poseView,
 
 
 void
-BPose::MouseUp(BPoint poseLoc, BPoseView* poseView, BPoint where, int32)
+BPose::DoMouseUp(BPoseView* poseView, BPoint poseLoc, BPoint where)
 {
 	WhileEachTextWidget(this, poseView, OneMouseUp, poseLoc, where);
 }
@@ -269,8 +264,7 @@ BPose::UpdateWidgetAndModel(const char* attrName, uint32 attrType, int32, BPoint
 			for (int32 i = 0; i < count; i++) {
 				BTextWidget* widget = fWidgetList.ItemAt(i);
 				BColumn* column = poseView->ColumnFor(widget->AttrHash());
-				if (column != NULL
-					&& strcmp(column->AttrName(), attrName) == 0) {
+				if (column != NULL && strcmp(column->AttrName(), attrName) == 0) {
 					widget->CheckAndUpdate(poseLoc, column, poseView, visible);
 					break;
 				}
@@ -389,19 +383,10 @@ BPose::EditFirstWidget(BPoint poseLoc, BPoseView* poseView)
 {
 	// find first editable widget
 	BColumn* column;
-	for (int32 i = 0; (column = poseView->ColumnAt(i)) != NULL; i++) {
+	for (int32 index = 0; (column = poseView->ColumnAt(index)) != NULL; index++) {
 		BTextWidget* widget = WidgetFor(column->AttrHash());
-
 		if (widget != NULL && widget->IsEditable()) {
-			BRect bounds;
-			// ToDo:
-			// fold the three StartEdit code sequences into a cover call
-			if (poseView->ViewMode() == kListMode)
-				bounds = widget->CalcRect(poseLoc, column, poseView);
-			else
-				bounds = widget->CalcRect(Location(poseView), NULL, poseView);
-
-			widget->StartEdit(bounds, poseView, this);
+			widget->StartEdit(poseView, this, column);
 			break;
 		}
 	}
@@ -413,8 +398,7 @@ BPose::EditPreviousNextWidgetCommon(BPoseView* poseView, bool next)
 {
 	bool found = false;
 	int32 delta = next ? 1 : -1;
-	for (int32 index = next ? 0 : poseView->CountColumns() - 1; ;
-			index += delta) {
+	for (int32 index = next ? 0 : poseView->CountColumns() - 1; ; index += delta) {
 		BColumn* column = poseView->ColumnAt(index);
 		if (column == NULL) {
 			// out of columns
@@ -434,15 +418,7 @@ BPose::EditPreviousNextWidgetCommon(BPoseView* poseView, bool next)
 		}
 
 		if (found && column->Editable()) {
-			BRect bounds;
-			if (poseView->ViewMode() == kListMode) {
-				int32 poseIndex = poseView->IndexOfPose(this);
-				BPoint poseLoc(0, poseIndex* poseView->ListElemHeight());
-				bounds = widget->CalcRect(poseLoc, column, poseView);
-			} else
-				bounds = widget->CalcRect(Location(poseView), NULL, poseView);
-
-			widget->StartEdit(bounds, poseView, this);
+			widget->StartEdit(poseView, this, column);
 			break;
 		}
 	}
@@ -537,6 +513,9 @@ BPose::Draw(BRect rect, const BRect& updateRect, BPoseView* poseView, BView* dra
 		fBackgroundClean = false;
 
 	bool direct = drawView == poseView;
+	bool dragging = false;
+	if (!direct && poseView->Window() != NULL && poseView->Window()->CurrentMessage() != NULL)
+		dragging = poseView->Window()->CurrentMessage()->what == kMsgMouseDragged;
 	bool windowActive = poseView->Window()->IsActive();
 	bool showSelectionWhenInactive = poseView->ShowSelectionWhenInactive();
 	bool drawIconUnselected = !windowActive && !showSelectionWhenInactive;
@@ -544,11 +523,20 @@ BPose::Draw(BRect rect, const BRect& updateRect, BPoseView* poseView, BView* dra
 	if (direct)
 		poseView->PushState();
 
-	// This is so that the cut icon will be drawn semi-transparent.
-	if (fClipboardMode == kMoveSelectionTo) {
+	// This is so that cut and dragged items will be drawn semi-transparent.
+	if (fClipboardMode == kMoveSelectionTo || dragging) {
 		drawView->SetDrawingMode(B_OP_ALPHA);
 		drawView->SetBlendingMode(B_CONSTANT_ALPHA, B_ALPHA_COMPOSITE);
-		uint8 alpha = 128; // set the level of opacity by value
+		uint8 alpha;
+		if (fClipboardMode == kMoveSelectionTo && dragging)
+			alpha = 64; // cut and dragging, 25% opaque
+		else if (dragging)
+			alpha = 128; // dragging, 50% opaque
+		else if (fClipboardMode == kMoveSelectionTo)
+			alpha = 192; // cut, 75% opaque
+		else
+			alpha = 255;
+
 		if (poseView->HighColor().IsDark())
 			drawView->SetHighColor(0, 0, 0, alpha);
 		else
@@ -640,36 +628,34 @@ BPose::DrawTextWidget(BRect rect, BRect textRect, BTextWidget* widget,
 	widget->Draw(rect, textRect, poseView, drawView, selected, fClipboardMode, offset);
 
 	if (selected) {
+		// the selection rect is alpha-blended on top
 		BRect invertRect(textRect.OffsetByCopy(offset));
 		invertRect.left = ceilf(invertRect.left);
 		invertRect.top = ceilf(invertRect.top);
 		invertRect.right = floorf(invertRect.right);
 		invertRect.bottom = floorf(invertRect.bottom);
+
 		if (windowActive || isDrawingSelectionRect) {
 			// invert colors to select label using "reverse video"
 			drawView->InvertRect(invertRect);
-			if (clipboardMode == kMoveSelectionTo) {
-				// blend selected cut item background with gray
-				drawView->SetDrawingMode(B_OP_BLEND);
-				drawView->SetHighColor(128, 128, 128, 128);
-				drawView->FillRect(invertRect);
-				drawView->SetDrawingMode(B_OP_OVER);
-			}
 		} else if (!windowActive && showSelectionWhenInactive) {
 			if (direct)
 				drawView->PushState();
 
-			// the selection rect is alpha-blended on top for inactive windows
+			// invert colors to select label using "reverse video"
 			drawView->InvertRect(invertRect);
+
 			drawView->SetDrawingMode(B_OP_BLEND);
-			// blend cut item background with less contrast
 			if (clipboardMode == kMoveSelectionTo) {
+				// blend inactive cut item background with less contrast
 				if (drawView->LowColor().IsLight())
 					drawView->SetHighColor(192, 192, 192, 255);
 				else
 					drawView->SetHighColor(64, 64, 64, 255);
-			} else
+			} else {
+				// blend inactive background with gray
 				drawView->SetHighColor(128, 128, 128, 255);
+			}
 			drawView->FillRect(invertRect);
 			drawView->SetDrawingMode(B_OP_OVER);
 
@@ -932,7 +918,7 @@ BPose::CalcRect(const BPoseView* poseView) const
 	BTextWidget* widget = WidgetFor(poseView->FirstColumn()->AttrHash());
 	BPoint location = Location(poseView);
 	BRect rect(_IconRect(poseView, location));
-	float textWidth = (widget != NULL ? widget->TextWidth(poseView) : 0);
+	float textWidth = (widget != NULL ? widget->TextWidth(poseView) + 4 : 0);
 
 	if (poseView->ViewMode() == kIconMode) {
 		// icon mode
@@ -940,14 +926,13 @@ BPose::CalcRect(const BPoseView* poseView) const
 			rect.left += roundf((rect.Width() - textWidth) / 2.f);
 			rect.right = rect.left + ceilf(textWidth);
 		}
+		rect.bottom = rect.top + ceilf(poseView->IconPoseHeight()) + 3;
 	} else {
 		// mini icon mode
 		if (widget != NULL)
 			rect.right += kMiniIconSeparator + ceilf(textWidth);
+		rect.bottom = rect.top + ceilf(poseView->IconPoseHeight()) + 1;
 	}
-
-	rect.bottom = rect.top + ceilf(poseView->IconPoseHeight());
-
 	return rect;
 }
 

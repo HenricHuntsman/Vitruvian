@@ -121,7 +121,7 @@ static const char *kCommonDirectories[] = {
 	COMMON "/develop",
 	SYSTEM "/var/log",						// B_SYSTEM_LOG_DIRECTORY
 	SYSTEM "/var/spool",					// B_SYSTEM_SPOOL_DIRECTORY
-	SYSTEM "/cache/tmp",					// B_SYSTEM_TEMP_DIRECTORY
+	"tmp",									// B_SYSTEM_TEMP_DIRECTORY: /system/cache is /tmp
 	SYSTEM "/var",							// B_SYSTEM_VAR_DIRECTORY
 	COMMON "/add-ons$a/Translators",
 	COMMON "/add-ons$a/media",
@@ -339,9 +339,15 @@ __find_directory(directory_which which, dev_t device, bool createIt,
 				templatePath = "$h/Desktop";
 			break;
 		case B_TRASH_DIRECTORY:
-			// TODO: eventually put that into the file system API?
+			// XDG Trash spec. Home volume -> $d/Trash/files, where $d is
+			// XDG_DATA_HOME. Tracker resolves the same way, and the two must
+			// agree.
+			// FAT (legacy) -> RECYCLED/_BEOS_. Other external volumes are
+			// routed by FSGetTrashDir via MountInfo to <mount>/.Trash-<uid>/
+			// files (this template stays NULL so callers that ask without
+			// volume context get -ENOENT, matching Haiku).
 			if (device == bootDevice || !strcmp(fsInfo.fsh_name, "bfs"))
-				templatePath = "trash"; // TODO: add suffix for current user
+				templatePath = "$d/Trash/files";
 			else if (!strcmp(fsInfo.fsh_name, "fat"))
 				templatePath = "RECYCLED/_BEOS_";
 			break;
@@ -393,6 +399,13 @@ __find_directory(directory_which which, dev_t device, bool createIt,
 		case B_SYSTEM_CACHE_DIRECTORY:
 		case B_COMMON_PACKAGES_DIRECTORY:
 		case B_COMMON_HEADERS_DIRECTORY:
+			templatePath = kCommonDirectories[which - B_COMMON_DIRECTORY];
+			break;
+
+		// Vitruvian has no packagefs; the packaged/non-packaged split
+		// doesn't exist. Report these as absent instead of aliasing them
+		// onto the packaged tree — otherwise every caller that walks both
+		// roots (e.g. locale catalog enumeration) sees each file twice.
 		case B_SYSTEM_NONPACKAGED_DIRECTORY:
 		case B_SYSTEM_NONPACKAGED_ADDONS_DIRECTORY:
 		case B_SYSTEM_NONPACKAGED_TRANSLATORS_DIRECTORY:
@@ -405,8 +418,19 @@ __find_directory(directory_which which, dev_t device, bool createIt,
 		case B_SYSTEM_NONPACKAGED_LIB_DIRECTORY:
 		case B_SYSTEM_NONPACKAGED_HEADERS_DIRECTORY:
 		case B_SYSTEM_NONPACKAGED_DEVELOP_DIRECTORY:
-			templatePath = kCommonDirectories[which - B_COMMON_DIRECTORY];
-			break;
+		case B_USER_NONPACKAGED_DIRECTORY:
+		case B_USER_NONPACKAGED_ADDONS_DIRECTORY:
+		case B_USER_NONPACKAGED_TRANSLATORS_DIRECTORY:
+		case B_USER_NONPACKAGED_MEDIA_NODES_DIRECTORY:
+		case B_USER_NONPACKAGED_BIN_DIRECTORY:
+		case B_USER_NONPACKAGED_DATA_DIRECTORY:
+		case B_USER_NONPACKAGED_FONTS_DIRECTORY:
+		case B_USER_NONPACKAGED_SOUNDS_DIRECTORY:
+		case B_USER_NONPACKAGED_DOCUMENTATION_DIRECTORY:
+		case B_USER_NONPACKAGED_LIB_DIRECTORY:
+		case B_USER_NONPACKAGED_HEADERS_DIRECTORY:
+		case B_USER_NONPACKAGED_DEVELOP_DIRECTORY:
+			return B_ENTRY_NOT_FOUND;
 
 		/* User directories */
 		case B_USER_DIRECTORY:
@@ -427,18 +451,6 @@ __find_directory(directory_which which, dev_t device, bool createIt,
 		case B_USER_HEADERS_DIRECTORY:
 		case B_USER_DEVELOP_DIRECTORY:
 		case B_USER_DOCUMENTATION_DIRECTORY:
-		case B_USER_NONPACKAGED_DIRECTORY:
-		case B_USER_NONPACKAGED_ADDONS_DIRECTORY:
-		case B_USER_NONPACKAGED_TRANSLATORS_DIRECTORY:
-		case B_USER_NONPACKAGED_MEDIA_NODES_DIRECTORY:
-		case B_USER_NONPACKAGED_BIN_DIRECTORY:
-		case B_USER_NONPACKAGED_DATA_DIRECTORY:
-		case B_USER_NONPACKAGED_FONTS_DIRECTORY:
-		case B_USER_NONPACKAGED_SOUNDS_DIRECTORY:
-		case B_USER_NONPACKAGED_DOCUMENTATION_DIRECTORY:
-		case B_USER_NONPACKAGED_LIB_DIRECTORY:
-		case B_USER_NONPACKAGED_HEADERS_DIRECTORY:
-		case B_USER_NONPACKAGED_DEVELOP_DIRECTORY:
 		case B_USER_SERVERS_DIRECTORY:
 		case B_USER_APPS_DIRECTORY:
 		case B_USER_BIN_DIRECTORY:
@@ -471,8 +483,24 @@ __find_directory(directory_which which, dev_t device, bool createIt,
 
 	PathBuffer pathBuffer(buffer, pathLength, strlen(buffer));
 
-	// resolve "$h" placeholder to the user's home directory
-	if (!strncmp(templatePath, "$h", 2)) {
+	// resolve "$d" placeholder to XDG_DATA_HOME keeping trash(1), Tracker and
+	// gio pointed at one directory
+	if (!strncmp(templatePath, "$d", 2)) {
+		const char* dataHome = getenv("XDG_DATA_HOME");
+		if (dataHome != NULL && dataHome[0] == '/') {
+			size_t length = strlcpy(buffer, dataHome, pathLength);
+			if (length >= pathLength)
+				return -E2BIG;
+			pathBuffer.SetTo(buffer, pathLength, length);
+		} else {
+			size_t length = get_user_home_path(buffer, pathLength);
+			if (length >= pathLength)
+				return -E2BIG;
+			pathBuffer.SetTo(buffer, pathLength, length);
+			pathBuffer.Append("/.local/share");
+		}
+		templatePath += 2;
+	} else if (!strncmp(templatePath, "$h", 2)) {
 		if (bootDevice != B_INVALID_DEV && device != bootDevice) {
 			pathBuffer.Append("/home");
 		} else {

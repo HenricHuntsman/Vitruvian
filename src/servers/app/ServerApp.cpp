@@ -1,5 +1,6 @@
 /*
  * Copyright 2001-2016, Haiku.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -170,6 +171,7 @@ ServerApp::~ServerApp()
 	snooze(20000);
 
 	fDesktop->RevertScreenModes(fTemporaryDisplayModeChange);
+	fDesktop->ScreenChangeOwnerDied(fClientTeam);
 
 	fWindowListLock.Lock();
 	for (int32 i = fWindowList.CountItems(); i-- > 0;) {
@@ -337,7 +339,7 @@ ServerApp::InWorkspace(int32 index) const
 	BAutolock locker(fWindowListLock);
 
 	// we could cache this, but then we'd have to recompute the cached
-	// value everytime a window has closed or changed workspaces
+	// value every time a window has closed or changed workspaces
 
 	// TODO: support initial application workspace!
 
@@ -367,7 +369,7 @@ ServerApp::Workspaces() const
 	BAutolock locker(fWindowListLock);
 
 	// we could cache this, but then we'd have to recompute the cached
-	// value everytime a window has closed or changed workspaces
+	// value every time a window has closed or changed workspaces
 
 	for (int32 i = fWindowList.CountItems(); i-- > 0;) {
 		ServerWindow* serverWindow = fWindowList.ItemAt(i);
@@ -520,6 +522,14 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 				break;
 			}
 
+			// A fresh input_server otherwise only learns the screen
+			// bounds and panel orientation on the next mode change.
+			if (stream != NULL) {
+				stream->UpdateScreenBounds(fDesktop->VirtualScreen().Frame(),
+					fDesktop->HWInterface()->PanelScanoutOrientation(),
+					fDesktop->HWInterface()->PanelReflection());
+			}
+
 			// TODO: this should be done using notifications (so that an
 			// abandoned stream will get noticed directly)
 			if (fDesktop->EventDispatcher().InitCheck() != B_OK)
@@ -577,7 +587,7 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 			port_id clientReplyPort = -1;
 			status_t status = _CreateWindow(code, link, clientReplyPort);
 
-			// if sucessful, ServerWindow::Run() will already have replied
+			// if successful, ServerWindow::Run() will already have replied
 			if (status < B_OK) {
 				// window creation failed, we need to notify the client
 				BPrivate::LinkSender reply(clientReplyPort);
@@ -663,8 +673,6 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 			fLink.StartMessage(error);
 			fLink.Flush();
 
-			if (error == B_OK)
-				fDesktop->BroadcastToAllApps(AS_UPDATE_DECORATOR);
 			break;
 		}
 
@@ -759,7 +767,7 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 				fLink.Attach<uint8>(allocationFlags);
 
 				fLink.Attach<area_id>(bitmap->Area());
-				fLink.Attach<int32>(bitmap->AreaOffset());
+				fLink.Attach<ssize_t>(bitmap->AreaOffset());
 
 				if ((allocationFlags & kFramebuffer) != 0)
 					fLink.Attach<int32>(bitmap->BytesPerRow());
@@ -848,7 +856,7 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 			int32 bytesPerRow;
 			int32 screenID;
 			area_id clientArea;
-			int32 areaOffset;
+			size_t areaOffset;
 
 			link.Read<BRect>(&frame);
 			link.Read<color_space>(&colorSpace);
@@ -856,7 +864,7 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 			link.Read<int32>(&bytesPerRow);
 			link.Read<int32>(&screenID);
 			link.Read<int32>(&clientArea);
-			if (link.Read<int32>(&areaOffset) == B_OK) {
+			if (link.Read<size_t>(&areaOffset) == B_OK) {
 				// TODO: choose the right HWInterface with regards to the
 				// screenID
 				bitmap.SetTo(gBitmapManager->CloneFromClient(clientArea, areaOffset,
@@ -3252,27 +3260,6 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 			break;
 		}
 
-		case AS_GET_FRAME_BUFFER_CONFIG:
-		{
-			STRACE(("ServerApp %s: get frame buffer config\n", Signature()));
-
-			// We aren't using the screen_id for now...
-			int32 id;
-			link.Read<int32>(&id);
-
-			frame_buffer_config config;
-			// TODO: I wonder if there should be a "desktop" lock...
-			status_t status = fDesktop->HWInterface()->GetFrameBufferConfig(config);
-			if (status == B_OK) {
-				fLink.StartMessage(B_OK);
-				fLink.Attach<frame_buffer_config>(config);
-			} else
-				fLink.StartMessage(status);
-
-			fLink.Flush();
-			break;
-		}
-
 		case AS_GET_RETRACE_SEMAPHORE:
 		{
 			STRACE(("ServerApp %s: get retrace semaphore\n", Signature()));
@@ -3374,6 +3361,94 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 			break;
 		}
 
+		case AS_SCREEN_SET_ROTATION:
+		{
+			STRACE(("ServerApp %s: AS_SCREEN_SET_ROTATION\n", Signature()));
+			int32 id;
+			link.Read<int32>(&id);
+
+			int32 rotation;
+			link.Read<int32>(&rotation);
+
+			status_t status = fDesktop->SetRotation(id, rotation);
+			fLink.StartMessage(status);
+
+			fLink.Flush();
+			break;
+		}
+
+		case AS_SCREEN_GET_ROTATION:
+		{
+			STRACE(("ServerApp %s: AS_SCREEN_GET_ROTATION\n", Signature()));
+			int32 id;
+			link.Read<int32>(&id);
+
+			fLink.StartMessage(B_OK);
+			fLink.Attach<int32>(fDesktop->Rotation(id));
+
+			fLink.Flush();
+			break;
+		}
+
+		case AS_SCREEN_SET_REFLECTION:
+		{
+			STRACE(("ServerApp %s: AS_SCREEN_SET_REFLECTION\n", Signature()));
+			int32 id;
+			link.Read<int32>(&id);
+
+			int32 reflection;
+			link.Read<int32>(&reflection);
+
+			status_t status = fDesktop->SetReflection(id, reflection);
+			fLink.StartMessage(status);
+
+			fLink.Flush();
+			break;
+		}
+
+		case AS_SCREEN_GET_REFLECTION:
+		{
+			STRACE(("ServerApp %s: AS_SCREEN_GET_REFLECTION\n", Signature()));
+			int32 id;
+			link.Read<int32>(&id);
+
+			fLink.StartMessage(B_OK);
+			fLink.Attach<int32>(fDesktop->Reflection(id));
+
+			fLink.Flush();
+			break;
+		}
+
+		case AS_SCREEN_BEGIN_CHANGE:
+		{
+			STRACE(("ServerApp %s: AS_SCREEN_BEGIN_CHANGE\n", Signature()));
+			status_t status = fDesktop->BeginScreenChange(fClientTeam);
+			fLink.StartMessage(status);
+
+			fLink.Flush();
+			break;
+		}
+
+		case AS_SCREEN_CONFIRM_CHANGE:
+		{
+			STRACE(("ServerApp %s: AS_SCREEN_CONFIRM_CHANGE\n", Signature()));
+			status_t status = fDesktop->ConfirmScreenChange(fClientTeam);
+			fLink.StartMessage(status);
+
+			fLink.Flush();
+			break;
+		}
+
+		case AS_SCREEN_CANCEL_CHANGE:
+		{
+			STRACE(("ServerApp %s: AS_SCREEN_CANCEL_CHANGE\n", Signature()));
+			status_t status = fDesktop->CancelScreenChange(fClientTeam);
+			fLink.StartMessage(status);
+
+			fLink.Flush();
+			break;
+		}
+
 		case AS_SCREEN_SET_BRIGHTNESS:
 		{
 			STRACE(("ServerApp %s: AS_SCREEN_SET_BRIGHTNESS\n", Signature()));
@@ -3401,6 +3476,53 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 			fLink.StartMessage(result);
 			if (result == B_OK)
 				fLink.Attach<float>(brightness);
+			fLink.Flush();
+			break;
+		}
+
+		case AS_SCREEN_SET_TEMPERATURE:
+		{
+			STRACE(("ServerApp %s: AS_SCREEN_SET_TEMPERATURE\n", Signature()));
+			int32 id;
+			link.Read<int32>(&id);
+
+			float kelvin;
+			link.Read<float>(&kelvin);
+
+			status_t status = fDesktop->HWInterface()->SetTemperature(kelvin);
+			fLink.StartMessage(status);
+
+			fLink.Flush();
+			break;
+		}
+
+		case AS_SCREEN_GET_TEMPERATURE:
+		{
+			STRACE(("ServerApp %s: AS_SCREEN_GET_TEMPERATURE\n", Signature()));
+			int32 id;
+			link.Read<int32>(&id);
+
+			float kelvin;
+			status_t result = fDesktop->HWInterface()->GetTemperature(&kelvin);
+			fLink.StartMessage(result);
+			if (result == B_OK)
+				fLink.Attach<float>(kelvin);
+			fLink.Flush();
+			break;
+		}
+
+		case AS_SCREEN_GET_CONNECTOR_NAME:
+		{
+			STRACE(("ServerApp %s: AS_SCREEN_GET_CONNECTOR_NAME\n",
+				Signature()));
+			int32 id;
+			link.Read<int32>(&id);
+
+			BString name;
+			status_t result = fDesktop->HWInterface()->GetConnectorName(name);
+			fLink.StartMessage(result);
+			if (result == B_OK)
+				fLink.AttachString(name.String());
 			fLink.Flush();
 			break;
 		}

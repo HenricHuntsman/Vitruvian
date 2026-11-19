@@ -1,5 +1,6 @@
 /*
  * Copyright 2004-2015 Haiku Inc. All rights reserved.
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Distributed under the terms of the MIT License.
  */
 
@@ -13,7 +14,7 @@
 #include "NetworkWindow.h"
 
 
-static const char* kSignature = "application/x-vnd.Haiku-Network";
+static const char* kSignature = "application/x-vnd.vos-Network";
 
 
 class Application : public BApplication {

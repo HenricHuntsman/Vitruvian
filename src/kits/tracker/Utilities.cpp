@@ -43,6 +43,9 @@ All rights reserved.
 #include <stdlib.h>
 #include <time.h>
 
+#include <syscalls.h>
+#include <driver_settings.h>
+
 #include <BitmapStream.h>
 #include <Catalog.h>
 #include <ControlLook.h>
@@ -292,6 +295,7 @@ PoseInfo::EndianSwap(void* castToThis)
 	PRINT(("swapping PoseInfo\n"));
 
 	STATIC_ASSERT(sizeof(ino_t) == sizeof(int64));
+	STATIC_ASSERT(sizeof(dev_t) == sizeof(int64));
 	self->fInitedDirectory = SwapInt64(self->fInitedDirectory);
 	swap_data(B_POINT_TYPE, &self->fLocation, sizeof(BPoint), B_SWAP_ALWAYS);
 
@@ -655,7 +659,7 @@ DraggableIcon::MouseDown(BPoint point)
 	dragBitmap->Lock();
 	BView* view = new BView(dragBitmap->Bounds(), "", B_FOLLOW_NONE, 0);
 	dragBitmap->AddChild(view);
-	view->SetOrigin(0, 0);
+	view->SetOrigin(B_ORIGIN);
 	BRect clipRect(view->Bounds());
 	BRegion newClip;
 	newClip.Set(clipRect);
@@ -665,8 +669,7 @@ DraggableIcon::MouseDown(BPoint point)
 	view->SetHighColor(0, 0, 0, 0);
 	view->FillRect(view->Bounds());
 	view->SetDrawingMode(B_OP_ALPHA);
-	view->SetHighColor(0, 0, 0, 128);
-		// set the level of opacity by value
+	view->SetHighColor(0, 0, 0, 128); // 50% opaque
 	view->SetBlendingMode(B_CONSTANT_ALPHA, B_ALPHA_COMPOSITE);
 	view->DrawBitmap(fBitmap);
 	view->Sync();
@@ -1682,8 +1685,10 @@ PositionPassingMenuItem::Invoke(BMessage* message)
 bool
 BootedInSafeMode()
 {
-	const char* safeMode = getenv("SAFEMODE");
-	return (safeMode && strcmp(safeMode, "yes") == 0);
+	char buffer[32];
+	size_t size = sizeof(buffer);
+	return _kern_get_safemode_option(B_SAFEMODE_SAFE_MODE, buffer, &size)
+		== B_OK;
 }
 
 

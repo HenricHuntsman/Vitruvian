@@ -11,7 +11,7 @@ AddOn(
 
 	CalendarViewTest.cpp
 	ChecksumJsonEventListener.cpp
-	#DriverSettingsMessageAdapterTest.cpp
+	DriverSettingsMessageAdapterTest.cpp
 	FakeJsonDataGenerator.cpp
 	JsonEndToEndTest.cpp
 	JsonErrorHandlingTest.cpp
@@ -21,6 +21,8 @@ AddOn(
 	LRUCacheTest.cpp
 	MemoryRingIOTest.cpp
 	NaturalCompareTest.cpp
+
+	LIBS shared be
 
 	INCLUDES
 	"${PROJECT_SOURCE_DIR}/headers/tools/cppunit/"

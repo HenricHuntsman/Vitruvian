@@ -255,7 +255,7 @@ RecentEntries::Print()
 	for (item = fEntryList.begin(); item != fEntryList.end(); item++) {
 		printf("%d: device == '%" B_PRIdDEV "', dir == '%" B_PRIdINO "', "
 			"name == '%s', app == '%s', index == %" B_PRId32 "\n", counter++,
-			(*item)->ref.dev(), (*item)->ref.dir(), (*item)->ref.name,
+			(*item)->ref.vdevice(), (*item)->ref.vdirectory(), (*item)->ref.name,
 			(*item)->sig.c_str(), (*item)->index);
 	}
 	return B_OK;
@@ -312,19 +312,18 @@ RecentEntries::Save(FILE* file, const char *description, const char *tag)
 			BPrivate::Storage::escape_path(path.Path(), escapedPath);
 			fprintf(file, "%s %s", tag, escapedPath);
 			std::list<recent_entry*> &list = mapItem->second;
-			int32 i = 0;
+			int32 i __attribute__((unused)) = 0;
 			for (std::list<recent_entry*>::iterator item = list.begin();
 					item != list.end(); i++, item++) {
 				recent_entry *entry = *item;
 				if (entry) {
-					fprintf(file, " \"%s\" %" B_PRId32, entry->sig.c_str(),
-						entry->index);
+					fprintf(file, " \"%s\" %" B_PRId32, entry->sig.c_str(), entry->index);
 				} else {
 					D(PRINT("WARNING: RecentEntries::Save(): The entry %"
 						B_PRId32 " entries from the front of the compiled "
 						"recent_entry* list for the entry ref (%" B_PRId32 ", %"
 						B_PRId64 ", '%s') was found to be NULL\n", i,
-						mapItem->first.device, mapItem->first.directory,
+						mapItem->first.vdevice(), mapItem->first.vdirectory(),
 						mapItem->first.name));
 				}
 			}
@@ -333,7 +332,7 @@ RecentEntries::Save(FILE* file, const char *description, const char *tag)
 			D(PRINT("WARNING: RecentEntries::Save(): entry_ref_to_path() "
 				"failed on the entry_ref (%" B_PRId32", %" B_PRId64 ", '%s') "
 				"with error 0x%" B_PRIx32 "\n",
-				mapItem->first.device, mapItem->first.directory,
+				mapItem->first.vdevice(), mapItem->first.vdirectory(),
 				mapItem->first.name, outputError));
 		}
 	}

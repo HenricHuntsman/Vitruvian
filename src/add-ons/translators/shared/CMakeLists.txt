@@ -1,5 +1,5 @@
 
-AddOn(
+TranslatorAddOn(
 	translatorutils
 	STATIC
 
@@ -9,3 +9,4 @@ AddOn(
 	TranslatorSettings.cpp
 	TranslatorWindow.cpp
 )
+DoCatalogs("x-pseudo.libtranslatorsutils" add-ons/translators/shared)

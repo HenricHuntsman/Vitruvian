@@ -58,6 +58,7 @@ All rights reserved.
 
 #include "Attributes.h"
 #include "AutoLock.h"
+#include "Background.h"
 #include "BackgroundImage.h"
 #include "Commands.h"
 #include "FSUtils.h"
@@ -238,6 +239,12 @@ BDeskWindow::~BDeskWindow()
 		// prevent double-saving, this would slow down quitting
 	PoseView()->StopSettingsWatch();
 	stop_watching(this);
+	// ApplyShortcutPreferences() registers a BPathMonitor watch on the
+	// settings directory targeting "this". stop_watching() only tears
+	// down direct watch_node() registrations, not BPathMonitor's, so
+	// without this the messenger stays registered and the looper keeps
+	// dispatching to a deleted window.
+	BPathMonitor::StopWatching(this);
 }
 
 
@@ -339,9 +346,9 @@ BDeskWindow::ApplyShortcutPreferences(bool update)
 	if (!update) {
 		BPath path;
 		if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
+			path.Append(kShortcutsSettings);
 			BPathMonitor::StartWatching(path.Path(),
 				B_WATCH_STAT | B_WATCH_FILES_ONLY, this);
-			path.Append(kShortcutsSettings);
 			fShortcutsSettings = new char[strlen(path.Path()) + 1];
 			strcpy(fShortcutsSettings, path.Path());
 		}
@@ -485,7 +492,7 @@ BDeskWindow::CreatePoseView(Model* model)
 void
 BDeskWindow::WorkspaceActivated(int32 workspace, bool state)
 {
-	if (fBackgroundImage)
+	if (fBackgroundImage != NULL)
 		fBackgroundImage->WorkspaceActivated(PoseView(), workspace, state);
 }
 
@@ -506,7 +513,7 @@ BDeskWindow::ScreenChanged(BRect frame, color_space space)
 	fOldFrame = frame;
 	ResizeTo(frame.Width(), frame.Height());
 
-	if (fBackgroundImage)
+	if (fBackgroundImage != NULL)
 		fBackgroundImage->ScreenChanged(frame, space);
 
 	PoseView()->CheckPoseVisibility(frameChanged ? &frame : 0);
@@ -516,18 +523,9 @@ BDeskWindow::ScreenChanged(BRect frame, color_space space)
 
 
 void
-BDeskWindow::UpdateDesktopBackgroundImages()
-{
-	WindowStateNodeOpener opener(this, false);
-	fBackgroundImage = BackgroundImage::Refresh(fBackgroundImage,
-		opener.Node(), true, PoseView());
-}
-
-
-void
 BDeskWindow::Show()
 {
-	if (fBackgroundImage)
+	if (fBackgroundImage != NULL)
 		fBackgroundImage->Show(PoseView(), current_workspace());
 
 	PoseView()->CheckPoseVisibility();
@@ -572,7 +570,7 @@ BDeskWindow::MessageReceived(BMessage* message)
 
 			// Notify the backgrounds app that the background changed
 			status_t initStatus;
-			BMessenger messenger("application/x-vnd.Haiku-Backgrounds", -1,
+			BMessenger messenger("application/x-vnd.vos-Backgrounds", -1,
 				&initStatus);
 			if (initStatus == B_OK)
 				messenger.SendMessage(message);
@@ -585,13 +583,13 @@ BDeskWindow::MessageReceived(BMessage* message)
 		case B_PATH_MONITOR:
 		{
 			const char* path = "";
-			if (!(message->FindString("path", &path) == B_OK
+			if (!(message->FindString("watched_path", &path) == B_OK
 					&& strcmp(path, fShortcutsSettings) == 0)) {
 
 				node_ref node;
 				if (fNodeRef == NULL
 					|| message->FindNodeRef("virtual:node", &node) != B_OK
-					|| node != fNodeRef->node)
+					|| node != *fNodeRef)
 					break;
 			}
 			ApplyShortcutPreferences(true);
@@ -611,6 +609,11 @@ BDeskWindow::MessageReceived(BMessage* message)
 			}
 			break;
 		}
+
+		case B_RESTORE_BACKGROUND_IMAGE:
+			UpdateBackgroundImage();
+			PoseView()->MessageReceived(message);
+			break;
 
 		default:
 			_inherited::MessageReceived(message);

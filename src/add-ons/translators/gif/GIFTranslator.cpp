@@ -298,7 +298,7 @@ GIFTranslator::DerivedTranslate(BPositionIO* inSource,
 	if (debug) {
 		now = system_time() - now;
 		syslog(LOG_INFO, "Translate() - Translation took %lld microseconds\n",
-			now);
+			(long long)now);
 	}
 	return B_OK;
 }
@@ -343,7 +343,7 @@ GIFTranslator::NewConfigView(TranslatorSettings* settings)
 int
 main()
 {
-	BApplication app("application/x-vnd.Haiku-GIFTranslator");
+	BApplication app("application/x-vnd.vos-GIFTranslator");
 	status_t result = LaunchTranslatorWindow(new(std::nothrow) GIFTranslator,
 		B_TRANSLATE("GIF Settings"), kRectView);
 	if (result == B_OK) {

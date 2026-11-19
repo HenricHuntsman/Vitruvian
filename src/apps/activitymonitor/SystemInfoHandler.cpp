@@ -1,4 +1,5 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2008, François Revol, revol@free.fr. All rights reserved.
  * Distributed under the terms of the MIT License.
  */
@@ -10,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <cmath>
 
 #include <Catalog.h>
 #include <Clipboard.h>
@@ -17,7 +19,9 @@
 #include <Handler.h>
 #include <Input.h>
 #include <List.h>
+#ifndef __VOS__
 #include <MediaRoster.h>
+#endif
 #include <Messenger.h>
 #include <Roster.h>
 
@@ -34,19 +38,11 @@ SystemInfoHandler::SystemInfoHandler()
 	fMediaNodes = 0;
 	fMediaConnections = 0;
 	fMediaBuffers = 0;
-
-	fThermalFD = open("/dev/power/acpi_thermal/0", O_RDONLY);
-	char buffer[256];
-	if ((fThermalFD > 0) && (ioctl(fThermalFD, B_GET_DEVICE_NAME, buffer, sizeof(buffer)) == B_OK))
-		fThermalZoneName = buffer;
-	else
-		fThermalZoneName = B_TRANSLATE("No thermal sensor");
 }
 
 
 SystemInfoHandler::~SystemInfoHandler()
 {
-	close(fThermalFD);
 }
 
 
@@ -62,7 +58,6 @@ SystemInfoHandler::Archive(BMessage* data, bool deep) const
 void
 SystemInfoHandler::StartWatching()
 {
-	status_t status;
 	fRunningApps = 0;
 	fClipboardSize = 0;
 	fClipboardTextSize = 0;
@@ -86,6 +81,8 @@ SystemInfoHandler::StartWatching()
 		_UpdateClipboardData();
 	}
 
+#ifndef __VOS__
+	status_t status;
 	if (BMediaRoster::Roster(&status) && (status >= B_OK)) {
 		BMediaRoster::Roster()->StartWatching(BMessenger(this), B_MEDIA_NODE_CREATED);
 		BMediaRoster::Roster()->StartWatching(BMessenger(this), B_MEDIA_NODE_DELETED);
@@ -105,6 +102,7 @@ SystemInfoHandler::StartWatching()
 		}
 		// TODO: get initial buffer count
 	}
+#endif
 
 	// doesn't work on R5
 	watch_input_devices(BMessenger(this), true);
@@ -114,8 +112,9 @@ SystemInfoHandler::StartWatching()
 void
 SystemInfoHandler::StopWatching()
 {
-	status_t status;
 	watch_input_devices(BMessenger(this), false);
+#ifndef __VOS__
+	status_t status;
 	if (BMediaRoster::Roster(&status) && (status >= B_OK)) {
 		BMediaRoster::Roster()->StopWatching(BMessenger(this), B_MEDIA_NODE_CREATED);
 		BMediaRoster::Roster()->StopWatching(BMessenger(this), B_MEDIA_NODE_DELETED);
@@ -124,6 +123,7 @@ SystemInfoHandler::StopWatching()
 		BMediaRoster::Roster()->StopWatching(BMessenger(this), B_MEDIA_BUFFER_CREATED);
 		BMediaRoster::Roster()->StopWatching(BMessenger(this), B_MEDIA_BUFFER_DELETED);
 	}
+#endif
 	if (be_clipboard)
 		be_clipboard->StopWatching(BMessenger(this));
 	if (be_roster)
@@ -146,6 +146,7 @@ SystemInfoHandler::MessageReceived(BMessage* message)
 		case B_CLIPBOARD_CHANGED:
 			_UpdateClipboardData();
 			break;
+#ifndef __VOS__
 		case B_MEDIA_NODE_CREATED:
 			fMediaNodes++;
 			break;
@@ -164,6 +165,7 @@ SystemInfoHandler::MessageReceived(BMessage* message)
 		case B_MEDIA_BUFFER_DELETED:
 			fMediaBuffers--;
 			break;
+#endif
 		default:
 			message->PrintToStream();
 			BHandler::MessageReceived(message);
@@ -210,36 +212,6 @@ uint32
 SystemInfoHandler::MediaBuffers() const
 {
 	return fMediaBuffers;
-}
-
-
-float
-SystemInfoHandler::Temperature() const
-{
-	float temperature = std::nanf("");
-	if (fThermalFD >= 0) {
-		char buffer[256];
-		// TODO it would be nice to use ioctl to get direct access to the temperature instead,
-		// but that provides raw values from the sensors without the "kelvin offset" fixup, making
-		// it unusable.
-		// The ioctl reply also uses a different format for each of the *_thermal drivers, so that
-		// would be a problem if ActivityMonitor is extended to collect info from these as well.
-		pread(fThermalFD, buffer, sizeof(buffer), 0);
-
-		char* currTemp = strstr(buffer, "Current Temperature: ");
-		if (currTemp != NULL)
-			sscanf(currTemp + strlen("Current Temperature: "), "%f", &temperature);
-
-	}
-
-	return temperature;
-}
-
-
-const BString&
-SystemInfoHandler::ThermalZone() const
-{
-	return fThermalZoneName;
 }
 
 

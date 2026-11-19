@@ -246,21 +246,19 @@ PersonWindow::MessageReceived(BMessage* msg)
 						BString name;
 						msg->FindString("name", &name);
 
-						int64 directory;
-						msg->FindInt64("to directory", &directory);
-
-						int32 device;
-						msg->FindInt32("device", &device);
+						entry_ref toDir;
+						msg->FindRef("virtual:to directory", &toDir);
 
 						// Update our ref.
 						delete fRef;
-						fRef = new entry_ref(device, directory, name.String());
+						fRef = new entry_ref(toDir);
+						fRef->set_name(name.String());
 
 						// And our window title.
 						SetTitle(name);
 
 						// If moved to Trash, close window.
-						BVolume volume(device);
+						BVolume volume(fRef->device());
 						BPath trash;
 						find_directory(B_TRASH_DIRECTORY, &trash, false,
 							&volume);

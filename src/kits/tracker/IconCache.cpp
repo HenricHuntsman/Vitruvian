@@ -1,4 +1,7 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
+ */
+/*
 Open Tracker License
 
 Terms and Conditions
@@ -69,6 +72,7 @@ All rights reserved.
 #include <Volume.h>
 
 #include <fs_info.h>
+#include <string.h>
 
 #include "Bitmaps.h"
 #include "FSUtils.h"
@@ -605,7 +609,7 @@ IconCache::GetVolumeIcon(AutoLock<SimpleIconCache>*nodeCacheLocker,
 	// try getting using the BVolume::GetIcon call; if miss,
 	// go for the default mime based icon
 	if (entry == NULL || !entry->HaveIconBitmap(NORMAL_ICON_ONLY, size)) {
-		BVolume volume(model->NodeRef()->dereference().dev());
+		BVolume volume(model->NodeRef()->device());
 
 		if (volume.IsShared()) {
 			// check if it's a network share and give it a special icon
@@ -1392,7 +1396,7 @@ IconCache::MakeTransformedIcon(const BBitmap* source, BSize /*size*/,
 
 		default:
 			memset(dst, 0, result->BitsLength());
-			// unkown colorspace, no tinting for you
+			// unknown colorspace, no tinting for you
 			// "black" should make the problem stand out
 			break;
 	}
@@ -1630,6 +1634,8 @@ SharedCacheEntry::operator==(const TypeAndSignature& typeAndSignature) const
 NodeCacheEntry::NodeCacheEntry(bool permanent)
 	:
 	fNext(NULL),
+	fHashDev(-1),
+	fHashNode(-1),
 	fPermanent(permanent)
 {
 }
@@ -1641,6 +1647,9 @@ NodeCacheEntry::NodeCacheEntry(const node_ref* node, bool permanent)
 	fRef(*node),
 	fPermanent(permanent)
 {
+	// Snapshot physical identity: hash table requires stable keys.
+	fHashDev = node->device();
+	fHashNode = node->node();
 }
 
 
@@ -1696,23 +1705,27 @@ NodeCacheEntry::Node() const
 size_t
 NodeCacheEntry::Hash() const
 {
-	return Hash(&fRef);
+	ino_t ino = fHashNode;
+	uint32 halves[2];
+	memcpy(halves, &ino, sizeof(ino));
+	return (size_t)fHashDev ^ halves[0] ^ halves[1];
 }
 
 
 /* static */ size_t
 NodeCacheEntry::Hash(const node_ref* node)
 {
-	ino_t ino = node->ino();
-	return node->dev() ^ ((uint32*)&ino)[0]
-		^ ((uint32*)&ino)[1];
+	ino_t ino = node->node();
+	uint32 halves[2];
+	memcpy(halves, &ino, sizeof(ino));
+	return (size_t)node->device() ^ halves[0] ^ halves[1];
 }
 
 
 bool
 NodeCacheEntry::operator==(const node_ref* node) const
 {
-	return fRef == *node;
+	return fHashDev == node->device() && fHashNode == node->node();
 }
 
 

@@ -34,7 +34,7 @@ private:
 
 DevicesApplication::DevicesApplication()
 	:
-	BApplication("application/x-vnd.Haiku-Devices")
+	BApplication("application/x-vnd.vos-Devices")
 {
 	DevicesWindow* window = new DevicesWindow();
 	window->CenterOnScreen();
@@ -63,6 +63,7 @@ DevicesWindow::MessageReceived(BMessage* message)
 		case kMsgReportCompatibility:
 		case kMsgGenerateSysInfo:
 		case kMsgSelectionChanged:
+		case kMsgOrderBus:
 		case kMsgOrderCategory:
 		case kMsgOrderConnection:
 			fDevicesView->MessageReceived(message);

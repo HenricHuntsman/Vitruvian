@@ -17,18 +17,22 @@ const char *kSystemKeymapName = "US-International";
 
 const key_map kSystemKeymap = {
 	version:3,
-	caps_key:0x3b,
-	scroll_key:0xf,
-	num_key:0x22,
-	left_shift_key:0x4b,
-	right_shift_key:0x56,
-	left_command_key:0x5d,
-	right_command_key:0x0,
-	left_control_key:0x5c,
-	right_control_key:0x60,
-	left_option_key:0x66,
-	right_option_key:0x5f,
-	menu_key:0x68,
+	// Haiku keycodes, not evdev numbering, matching the character tables
+	// below.
+	caps_key:59,
+	scroll_key:15,
+	num_key:34,
+	left_shift_key:75,
+	right_shift_key:86,
+	// ctrl mode: Command on Ctrl, not Alt. This built-in copy is what
+	// gets used before any keymap loads.
+	left_command_key:92,	// left Control
+	right_command_key:96,	// right Control
+	left_control_key:93,	// left Alt
+	right_control_key:0,	// right Alt is AltGr, i.e. right Option
+	left_option_key:102,	// left Super
+	right_option_key:95,	// AltGr
+	menu_key:139,
 	lock_settings:0x0,
 	control_map:
 	{

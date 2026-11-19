@@ -57,11 +57,23 @@ private:
 
 	status_t _ReadParserBuffer();
 
+	// Selected character sets for VT100 G0 - G3
+	const char** fCharacterSets[4];
+	// Selected character sets for VT220 GL and GR
+	int fCurrentGL;
+	int fCurrentGR;
+	const char** fSavedCharacterSets[4];
+	int fSavedGL;
+	int fSavedGR;
+
+	void _SaveCursor();
+	void _RestoreCursor();
 	void _DeviceStatusReport(int n);
 	void _DecReqTermParms(int value);
 	void _DecPrivateModeSet(int value);
 	void _DecPrivateModeReset(int value);
 	void _DecPrivateModeRequest(int value);
+	void _DecSoftTerminalReset();
 	int* _GuessGroundTable(int encoding);
 	void _ProcessOperatingSystemControls(uchar* params);
 	void _WriteReply(BString &reply);
@@ -72,8 +84,11 @@ private:
 	thread_id fReaderThread;
 	sem_id fReaderSem;
 	sem_id fReaderLocker;
+	int fQuitPipe[2];
+		// wakes the reader on stop
 
 	uint fBufferPosition;
+	void _AnsiModeRequest(int value);
 	uchar fReadBuffer[READ_BUF_SIZE];
 	int32 fReadBufferSize;
 

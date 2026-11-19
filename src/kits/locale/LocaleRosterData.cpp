@@ -11,6 +11,8 @@
 #include <unicode/uversion.h>
 #include <LocaleRosterData.h>
 
+#include <string.h>
+
 #include <Autolock.h>
 #include <Catalog.h>
 #include <Collator.h>
@@ -372,8 +374,7 @@ LocaleRosterData::_InitializeCatalogAddOns()
 
 					// we have found (what should be) a catalog-add-on:
 					#ifndef __VOS__
- 					eref.device = dent->d_pdev;
- 					eref.directory = dent->d_pino;
+ 					eref.set_to((dev_t)dent->d_pdev, (ino_t)dent->d_pino);
  					eref.set_name(dent->d_name);
 					#else
 					BEntry dirEntry;
@@ -466,7 +467,11 @@ LocaleRosterData::_LoadLocaleSettings()
 		status = settings.Unflatten(&file);
 
 	if (status == B_OK) {
+		// An empty ID is the ICU root locale ("2026 M09 28"), never a choice.
 		BFormattingConventions conventions(&settings);
+		const char* id = conventions.ID();
+		if (id == NULL || id[0] == '\0' || strcmp(id, "root") == 0)
+			conventions = BFormattingConventions("en_US");
 		fDefaultLocale.SetFormattingConventions(conventions);
 
 		_SetPreferredLanguages(&settings);

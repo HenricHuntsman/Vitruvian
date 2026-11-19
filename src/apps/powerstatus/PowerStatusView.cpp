@@ -43,6 +43,7 @@
 
 #include "ACPIDriverInterface.h"
 #include "APMDriverInterface.h"
+#include "SysFSDriverInterface.h"
 #include "ExtendedInfoWindow.h"
 #include "PowerStatus.h"
 
@@ -140,7 +141,7 @@ PowerStatusView::AttachedToWindow()
 	else
 		SetLowColor(ViewColor());
 
-	Update();
+	Update(true);
 }
 
 
@@ -446,7 +447,11 @@ PowerStatusView::Update(bool force, bool notify)
 		fPercent = previousPercent;
 		fTimeLeft = previousTimeLeft;
 		fHasBattery = hadBattery;
-		return;
+
+		// If this was a forced update (some setting not related to battery status has changed),
+		// we still need to redraw everything. Otherwise, our job is done.
+		if (!force)
+			return;
 	}
 
 	if (fInDeskbar) {
@@ -641,6 +646,18 @@ PowerStatusView::_GetBatteryInfo(int batteryID, battery_info* batteryInfo)
 void
 PowerStatusView::_NotifyLowBattery()
 {
+	// The Power preferences can turn these off; read on each use so a
+	// change applies without restarting the replicant.
+	BPath path;
+	if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK
+		&& path.Append("Power settings") == B_OK) {
+		BFile file(path.Path(), B_READ_ONLY);
+		BMessage settings;
+		if (file.InitCheck() == B_OK && settings.Unflatten(&file) == B_OK
+			&& !settings.GetBool("power:status_notifications", true))
+			return;
+	}
+
 	BBitmap* bitmap = NULL;
 	BResources resources;
 	resources.SetToImage((void*)&instantiate_deskbar_item);
@@ -699,7 +716,7 @@ PowerStatusReplicant::PowerStatusReplicant(BRect frame, int32 resizingMode,
 			B_FOLLOW_RIGHT | B_FOLLOW_BOTTOM);
 		AddChild(dragger);
 	} else
-		Update(false, false);
+		Update(true, false);
 }
 
 
@@ -869,9 +886,18 @@ PowerStatusReplicant::_Init()
 		delete fDriverInterface;
 		fDriverInterface = new APMDriverInterface;
 		if (fDriverInterface->Connect() != B_OK) {
-			fprintf(stderr, "No power interface found.\n");
-			_Quit();
+			delete fDriverInterface;
+			fDriverInterface = new SysFSDriverInterface;
+			if (fDriverInterface->Connect() != B_OK) {
+				delete fDriverInterface;
+				fDriverInterface = NULL;
+			}
 		}
+	}
+	if (fDriverInterface == NULL) {
+		fprintf(stderr, "No power interface found.\n");
+		_Quit();
+		return;
 	}
 
 	fExtendedWindow = NULL;

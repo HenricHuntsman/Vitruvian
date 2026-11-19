@@ -118,6 +118,20 @@ class UndoItemFolder : public UndoItem {
 };
 
 
+class UndoItemFileTemplate : public UndoItem {
+	public:
+		UndoItemFileTemplate(const entry_ref &fileRef, const entry_ref &templateRef);
+		virtual ~UndoItemFileTemplate();
+
+		virtual status_t Undo();
+		virtual status_t Redo();
+
+	private:
+		entry_ref	fFileRef;
+		entry_ref	fTemplateRef;
+};
+
+
 class UndoItemRename : public UndoItem {
 	public:
 		UndoItemRename(const entry_ref &origRef, const entry_ref &ref);
@@ -159,7 +173,7 @@ ChangeListSource(BObjectList<entry_ref, true> &list, BEntry &entry)
 	for (int32 index = 0; index < list.CountItems(); index++) {
 		entry_ref* ref = list.ItemAt(index);
 
-		*ref = entry_ref(source.dev(), source.ino(), NULL);
+		*ref = entry_ref(source.vdevice(), source.vnode(), NULL);
 	}
 
 	return B_OK;
@@ -213,6 +227,12 @@ MoveCopyUndo::MoveCopyUndo(BObjectList<entry_ref, true>* sourceList,
 		fUndo = new UndoItemMove(sourceList, dest, pointList);
 	else
 		fUndo = new UndoItemCopy(sourceList, dest, pointList, moveMode);
+}
+
+
+NewFileTemplateUndo::NewFileTemplateUndo(const entry_ref &fileRef, const entry_ref &templateRef)
+{
+	fUndo = new UndoItemFileTemplate(fileRef, templateRef);
 }
 
 
@@ -345,6 +365,37 @@ UndoItemMove::Redo()
 		new BEntry(&fTargetRef), FSUndoMoveMode(kMoveSelectionTo), NULL);
 
 	return B_OK;
+}
+
+
+//	#pragma mark - UndoItemFileTemplate
+
+
+UndoItemFileTemplate::UndoItemFileTemplate(const entry_ref &fileRef, const entry_ref &templateRef)
+	:
+	fFileRef(fileRef),
+	fTemplateRef(templateRef)
+{
+}
+
+
+UndoItemFileTemplate::~UndoItemFileTemplate()
+{
+}
+
+
+status_t
+UndoItemFileTemplate::Undo()
+{
+	FSDelete(new entry_ref(fFileRef), false, false);
+	return B_OK;
+}
+
+
+status_t
+UndoItemFileTemplate::Redo()
+{
+	return FSCreateNewFileTemplate(&fFileRef, &fTemplateRef);
 }
 
 

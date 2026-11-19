@@ -32,7 +32,6 @@
 
 #include <tracker_private.h>
 
-#include "ProgressWindow.h"
 #include "ShowImageConstants.h"
 
 
@@ -272,8 +271,7 @@ FolderNavigator::FolderNavigator(entry_ref& ref)
 		fFolder.SetTo(&ref);
 	else {
 		node_ref nodeRef;
-		nodeRef.device = ref.device;
-		nodeRef.node = ref.directory;
+		nodeRef.set_to(ref.vdevice(), ref.vdirectory());
 
 		fFolder.SetTo(&nodeRef);
 	}
@@ -643,7 +641,7 @@ ImageFileNavigator::MoveFileToTrash()
 	entry_ref nextRef;
 	if (!fNavigator->FindNextImage(fCurrentRef, nextRef, true, false)
 		&& !fNavigator->FindNextImage(fCurrentRef, nextRef, false, false))
-		nextRef.device = -1;
+		nextRef.set_to(-1, -1);
 
 	// Move image to Trash
 	BMessage trash(BPrivate::kMoveToTrash);
@@ -655,7 +653,7 @@ ImageFileNavigator::MoveFileToTrash()
 	if (tracker.SendMessage(&trash) != B_OK)
 		return false;
 
-	if (nextRef.device != -1) {
+	if (nextRef.vdevice() != (dev_t)-1) {
 		SetTo(nextRef, 1, 1);
 		return true;
 	}

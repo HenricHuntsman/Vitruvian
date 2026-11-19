@@ -1,6 +1,7 @@
 /*
  * Copyright 2001-2025, Haiku, Inc. All rights reserved.
  * Copyright 2003-2004 Kian Duffy, myob@users.sourceforge.net
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Parts Copyright 1998-1999 Kazuho Okui and Takashi Murai.
  * All rights reserved. Distributed under the terms of the MIT license.
  *
@@ -13,6 +14,7 @@
  *		Ingo Weinhold, ingo_weinhold@gmx.de
  *		Clemens Zeidler, haiku@Clemens-Zeidler.de
  *		Siarzhuk Zharski, zharik@gmx.li
+ *		Dario Casalinuovo
  */
 
 
@@ -283,6 +285,7 @@ TermView::_InitObject(const ShellParameters& shellParameters)
 	fTextBackColor = kWhiteColor;
 	fSelectForeColor = kWhiteColor;
 	fSelectBackColor = kBlackColor;
+	fCursorForeColor = fTextBackColor;
 	fCursorBackColor = fTextForeColor;
 	fScrollOffset = 0;
 	fLastSyncTime = 0;
@@ -748,6 +751,39 @@ TermView::SetKeymap(const key_map* keymap, const char* chars)
 }
 
 
+bool
+command_is_control_key(const key_map* keymap)
+{
+	if (keymap == NULL)
+		return false;
+
+	// Haiku keycode for left Control; every key_map source, including the
+	// built-in kSystemKeymap fallback (see SystemKeymap.h), agrees on it.
+	return keymap->left_command_key == 0x5c;
+}
+
+
+bool
+TermView::CommandIsControlKey() const
+{
+	return command_is_control_key(fKeymap);
+}
+
+
+bool
+TermView::WriteControlCharacter(int32 rawChar)
+{
+	int control = control_character_for(rawChar);
+	if (control < 0 || fShell == NULL)
+		return false;
+
+	char byte = (char)control;
+	_ScrollTo(0, true);
+	fShell->Write(&byte, 1);
+	return true;
+}
+
+
 void
 TermView::SetUseOptionAsMetaKey(bool enable)
 {
@@ -1027,8 +1063,10 @@ TermView::_AttachShell(Shell *shell, const ShellParameters& shellParameters)
 Shell*
 TermView::_DetachShell()
 {
+	// shell is NULL when a previous shell restart failed to attach
 	Shell* shell = fShell;
-	fShell->DetachBuffer();
+	if (shell != NULL)
+		shell->DetachBuffer();
 	fShell = NULL;
 	return shell;
 }
@@ -1095,8 +1133,8 @@ TermView::_DrawLinePart(float x1, float y1, Attributes attr,
 		rgb_fore = highlight->Highlighter()->ForegroundColor();
 		rgb_back = highlight->Highlighter()->BackgroundColor();
 	} else {
-		// Reverse attribute(If selected area, don't reverse color).
-		if (attr.IsInverse()) {
+		// Reverse attribute, either because the cell is inverted or the screen is.
+		if (attr.IsInverse() != fTextBuffer->IsScreenReverseVideoMode()) {
 			rgb_color rgb_tmp = rgb_fore;
 			rgb_fore = rgb_back;
 			rgb_back = rgb_tmp;
@@ -1242,12 +1280,7 @@ TermView::_DrawCursor()
 		else {
 			uint32 count = 0;
 			rgb_color rgb_back = fTextBackColor;
-			if (fTextBuffer->IsAlternateScreenActive())
-				// alternate screen uses cell attributes beyond the line ends
-				fTextBuffer->GetCellAttributes(
-						fCursor.y, fCursor.x, attr, count);
-			else
-				fVisibleTextBuffer->GetLineColor(fCursor.y - firstVisible, attr);
+			fTextBuffer->GetCellAttributes(fCursor.y, fCursor.x, attr, count);
 
 			if (attr.IsBackSet())
 				rgb_back = attr.BackgroundColor(fTextBuffer->Palette());
@@ -1411,7 +1444,7 @@ TermView::Draw(BRect updateRect)
 		if (clearLeft <= updateRect.right) {
 			BRect rect(clearLeft, updateRect.top, updateRect.right,
 				updateRect.bottom);
-			SetHighColor(fTextBackColor);
+			SetHighColor(fTextBuffer->IsScreenReverseVideoMode() ? fTextForeColor : fTextBackColor);
 			FillRect(rect);
 		}
 	}
@@ -1422,7 +1455,7 @@ TermView::Draw(BRect updateRect)
 		if (clearTop <= updateRect.bottom) {
 			BRect rect(updateRect.left, clearTop, updateRect.right,
 				updateRect.bottom);
-			SetHighColor(fTextBackColor);
+			SetHighColor(fTextBuffer->IsScreenReverseVideoMode() ? fTextForeColor : fTextBackColor);
 			FillRect(rect);
 		}
 	}
@@ -1463,20 +1496,18 @@ TermView::Draw(BRect updateRect)
 
 					rgb_color rgb_back = highlight != NULL
 						? highlight->Highlighter()->BackgroundColor()
-						: fTextBackColor;
+						: fTextBuffer->IsScreenReverseVideoMode() ? fTextForeColor
+																  : fTextBackColor;
 
-					if (fTextBuffer->IsAlternateScreenActive()) {
-						// alternate screen uses cell attributes
-						// beyond the line ends
-						uint32 count = 0;
-						fTextBuffer->GetCellAttributes(j, i, attr, count);
-						rect.right = rect.left + fFontWidth * count - 1;
-						nextColumn = i + count;
-					} else
-						fVisibleTextBuffer->GetLineColor(j - firstVisible, attr);
+					uint32 nextCount = 0;
+					fTextBuffer->GetCellAttributes(j, i, attr, nextCount);
+					rect.right = rect.left + fFontWidth * nextCount - 1;
+					nextColumn = i + nextCount;
 
 					if (attr.IsBackSet())
-						rgb_back = attr.BackgroundColor(fTextBuffer->Palette());
+						rgb_back = fTextBuffer->IsScreenReverseVideoMode()
+							? attr.BackgroundColor(fTextBuffer->Palette())
+							: attr.ForegroundColor(fTextBuffer->Palette());
 
 					SetHighColor(rgb_back);
 					rgb_back = HighColor();
@@ -1772,7 +1803,8 @@ TermView::MessageReceived(BMessage *message)
 					specifier.FindString("property", i)) == 0) {
 
 				Shell* shell = _DetachShell();
-				shell->Close();
+				if (shell != NULL)
+					shell->Close();
 
 				int32 argc = 0;
 				const char** argv = NULL;

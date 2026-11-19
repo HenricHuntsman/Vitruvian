@@ -21,13 +21,13 @@ public:
 	SizeTest()
 	{
 		CPPUNIT_ASSERT_EQUAL((size_t)464, sizeof(BMenu));
-		CPPUNIT_ASSERT_EQUAL((size_t)128, sizeof(BMenuItem));
+		CPPUNIT_ASSERT_EQUAL((size_t)160, sizeof(BMenuItem));
 	}
 
 	void
 	ConcurrencyAbuseTest()
 	{
-		BApplication app("application/x-vnd.Haiku-interfacekit-menutest");
+		BApplication app("application/x-vnd.vos-interfacekit-menutest");
 		BPopUpMenu* menu = new BPopUpMenu("Test");
 		menu->AddItem(new BMenuItem("One", NULL));
 		menu->AddItem(new BMenuItem("Two", NULL));

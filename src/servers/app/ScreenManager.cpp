@@ -1,9 +1,11 @@
 /*
  * Copyright 2005-2009, Haiku.
+ * Copyright 2026, Dario Casalinuovo <b.vitruvio@gmail.com>.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
  *		Axel Dörfler, axeld@pinc-software.de
+ *		Dario Casalinuovo
  */
 
 /**	Manages all available physical screens */
@@ -192,7 +194,9 @@ ScreenManager::ScreenChanged(Screen* screen)
 
 	for (int32 i = 0; i < fScreenList.CountItems(); i++) {
 		screen_item* item = fScreenList.ItemAt(i);
-		if (item->screen.Get() == screen)
+		// Desktop::Init() restores the stored rotation before the screen
+		// is acquired, so there may be no owner yet.
+		if (item->screen.Get() == screen && item->owner != NULL)
 			item->owner->ScreenChanged(screen);
 	}
 }
@@ -217,9 +221,15 @@ ScreenManager::_ScanDrivers()
 		interface = new AccelerantHWInterface();
 	#else
 		//interface = new SDLInterface();
-		interface = new DrmHWInterface();
-//		interface = new FBDevHWInterface();
-	#endif
+		DrmHWInterface* drm = new(nothrow) DrmHWInterface();
+		if (drm != NULL && drm->InitCheck() == B_OK) {
+			interface = drm;
+		} else {
+			fprintf(stderr, "DRM backend failed, falling back to FBDev\n");
+			delete drm;
+			interface = new(nothrow) FBDevHWInterface();
+		}
+#endif
 
 		_AddHWInterface(interface);
 		initDrivers = false;

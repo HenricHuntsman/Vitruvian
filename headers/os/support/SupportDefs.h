@@ -11,9 +11,17 @@
 
 #include <BeBuild.h>
 #include <Errors.h>
+#include <config/HaikuVersion.h>
 
 #include <inttypes.h>
 #include <sys/types.h>
+
+/* Open mode bit asking for the link itself instead of its target. It lives
+   outside the Linux O_* range and is consumed by libroot before the kernel
+   sees the mode. */
+#ifndef O_NOTRAVERSE
+#	define O_NOTRAVERSE	0x40000000
+#endif
 
 
 /* fixed-size integer types */
@@ -168,12 +176,18 @@ typedef	generic_addr_t			generic_size_t;
 #define B_SCNxOFF		B_SCNx64
 
 /* dev_t */
-#define B_PRIdDEV		B_PRId32
-#define B_PRIiDEV		B_PRIi32
+#define B_PRIdDEV		B_PRId64
+#define B_PRIiDEV		B_PRIi64
+#define B_PRIuDEV		B_PRIu64
+#define B_PRIxDEV		B_PRIx64
+#define B_PRIXDEV		B_PRIX64
 
 /* ino_t */
 #define B_PRIdINO		B_PRId64
 #define B_PRIiINO		B_PRIi64
+#define B_PRIuINO		B_PRIu64
+#define B_PRIxINO		B_PRIx64
+#define B_PRIXINO		B_PRIX64
 
 /* time_t */
 #if defined(__i386__) && !defined(__x86_64__)

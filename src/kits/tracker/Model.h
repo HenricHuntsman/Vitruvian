@@ -30,6 +30,8 @@ Tracker(TM), Be(R), BeOS(R), and BeIA(TM) are trademarks or registered trademark
 of Be Incorporated in the United States and other countries. Other brand product
 names are registered trademarks or trademarks of their respective holders.
 All rights reserved.
+
+Copyright 2026, Dario Casalinuovo. All rights reserved.
 */
 
 //	Dedicated to BModel
@@ -115,6 +117,7 @@ public:
 	const entry_ref* EntryRef() const;
 	const node_ref* NodeRef() const;
 	const StatStruct* StatBuf() const;
+	time_t CreationTime() const;
 
 	BNode* Node() const;
 		// returns NULL if not open
@@ -138,6 +141,9 @@ public:
 	bool IsSymLink() const;
 	bool InRoot() const;
 	bool IsRoot() const;
+#ifdef __VOS__
+	void OverrideAsDisksRoot();
+#endif
 	bool InTrash() const;
 	bool IsTrash() const;
 	bool IsVolume() const;
@@ -167,10 +173,12 @@ public:
 	// Node monitor update call
 	void UpdateEntryRef(const node_ref* dirRef, const char* name);
 	bool AttrChanged(const char* attrName);
-		// returns true if pose needs to update it's icon, etc.
+		// returns true if pose needs to update its icon, etc.
 		// pass null to force full update
+	bool IconAttrChanged(const char* attrName);
+		// returns true if pose needs to update its icon
 	bool StatChanged();
-		// returns true if pose needs to update it's icon
+		// returns true if pose needs to update its icon
 
 	status_t WatchVolumeAndMountPoint(uint32, BHandler*);
 		// correctly handles boot volume name watching
@@ -215,6 +223,8 @@ public:
 	bool HasLocalizedName() const;
 
 private:
+	status_t _ReadStat(const BStatable* node);
+	void _SetStat(const struct statx& stx);
 	status_t OpenNodeCommon(bool writable);
 	void SetupBaseType();
 	void FinishSettingUpType();
@@ -250,6 +260,8 @@ private:
 
 	entry_ref fEntryRef;
 	StatStruct fStatBuf;
+	time_t fCreationTime = 0;
+	node_ref fNodeRef;
 	BString fMimeType;
 		// should use string that may be shared for common types
 
@@ -340,8 +352,7 @@ Model::EntryRef() const
 inline const node_ref*
 Model::NodeRef() const
 {
-	// the stat structure begins with a node_ref
-	return (node_ref*)&fStatBuf;
+	return &fNodeRef;
 }
 
 
@@ -356,6 +367,13 @@ inline const StatStruct*
 Model::StatBuf() const
 {
 	return &fStatBuf;
+}
+
+
+inline time_t
+Model::CreationTime() const
+{
+	return fCreationTime;
 }
 
 
@@ -462,6 +480,20 @@ Model::IsRoot() const
 {
 	return fBaseType == kRootNode;
 }
+
+
+#ifdef __VOS__
+inline void
+Model::OverrideAsDisksRoot()
+{
+	fBaseType = kRootNode;
+	fIconFrom = kUnknownSource;	// force icon re-lookup so Disks icon is used
+	if (fVolumeName != NULL) {
+		free(fVolumeName);
+		fVolumeName = NULL;
+	}
+}
+#endif
 
 
 inline bool

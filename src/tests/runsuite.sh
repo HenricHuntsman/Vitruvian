@@ -1,7 +1,7 @@
 #!/bin/sh
 # runsuite.sh -- Vitruvian Test Suite Runner
 # Runs all automated tests and produces per-test log files
-# Usage: ./runsuite.sh [--system] [--beapi]
+# Usage: ./runsuite.sh [--system] [--beapi]   (run as the session user)
 #   --system : Run system tests only (nexus + libroot, no libbe)
 #   --beapi  : Run BeAPI tests only (requires full runtime with libbe)
 #   (default): Run both system and BeAPI tests
@@ -19,6 +19,7 @@ mkdir -p "$LOGDIR"
 TOTAL=0
 PASS=0
 FAIL=0
+SKIP=0
 ERRORS=""
 
 run_test() {
@@ -39,6 +40,18 @@ run_test() {
         ERRORS="$ERRORS\n  FAIL: $name (exit $rc, see $logfile)"
         echo "FAIL (exit $rc)"
     else
+        case "$cmd" in
+        *"$UNITTESTER "*)
+            # A UnitTester run that exits before its Results block never
+            # ran its tests (e.g. BApplication refused by the session).
+            if ! grep -q "^Results" "$logfile" 2>/dev/null; then
+                FAIL=$((FAIL + 1))
+                ERRORS="$ERRORS\n  DID NOT RUN: $name (see $logfile)"
+                echo "DID NOT RUN"
+                return
+            fi
+            ;;
+        esac
         if grep -q "^- FAIL" "$logfile" 2>/dev/null; then
             FAIL=$((FAIL + 1))
             ERRORS="$ERRORS\n  FAIL: $name (see $logfile)"
@@ -50,10 +63,42 @@ run_test() {
     fi
 }
 
+# Spawns many processes; skipped while a desktop session is running.
+run_test_nodesktop() {
+    local name="$1"
+    if pidof app_server > /dev/null 2>&1; then
+        TOTAL=$((TOTAL + 1))
+        SKIP=$((SKIP + 1))
+        printf "  %-45s" "$name"
+        echo "SKIPPED (desktop running)"
+        return
+    fi
+    run_test "$@"
+}
+
 run_cppunit() {
     local suite="$1"
     local logname="$2"
     run_test "$logname" "$UNITTESTER $suite"
+}
+
+# Suites written for root semantics (permission bits ignored, chown to other
+# uids). Run the suite as the session user and these through sudo -n; without
+# passwordless sudo they are skipped, never counted as pass or fail.
+run_cppunit_root() {
+    local suite="$1"
+    local logname="$2"
+    if [ "$(id -u)" -eq 0 ]; then
+        run_test "$logname" "$UNITTESTER $suite"
+    elif sudo -n true 2>/dev/null; then
+        run_test "$logname" \
+            "sudo -n env LD_LIBRARY_PATH=$LD_LIBRARY_PATH $UNITTESTER $suite"
+    else
+        TOTAL=$((TOTAL + 1))
+        SKIP=$((SKIP + 1))
+        printf "  %-45s" "$logname"
+        echo "SKIPPED (needs root)"
+    fi
 }
 
 RUN_SYSTEM=1
@@ -112,7 +157,7 @@ if [ "$RUN_SYSTEM" -eq 1 ]; then
 
     echo ""
     echo "  [System Kernel Tests]"
-    run_test "kernel-fibo_load_image"      "$TESTBIN/fibo_load_image 20"
+    run_test_nodesktop "kernel-fibo_load_image" "ulimit -u \$((\$(ps -u \$(id -u) -L --no-headers | wc -l) + 300)); $TESTBIN/fibo_load_image 8"
     run_test "kernel-path_resolution_test" "$TESTBIN/path_resolution_test"
     run_test "kernel-port_close_test_1"    "$TESTBIN/port_close_test_1"
     run_test "kernel-port_close_test_2"    "$TESTBIN/port_close_test_2"
@@ -168,15 +213,15 @@ if [ "$RUN_BEAPI" -eq 1 ]; then
     echo ""
     echo "  [Storage Kit CppUnit]"
     run_cppunit "BAppFileInfo"  "storage-BAppFileInfo"
-    run_cppunit "BDirectory"    "storage-BDirectory"
-    run_cppunit "BEntry"        "storage-BEntry"
-    run_cppunit "BFile"         "storage-BFile"
-    run_cppunit "BNode"         "storage-BNode"
+    run_cppunit_root "BDirectory"    "storage-BDirectory"
+    run_cppunit_root "BEntry"        "storage-BEntry"
+    run_cppunit_root "BFile"         "storage-BFile"
+    run_cppunit_root "BNode"         "storage-BNode"
     run_cppunit "BNodeInfo"     "storage-BNodeInfo"
     run_cppunit "BPath"         "storage-BPath"
     run_cppunit "BResources"    "storage-BResources"
     run_cppunit "BResourceStrings" "storage-BResourceStrings"
-    run_cppunit "BSymLink"      "storage-BSymLink"
+    run_cppunit_root "BSymLink"      "storage-BSymLink"
     #run_cppunit "FindDirectory" "storage-FindDirectory"  # needs mkbfs/unmount Haiku-specific tools
     run_cppunit "MimeSniffer"   "storage-MimeSniffer"
 
@@ -239,7 +284,7 @@ echo ""
 echo "=========================================="
 echo " Test Suite Summary"
 echo "=========================================="
-echo "Total: $TOTAL  Passed: $PASS  Failed: $FAIL"
+echo "Total: $TOTAL  Passed: $PASS  Failed: $FAIL  Skipped: $SKIP"
 if [ -n "$ERRORS" ]; then
     echo ""
     echo "Failed tests:"

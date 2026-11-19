@@ -38,4 +38,5 @@ target_compile_definitions(Deskbar PRIVATE
 	-D_SUPPORTS_FEATURE_SCRIPTING=1
 )
 
-UsePrivateHeaders(Deskbar app interface tracker)
+UsePrivateHeaders(Deskbar app interface tracker kernel)
+DoCatalogs("x-vnd.Be-TSKB" apps/deskbar)

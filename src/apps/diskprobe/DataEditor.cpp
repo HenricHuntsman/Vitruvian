@@ -14,6 +14,8 @@
 #include <fs_attr.h>
 #include <fs_info.h>
 
+#include <linux/fs.h>
+
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -449,8 +451,6 @@ DataEditor::SetTo(BEntry &entry, const char *attribute)
 
 	entry.GetRef(&fAttributeRef);
 
-	bool isFileSystem = false;
-
 	if (entry.IsDirectory()) {
 		// we redirect root directories to their volumes
 		BDirectory directory(&entry);
@@ -466,8 +466,6 @@ DataEditor::SetTo(BEntry &entry, const char *attribute)
 			entry.GetStat(&stat);
 
 			fBlockSize = info.block_size;
-			if (fBlockSize > 0 && fBlockSize <= 65536)
-				isFileSystem = true;
 		}
 	}
 
@@ -497,23 +495,28 @@ DataEditor::SetTo(BEntry &entry, const char *attribute)
 		fSize = info.size;
 		fType = info.type;
 	} else if (fIsDevice) {
-		device_geometry geometry;
 		int device = fFile.Dup();
-		if (device < 0 || ioctl(device, B_GET_GEOMETRY, &geometry,
-				sizeof(geometry)) < 0) {
-			if (device >= 0)
-				close(device);
+		if (device < 0) {
 			fFile.Unset();
 			return B_ERROR;
 		}
-		close(device);
 
-		fSize = 1LL * geometry.head_count * geometry.cylinder_count
-			* geometry.sectors_per_track * geometry.bytes_per_sector;
+		uint64_t size64 = 0;
+		if (ioctl(device, BLKGETSIZE64, &size64) == 0 && size64 > 0) {
+			fSize = (off_t)size64;
+		} else {
+			// Fall back to file size
+			if (fFile.GetSize(&fSize) != B_OK)
+				fSize = 0;
+		}
+
 		if (fSize < 0)
 			fSize = 0;
-		if (!isFileSystem)
-			fBlockSize = geometry.bytes_per_sector;
+
+		int blockSize = 0;
+		if (ioctl(device, BLKSSZGET, &blockSize) == 0 && blockSize > 0)
+			fBlockSize = blockSize;
+		close(device);
 	} else if (entry.IsDirectory() || entry.IsSymLink()) {
 		fSize = 0;
 		fIsReadOnly = true;

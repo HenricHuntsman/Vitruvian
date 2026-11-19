@@ -85,7 +85,7 @@ public:
 			const BBitmap*	SmallIcon() const { return fSmallIcon; }
 			const BBitmap*	LargeIcon() const { return fLargeIcon; }
 
-			void			CacheTeamIcons(int32 small, int32 large);
+			status_t		CacheTeamIcons(int32 small, int32 large);
 
 private:
 			BList*			fTeams;
@@ -229,6 +229,9 @@ static const int32 kVerticalMargin = 10;
 static const int32 kTeamIconSize = 48;
 
 static const int32 kWindowScrollSteps = 3;
+
+// Legacy Haiku keycode (hybrid space, key <= 0x7f); not an evdev code.
+static const int32 kBacktickKey = 0x11;
 
 
 
@@ -386,7 +389,7 @@ TTeamGroup::Draw(BView* view, BRect bounds, bool main)
 }
 
 
-void
+status_t
 TTeamGroup::CacheTeamIcons(int32 smallIconSize, int32 largeIconSize)
 {
 	TBarApp* app = static_cast<TBarApp*>(be_app);
@@ -396,6 +399,11 @@ TTeamGroup::CacheTeamIcons(int32 smallIconSize, int32 largeIconSize)
 		fSmallIcon = app->FetchTeamIcon(team, smallIconSize);
 		fLargeIcon = app->FetchTeamIcon(team, largeIconSize);
 	}
+
+	if (fLargeIcon == NULL || fSmallIcon == NULL)
+		return B_ERROR;
+
+	return B_OK;
 }
 
 
@@ -454,8 +462,10 @@ TSwitchManager::TSwitchManager()
 
 		TTeamGroup* group = new TTeamGroup(barTeamInfo->teams,
 			barTeamInfo->flags, barTeamInfo->name, barTeamInfo->sig);
-		group->CacheTeamIcons(fSmallIconSize, fLargeIconSize);
-		fGroupList.AddItem(group);
+		if (group->CacheTeamIcons(fSmallIconSize, fLargeIconSize) == B_OK)
+			fGroupList.AddItem(group);
+		else
+			delete group;
 
 		barTeamInfo->teams = NULL;
 		barTeamInfo->name = NULL;
@@ -525,9 +535,12 @@ TSwitchManager::MessageReceived(BMessage* message)
 
 			TTeamGroup* group = new TTeamGroup(teams, flags, strdup(name),
 				signature);
-			group->CacheTeamIcons(fSmallIconSize, fLargeIconSize);
-			fGroupList.AddItem(group);
-			fWindow->Redraw(fGroupList.CountItems() - 1);
+			if (group->CacheTeamIcons(fSmallIconSize, fLargeIconSize) == B_OK) {
+				fGroupList.AddItem(group);
+				fWindow->Redraw(fGroupList.CountItems() - 1);
+			} else {
+				delete group;
+			}
 			break;
 		}
 
@@ -541,10 +554,8 @@ TSwitchManager::MessageReceived(BMessage* message)
 				TTeamGroup* group = (TTeamGroup*)fGroupList.ItemAt(index);
 				ASSERT(group);
 				if (strcasecmp(group->Signature(), signature) == 0) {
-					if (!group->TeamList()->HasItem((void*)(addr_t)team)) {
-						group->CacheTeamIcons(fSmallIconSize, fLargeIconSize);
+					if (!group->TeamList()->HasItem((void*)(addr_t)team))
 						group->TeamList()->AddItem((void*)(addr_t)team);
-					}
 					break;
 				}
 			}
@@ -591,7 +602,7 @@ TSwitchManager::MessageReceived(BMessage* message)
 						int32 key = 0;
 						message->FindInt32("key", &key);
 
-						Process((modifiers & B_SHIFT_KEY) == 0, key == 0x11);
+						Process((modifiers & B_SHIFT_KEY) == 0, key == kBacktickKey);
 					}
 				}
 			} else
@@ -688,7 +699,7 @@ TSwitchManager::MainEntry(BMessage* message)
 			// Must be a multiple of the delay used above
 	}
 
-	Process((modifierKeys & B_SHIFT_KEY) == 0, key == 0x11);
+	Process((modifierKeys & B_SHIFT_KEY) == 0, key == kBacktickKey);
 }
 
 
@@ -776,7 +787,7 @@ TSwitchManager::QuickSwitch(BMessage* message)
 	if (message->FindInt32("team", &team) == B_OK) {
 		bool forward = (modifiers & B_SHIFT_KEY) == 0;
 
-		if (key == 0x11) {
+		if (key == kBacktickKey) {
 			// TODO: add the same switch logic we have for apps!
 			SwitchWindow(team, forward, true);
 		} else {

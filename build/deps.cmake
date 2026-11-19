@@ -48,7 +48,7 @@ DeclareDependency(
 	ICU
 	LIBRARIES	"icu"
 	PACKAGES	"libicu-dev"
-	RUNTIMES	"libicu76 (>= 76.1-4)"
+	RUNTIMES	"libicu76 (>= 76.1-4) | libicu78"
 )
 
 DeclareDependency(
@@ -62,13 +62,25 @@ DeclareDependency(
 	EVDEV
 	LIBRARIES	"evdev"
 	PACKAGES	"libevdev-dev"
-	RUNTIMES	"libevdev-dev (>= 1.13.4)"
+	RUNTIMES	"libevdev2 (>= 1.13.4)"
 	INCLUDES	"${HEADERS_PATH_BASE}/libevdev-1.0/"
 )
 
 DeclareDependency(
+	XKBCOMMON
+	LIBRARIES	"xkbcommon"
+	PACKAGES	"libxkbcommon-dev"
+	RUNTIMES	"libxkbcommon0 (>= 1.0.0)"
+)
+
+DeclareDependency(
+	XKEYBOARD_CONFIG
+	RUNTIMES	"xkb-data"
+)
+
+DeclareDependency(
 	NOTO
-	RUNTIMES	"fonts-noto-core;fonts-noto-extra;fonts-noto-mono"
+	RUNTIMES	"fonts-noto-core;fonts-noto-mono;fonts-noto-cjk"
 )
 
 DeclareDependency(
@@ -113,6 +125,13 @@ DeclareDependency(
 )
 
 DeclareDependency(
+	FDISK
+	LIBRARIES	"fdisk"
+	PACKAGES	"libfdisk-dev"
+	RUNTIMES	"libfdisk1 (>= 2.41-5)"
+)
+
+DeclareDependency(
 	NCURSES
 	LIBRARIES  "ncurses"
 	PACKAGES  "libncurses-dev"
@@ -127,60 +146,230 @@ DeclareDependency(
 )
 
 DeclareDependency(
+	OPENSSL
+	LIBRARIES  "ssl;crypto"
+	PACKAGES  "libssl-dev"
+	RUNTIMES  "libssl3t64 (>= 3.0)"
+)
+
+DeclareDependency(
 	LIBDRM
 	LIBRARIES  "drm"
 	PACKAGES  "libdrm-dev"
 	RUNTIMES  "libdrm2 (>= 2.4.114-1)"
 )
 
-#DeclareDependency(
-#	ICNS
-#	LIBRARIES	"icns"
-#	PACKAGES	"libicns-dev"
-#	RUNTIMES	"libicns1 (>= 0.8.1-3.1)"
-#)
+DeclareDependency(
+	ICNS
+	LIBRARIES	"icns"
+	PACKAGES	"libicns-dev"
+	RUNTIMES	"libicns1 (>= 0.8.1-3.1)"
+)
 
+# EXR: translator source is OpenEXR 2.x era (halfFunction.h gone in 3.x);
+# stays disabled until ported. See src/add-ons/translators/CMakeLists.txt.
 #DeclareDependency(
 #	EXR
-#	LIBRARIES	"IlmImf;Half"
+#	LIBRARIES	"OpenEXR;Imath"
 #	PACKAGES	"libopenexr-dev"
-#	RUNTIMES	"libopenexr25 (>= 2.5.4-2)"
-#	INCLUDES	"${HEADERS_PATH_BASE}/OpenEXR/"
+#	RUNTIMES	"libopenexr-3-1-30 (>= 3.1)"
+#	INCLUDES	"${HEADERS_PATH_BASE}/OpenEXR/;${HEADERS_PATH_BASE}/Imath/"
 #)
 
-#DeclareDependency(
-#	JPEG
-#	LIBRARIES	"jpeg"
-#	PACKAGES	"libjpeg-dev"
-#	RUNTIMES	"libjpeg62-turbo (>= 2.0.6-4)"
-#)
+DeclareDependency(
+	JPEG
+	LIBRARIES	"jpeg"
+	PACKAGES	"libjpeg-dev"
+	RUNTIMES	"libjpeg62-turbo (>= 2.0.6-4)"
+)
 
-#DeclareDependency(
-#	PNG
-#	LIBRARIES	"png"
-#	PACKAGES	"libpng-dev"
-#	RUNTIMES	"libpng16-16 (>= 1.6.37-3)"
-#	INCLUDES	"${HEADERS_PATH_BASE}/libpng/"
-#)
+DeclareDependency(
+	PNG
+	LIBRARIES	"png"
+	PACKAGES	"libpng-dev"
+	RUNTIMES	"libpng16-16 (>= 1.6.37-3)"
+	INCLUDES	"${HEADERS_PATH_BASE}/libpng/"
+)
 
-#DeclareDependency(
-#	TIFF
-#	LIBRARIES	"tiff"
-#	PACKAGES	"libtiff-dev"
-#	RUNTIMES	"libtiff6 (>= 4.5.0-1)"
-#)
+DeclareDependency(
+	TIFF
+	LIBRARIES	"tiff"
+	PACKAGES	"libtiff-dev"
+	RUNTIMES	"libtiff6 (>= 4.5.0-1)"
+)
 
-#DeclareDependency(
-#	WEBP
-#	LIBRARIES	"webp"
-#	PACKAGES	"libwebp-dev"
-#	RUNTIMES	"libwebp6 (>= 0.6.1-2.1)"
-#)
+DeclareDependency(
+	WEBP
+	LIBRARIES	"webp"
+	PACKAGES	"libwebp-dev"
+	RUNTIMES	"libwebp7 (>= 1.2.0)"
+)
+
+DeclareDependency(
+	AVIF
+	LIBRARIES	"avif"
+	PACKAGES	"libavif-dev"
+	RUNTIMES	"libavif16 (>= 1.0)"
+)
+
+# JASPER (libjasper-dev) was removed from Debian for unfixed CVEs; the
+# jpeg2000 translator that uses it stays disabled until ported to OpenJPEG.
+
+DeclareDependency(
+	GL
+	LIBRARIES  "GL"
+	PACKAGES  "libgl-dev"
+	RUNTIMES  "libgl1 (>= 1.0)"
+)
+
+DeclareDependency(
+	GLU
+	LIBRARIES  "GLU"
+	PACKAGES  "libglu1-mesa-dev"
+	RUNTIMES  "libglu1-mesa"
+)
+
+DeclareDependency(
+	EGL
+	LIBRARIES  "EGL"
+	PACKAGES  "libegl-dev"
+	RUNTIMES  "libegl1 (>= 1.0)"
+)
+
+DeclareDependency(
+	GBM
+	LIBRARIES  "gbm"
+	PACKAGES  "libgbm-dev"
+	RUNTIMES  "libgbm1 (>= 21.0)"
+)
 
 DeclareDependency(
 	SHELL_ATTR
 	PACKAGES  "attr"
 	RUNTIMES  "attr"
+)
+
+DeclareDependency(
+	PIPEWIRE
+	LIBRARIES  "pipewire-0.3"
+	PACKAGES   "libpipewire-0.3-dev"
+	RUNTIMES   "libpipewire-0.3-0 (>= 0.3.40)"
+	INCLUDES   "${HEADERS_PATH_BASE}/pipewire-0.3/"
+)
+
+DeclareDependency(
+	SPA
+	PACKAGES   "libspa-0.2-dev"
+	INCLUDES   "${HEADERS_PATH_BASE}/spa-0.2/"
+)
+
+DeclareDependency(
+	GSTREAMER
+	LIBRARIES  "gstreamer-1.0;gstapp-1.0;gstaudio-1.0;gstvideo-1.0;gstpbutils-1.0;gobject-2.0;glib-2.0"
+	PACKAGES   "libgstreamer1.0-dev;libgstreamer-plugins-base1.0-dev"
+	RUNTIMES   "libgstreamer1.0-0 (>= 1.18);gstreamer1.0-plugins-base;gstreamer1.0-plugins-good;gstreamer1.0-plugins-bad;gstreamer1.0-libav"
+	INCLUDES   "${HEADERS_PATH_BASE}/gstreamer-1.0/;${HEADERS_PATH_BASE}/glib-2.0/;${VITRUVIAN_CHROOT_PATH}/usr/lib/${VITRUVIAN_MULTIARCH_TRIPLE}/glib-2.0/include/"
+)
+
+# Softsynth engine. Debian packages fluidsynth 2.x as libfluidsynth3;
+# the -dev package supplies fluidsynth.h. Runtime name verified against
+# Debian trixie packaging; a missing SF3 bank falls back to the SF2 GM bank.
+DeclareDependency(
+	FLUIDSYNTH
+	LIBRARIES  "fluidsynth"
+	PACKAGES   "libfluidsynth-dev"
+	RUNTIMES   "libfluidsynth3 (>= 2.3)"
+	INCLUDES   "${HEADERS_PATH_BASE}/fluidsynth/"
+)
+
+DeclareDependency(
+	BLUETOOTH
+	PACKAGES   "libbluetooth-dev"
+	RUNTIMES   "bluez;bluez-obexd"
+)
+
+DeclareDependency(
+	NETWORKMANAGER
+	PACKAGES   "libnm-dev"
+	RUNTIMES   "network-manager;modemmanager"
+)
+
+DeclareDependency(
+	GLIB
+	PACKAGES   "libglib2.0-dev"
+	RUNTIMES   "libglib2.0-0"
+)
+
+DeclareDependency(
+	CUPS
+	LIBRARIES  "cups"
+	PACKAGES   "libcups2-dev"
+	RUNTIMES   "libcups2t64"
+)
+
+DeclareDependency(
+	CAIRO
+	LIBRARIES	"cairo"
+	PACKAGES	"libcairo2-dev"
+	RUNTIMES	"libcairo2"
+)
+
+DeclareDependency(
+	SANE
+	LIBRARIES	"sane"
+	PACKAGES	"libsane-dev"
+	RUNTIMES	"libsane1"
+)
+
+DeclareDependency(
+	LILV
+	LIBRARIES  "lilv-0"
+	PACKAGES   "liblilv-dev"
+	RUNTIMES   "liblilv-0-0"
+	INCLUDES   "${HEADERS_PATH_BASE}/lilv-0/"
+)
+
+DeclareDependency(
+	SUIL
+	LIBRARIES  "suil-0"
+	PACKAGES   "libsuil-dev"
+	RUNTIMES   "libsuil-0-0"
+	INCLUDES   "${HEADERS_PATH_BASE}/suil-0/"
+)
+
+DeclareDependency(
+	LV2
+	PACKAGES   "lv2-dev"
+	INCLUDES   "${HEADERS_PATH_BASE}/lv2/"
+)
+
+DeclareDependency(
+	LADSPA
+	PACKAGES   "ladspa-sdk"
+	INCLUDES   "${HEADERS_PATH_BASE}/ladspa/"
+)
+
+# WPE WebKit2 dependencies (web kit / net+ browser)
+# wpebackend-fdo is the web-process renderer backend.
+DeclareDependency(
+	WPE_WEBKIT
+	LIBRARIES  "wpe-webkit-2.0"
+	PACKAGES   "libwpewebkit-2.0-dev;libwpe-1.0-dev;libwpebackend-fdo-1.0-dev"
+	RUNTIMES   "libwpewebkit-2.0-1;libwpe-1.0-1;libwpebackend-fdo-1.0-1"
+)
+
+DeclareDependency(
+	GLESV2
+	LIBRARIES  "GLESv2"
+	PACKAGES   "libgles-dev"
+	RUNTIMES   "libgles2"
+)
+
+DeclareDependency(
+	WAYLAND_SERVER
+	LIBRARIES  "wayland-server"
+	PACKAGES   "libwayland-dev"
+	RUNTIMES   "libwayland-server0"
 )
 
 # Dependencies for Debug builds
@@ -191,7 +380,19 @@ DeclareDependency(
 	BACKTRACE
 	LIBRARIES  "backtrace"
 	PACKAGES  "libbacktrace-dev"
-	RUNTIMES  "libbacktrace-dev (>= 0.1-4)"
+	RUNTIMES  "libbacktrace0 (>= 0.1-4)"
+)
+
+DeclareDependency(
+	GDB
+	PACKAGES  "gdb"
+	RUNTIMES  "gdb"
+)
+
+DeclareDependency(
+	STRACE
+	PACKAGES  "strace"
+	RUNTIMES  "strace"
 )
 
 endif()

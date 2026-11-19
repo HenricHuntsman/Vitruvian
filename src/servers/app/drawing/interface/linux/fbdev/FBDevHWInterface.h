@@ -8,13 +8,11 @@
 
 #include "HWInterface.h"
 
-#include "LibInputEventStream.h"
+#include "FBDevBuffer.h"
 #include "TTy.h"
 
 #include <linux/fb.h>
 
-
-class FBDevBuffer;
 
 class FBDevHWInterface : public HWInterface {
 public:
@@ -23,6 +21,7 @@ public:
 
 	virtual	status_t			Initialize();
 	virtual	status_t			Shutdown();
+	virtual status_t			InitCheck() const;
 
 	virtual	EventStream*		CreateEventStream();
 
@@ -43,6 +42,8 @@ public:
 									const display_mode* low,
 									const display_mode* high);
 
+	virtual status_t			GetPreferredMode(display_mode* mode);
+
 	virtual sem_id				RetraceSemaphore();
 	virtual status_t			WaitForRetrace(
 									bigtime_t timeout = B_INFINITE_TIMEOUT);
@@ -58,20 +59,59 @@ public:
 	virtual	RenderingBuffer*	BackBuffer() const;
 	virtual	bool				IsDoubleBuffered() const;
 
+	virtual	void				OnSeatEnabled();
+	virtual	void				OnSeatDisabled();
+
 	virtual	status_t			CopyBackToFront(const BRect& frame);
+	virtual	status_t			CopyBackToFront(const BRegion& region);
 
 private:
-			LibInputEventStream* fEventStream;
+	enum { kMaxPanningPages = 3 };
 
-			FBDevBuffer*		fBackBuffer;
+			void				_EnterGraphicsMode();
+			void				_LeaveGraphicsMode();
+			void				_AdoptVar(const struct fb_var_screeninfo& var);
+
+			void				_ProbePanning();
+			void				_DropPanning(const char* reason);
+			void				_RestoreScanoutOrigin();
+			bool				_PanTo(uint32 page);
+			void				_PresentRegion(BRegion& region);
+			void				_BlitToPage(uint32 page,
+									const BRegion& region);
+
+	static	int					_GetVarOp(void* context,
+									struct fb_var_screeninfo* var);
+	static	int					_GetFixOp(void* context,
+									struct fb_fix_screeninfo* fix);
+	static	int					_SetVarOp(void* context,
+									struct fb_var_screeninfo* var);
+	static	int					_PanOp(void* context,
+									const struct fb_var_screeninfo* var);
+	static	int					_WaitVsyncOp(void* context);
+
 			FBDevBuffer*		fFrontBuffer;
+			FBDevPage			fFrontPageView;
+			RenderingBuffer*	fMemBackBuffer;
 
 			display_mode		fDisplayMode;
 
 			int					fFrameBuffer;
+			int					fTTY;
 
 			struct fb_fix_screeninfo	fInfo;
 			struct fb_var_screeninfo	fVInfo;
+
+			bool				fModeSetSupported;
+			bool				fBlankSupported;
+			bool				fPanningSupported;
+			bool				fVsyncSupported;
+			uint32				fPageCount;
+			uint32				fFrontPage;
+			BRegion				fPageDirty[kMaxPanningPages];
+			uint32				fDPMSState;
+
+			EventStream*		fEventStream;
 };
 
 #endif // VIEW_GRAPHICS_CARD_H

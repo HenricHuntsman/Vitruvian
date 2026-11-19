@@ -157,7 +157,7 @@ ControlsView::VolumeTabView::TabFrame(int32 index) const
 	float height = BTabView::TabFrame(index).Height();
 	float x = 0.0f;
 	float width = 0.0f;
-	float minStringWidth = StringWidth("Haiku");
+	float minStringWidth = StringWidth("MMMM");
 	int32 countTabs = CountTabs();
 
 	// calculate the total width if no truncation is made at all
@@ -255,12 +255,21 @@ ControlsView::VolumeTabView::MessageReceived(BMessage* message)
 		case B_NODE_MONITOR:
 			switch (message->FindInt32("opcode")) {
 				case B_DEVICE_MOUNTED:
-					_AddVolume(message->FindInt32("new device"));
+				{
+					// node monitor posts device as UInt64 (dev_t).
+					uint64 rawDevice;
+					if (message->FindUInt64("new device", &rawDevice) == B_OK)
+						_AddVolume((dev_t)rawDevice);
 					break;
+				}
 
 				case B_DEVICE_UNMOUNTED:
-					_RemoveVolume(message->FindInt32("device"));
+				{
+					uint64 rawDevice;
+					if (message->FindUInt64("device", &rawDevice) == B_OK)
+						_RemoveVolume((dev_t)rawDevice);
 					break;
+				}
 			}
 			break;
 

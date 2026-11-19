@@ -1,5 +1,8 @@
+add_subdirectory(janus)
+add_subdirectory(janus_session)
 add_subdirectory(app)
 add_subdirectory(input)
 add_subdirectory(mount)
 add_subdirectory(registrar)
 add_subdirectory(notification)
+add_subdirectory(keystore)

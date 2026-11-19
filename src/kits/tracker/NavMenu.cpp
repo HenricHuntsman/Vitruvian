@@ -1,4 +1,7 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
+ */
+/*
 Open Tracker License
 
 Terms and Conditions
@@ -402,7 +405,7 @@ BNavMenu::StartBuildingItemList()
 {
 	BEntry entry;
 
-	if (fNavDir.dev() == B_INVALID_DEV) {
+	if (fNavDir.vdevice() == B_INVALID_DEV) {
 		return false;
 	}
 	status_t setErr = entry.SetTo(&fNavDir, true);
@@ -417,13 +420,16 @@ BNavMenu::StartBuildingItemList()
 
 	fIteratingDesktop = false;
 
+	// if ref is the root item then build list of volume root dirs
+#ifndef __VOS__
 	BDirectory parent;
 	status_t status = entry.GetParent(&parent);
-
-	// if ref is the root item then build list of volume root dirs
 	fFlags = uint8((fFlags & ~kVolumesOnly) | (status == B_ENTRY_NOT_FOUND ? kVolumesOnly : 0));
 	if ((fFlags & kVolumesOnly) != 0)
 		return true;
+#else
+	fFlags &= ~kVolumesOnly;
+#endif
 
 	Model startModel(&entry, true);
 
@@ -451,13 +457,15 @@ BNavMenu::StartBuildingItemList()
 		volRoster.Rewind();
 		BVolume volume;
 		fContainer = new EntryIteratorList();
+		BObjectList<node_ref, true> seen(4);
 
 		while (volRoster.GetNextVolume(&volume) == B_OK) {
 			if (volume.IsReadOnly() || !volume.IsPersistent() || volume.Capacity() == 0)
 				continue;
 
 			BDirectory trashDir;
-			if (FSGetTrashDir(&trashDir, volume.Device()) == B_OK) {
+			if (FSGetTrashDir(&trashDir, volume.Device()) == B_OK
+				&& FSRecordTrashDir(&seen, &trashDir)) {
 				EntryIteratorList* iteratorList = dynamic_cast<EntryIteratorList*>(fContainer);
 				ASSERT(iteratorList != NULL);
 				if (iteratorList != NULL)
@@ -586,9 +594,16 @@ BNavMenu::AddNextItem()
 void
 BNavMenu::AddOneItem(Model* model)
 {
-	BMenuItem* item = NewModelItem(model, &fMessage, fMessenger, false,
-		dynamic_cast<BContainerWindow*>(fParentWindow),
-		fTypesList, &fTrackingHook);
+	BMenuItem* item = NULL;
+	try {
+		item = NewModelItem(model, &fMessage, fMessenger, false,
+			dynamic_cast<BContainerWindow*>(fParentWindow),
+			fTypesList, &fTrackingHook);
+	} catch (...) {
+		// ModelMenuItem throws if the model copy fails to open (e.g. device
+		// nodes in /dev that are kUnknownNode type). Skip the item.
+		return;
+	}
 
 	if (item != NULL)
 		fItemList->AddItem(item);

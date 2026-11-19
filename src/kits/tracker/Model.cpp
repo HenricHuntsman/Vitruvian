@@ -30,6 +30,8 @@ Tracker(TM), Be(R), BeOS(R), and BeIA(TM) are trademarks or registered trademark
 of Be Incorporated in the United States and other countries. Other brand product
 names are registered trademarks or trademarks of their respective holders.
 All rights reserved.
+
+Copyright 2026, Dario Casalinuovo. All rights reserved.
 */
 
 //	Dedicated to BModel
@@ -41,12 +43,21 @@ All rights reserved.
 
 #include "Model.h"
 
+#include <fcntl.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <strings.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <fs_info.h>
 #include <fs_attr.h>
+
+#include <OS.h>
+#include <VRefCache.h>
 
 #include <AppDefs.h>
 #include <Bitmap.h>
@@ -77,6 +88,13 @@ All rights reserved.
 
 #undef B_TRANSLATION_CONTEXT
 #define B_TRANSLATION_CONTEXT "Model"
+
+
+// BNode that adopts an already-opened fd (used for O_PATH-only handles).
+class BNodeFromFd : public BNode {
+public:
+	explicit BNodeFromFd(int fd) { set_fd(fd); }
+};
 
 
 #ifdef CHECK_OPEN_MODEL_LEAKS
@@ -115,8 +133,9 @@ Model::Model(const Model& other)
 	fHasLocalizedName(other.fHasLocalizedName),
 	fLocalizedNameIsCached(other.fLocalizedNameIsCached)
 {
-	fStatBuf.st_dev = other.NodeRef()->dev();
-	fStatBuf.st_ino = other.NodeRef()->ino();
+	fStatBuf = other.fStatBuf;
+	fCreationTime = other.fCreationTime;
+	fNodeRef = other.fNodeRef;
 
 	if (other.IsSymLink() && other.LinkTo())
 		fLinkTo = new Model(*other.LinkTo());
@@ -124,9 +143,8 @@ Model::Model(const Model& other)
 	fStatus = OpenNode(other.IsNodeOpenForWriting());
 	if (fStatus == B_OK) {
 		ASSERT(fNode);
-		fNode->GetStat(&fStatBuf);
-		ASSERT(fStatBuf.st_dev == other.NodeRef()->dev());
-		ASSERT(fStatBuf.st_ino == other.NodeRef()->ino());
+		_ReadStat(fNode);
+		fNode->GetNodeRef(&fNodeRef);
 	}
 	if (!other.IsNodeOpen())
 		CloseNode();
@@ -218,6 +236,44 @@ Model::~Model()
 
 
 status_t
+Model::_ReadStat(const BStatable* node)
+{
+	struct statx stx;
+	status_t error = node->GetStatX(&stx);
+	if (error == B_OK)
+		_SetStat(stx);
+	return error;
+}
+
+
+void
+Model::_SetStat(const struct statx& stx)
+{
+	memset(&fStatBuf, 0, sizeof(fStatBuf));
+	fStatBuf.st_dev = makedev(stx.stx_dev_major, stx.stx_dev_minor);
+	fStatBuf.st_rdev = makedev(stx.stx_rdev_major, stx.stx_rdev_minor);
+	fStatBuf.st_ino = stx.stx_ino;
+	fStatBuf.st_mode = stx.stx_mode;
+	fStatBuf.st_nlink = stx.stx_nlink;
+	fStatBuf.st_uid = stx.stx_uid;
+	fStatBuf.st_gid = stx.stx_gid;
+	fStatBuf.st_size = stx.stx_size;
+	fStatBuf.st_blksize = stx.stx_blksize;
+	fStatBuf.st_blocks = stx.stx_blocks;
+	fStatBuf.st_atim.tv_sec = stx.stx_atime.tv_sec;
+	fStatBuf.st_atim.tv_nsec = stx.stx_atime.tv_nsec;
+	fStatBuf.st_mtim.tv_sec = stx.stx_mtime.tv_sec;
+	fStatBuf.st_mtim.tv_nsec = stx.stx_mtime.tv_nsec;
+	fStatBuf.st_ctim.tv_sec = stx.stx_ctime.tv_sec;
+	fStatBuf.st_ctim.tv_nsec = stx.stx_ctime.tv_nsec;
+
+	// filesystems without btime fall back to mtime
+	fCreationTime = (stx.stx_mask & STATX_BTIME) != 0
+		? stx.stx_btime.tv_sec : stx.stx_mtime.tv_sec;
+}
+
+
+status_t
 Model::SetTo(const BEntry* entry, bool open, bool writable)
 {
 	delete fNode;
@@ -231,11 +287,13 @@ Model::SetTo(const BEntry* entry, bool open, bool writable)
 	if (fStatus != B_OK)
 		return fStatus;
 
-	fStatus = entry->GetStat(&fStatBuf);
+	fStatus = _ReadStat(entry);
 	if (fStatus != B_OK)
 		return fStatus;
 
 	fStatus = OpenNode(writable);
+	if (fStatus == B_OK && fNode != NULL)
+		fNode->GetNodeRef(&fNodeRef);
 	if (!open)
 		CloseNode();
 
@@ -263,11 +321,13 @@ Model::SetTo(const entry_ref* newRef, bool traverse, bool open, bool writable)
 	else
 		fEntryRef = *newRef;
 
-	fStatus = tmpEntry.GetStat(&fStatBuf);
+	fStatus = _ReadStat(&tmpEntry);
 	if (fStatus != B_OK)
 		return fStatus;
 
 	fStatus = OpenNode(writable);
+	if (fStatus == B_OK && fNode != NULL)
+		fNode->GetNodeRef(&fNodeRef);
 	if (!open)
 		CloseNode();
 
@@ -286,20 +346,37 @@ Model::SetTo(const node_ref* dirNode, const node_ref* nodeRef,
 	fBaseType = kUnknownNode;
 	fMimeType = "";
 
-	fStatBuf.st_dev = nodeRef->dereference().dev();
-	fStatBuf.st_ino = nodeRef->dereference().ino();
-	fEntryRef = entry_ref(dirNode->dev(), dirNode->ino(), name);
+	fEntryRef = entry_ref(*dirNode, name);
 
-	BEntry tmpNode(&fEntryRef);
-	fStatus = tmpNode.InitCheck();
-	if (fStatus != B_OK)
-		return fStatus;
-
-	fStatus = tmpNode.GetStat(&fStatBuf);
+	// Open the parent dir fd directly to fstatat the entry — avoids opening
+	// and vref-creating the child just to get its stat.
+	if (dirNode->is_virtual()) {
+		int dirFd = BPrivate::VRefCache::OpenPath(dirNode->id());
+		if (dirFd < 0) {
+			fStatus = (status_t)dirFd;
+			return fStatus;
+		}
+		struct statx stx;
+		if (statx(dirFd, name, AT_SYMLINK_NOFOLLOW | AT_STATX_SYNC_AS_STAT,
+				STATX_BASIC_STATS | STATX_BTIME, &stx) < 0) {
+			fStatus = (status_t)-errno;
+		} else {
+			_SetStat(stx);
+			fStatus = B_OK;
+		}
+		close(dirFd);
+	} else {
+		BEntry tmpNode(&fEntryRef);
+		fStatus = tmpNode.InitCheck();
+		if (fStatus == B_OK)
+			fStatus = _ReadStat(&tmpNode);
+	}
 	if (fStatus != B_OK)
 		return fStatus;
 
 	fStatus = OpenNode(writable);
+	if (fStatus == B_OK && fNode != NULL)
+		fNode->GetNodeRef(&fNodeRef);
 
 	if (!open)
 		CloseNode();
@@ -340,13 +417,13 @@ Model::CompareFolderNamesFirst(const Model* compare) const
 	// sort volume as a directory if capacity is 0
 
 	if (meIsVolume) {
-		BVolume volume(resolved->NodeRef()->dereference().dev());
+		BVolume volume(resolved->NodeRef()->device());
 		if (volume.InitCheck() == B_OK && volume.Capacity() == 0)
 			meIsVolume = false;
 	}
 
 	if (otherIsVolume) {
-		BVolume volume(resolvedCompare->NodeRef()->dereference().dev());
+		BVolume volume(resolvedCompare->NodeRef()->device());
 		if (volume.InitCheck() == B_OK && volume.Capacity() == 0)
 			otherIsVolume = false;
 	}
@@ -376,6 +453,8 @@ Model::Name() const
 	static const char* kRootNodeName = B_TRANSLATE_MARK(B_DISKS_DIR_NAME);
 	static const char* kTrashNodeName = B_TRANSLATE_MARK(B_TRASH_DIR_NAME);
 	static const char* kDesktopNodeName = B_TRANSLATE_MARK(B_DESKTOP_DIR_NAME);
+	static const char* kHomeNodeName = B_TRANSLATE_MARK_ALL("home",
+		"B_USER_DIRECTORY", "");
 
 	switch (fBaseType) {
 		case kRootNode:
@@ -395,6 +474,9 @@ Model::Name() const
 		default:
 			break;
 	}
+
+	if (WellKnowEntryList::Match(NodeRef()) == B_USER_DIRECTORY)
+		return B_TRANSLATE_NOCOLLECT_ALL(kHomeNodeName, "B_USER_DIRECTORY", "");
 
 	if (fHasLocalizedName && gLocalizedNamePreferred)
 		return fLocalizedName.String();
@@ -427,7 +509,7 @@ Model::UpdateStatAndOpenNode(bool writable)
 	if (fStatus != B_OK)
 		return fStatus;
 
-	fStatus = tmpEntry.GetStat(&fStatBuf);
+	fStatus = _ReadStat(&tmpEntry);
 	if (fStatus != B_OK)
 		return fStatus;
 
@@ -490,26 +572,31 @@ Model::OpenNodeCommon(bool writable)
 			break;
 
 		default:
-#if DEBUG
-			PrintToStream();
-#endif
-			TRESPASS();
-				// this can only happen if GetStat failed before,
-				// in which case we shouldn't be here
-
-			// ToDo: Obviously, we can also be here if the type could not
-			// be determined, for example for block devices (so the TRESPASS()
-			// macro shouldn't be used here)!
-			return fStatus = B_ERROR;
+			// Device nodes, sockets, pipes: O_PATH gives an fd for stat/xattr
+			// without ever opening the underlying device.
+			BPath path(&fEntryRef);
+			int rawFd = -1;
+			if (path.InitCheck() == B_OK)
+				rawFd = open(path.Path(), O_PATH | O_CLOEXEC);
+			if (rawFd < 0)
+				return fStatus = B_ERROR;
+			delete fNode;
+			fNode = new BNodeFromFd(rawFd);
+			break;
 	}
 
 	fStatus = fNode->InitCheck();
 	if (fStatus != B_OK) {
+		fprintf(stderr, "Model::OpenNodeCommon: fNode->InitCheck() failed: %s (%" B_PRId32
+			") name=%s baseType=%d\n",
+			strerror(fStatus), fStatus, Name(), fBaseType);
 		delete fNode;
 		fNode = NULL;
 		// original code snoozed an error here and returned B_OK
 		return fStatus;
 	}
+
+	fNode->GetNodeRef(&fNodeRef);
 
 	fWritable = writable;
 
@@ -694,14 +781,6 @@ Model::FinishSettingUpType()
 
 		case kVolumeNode:
 		{
-			if (*NodeRef() == node_ref(fEntryRef.device, fEntryRef.directory)) {
-				// promote from volume to file system root
-				fBaseType = kRootNode;
-				fMimeType = B_ROOT_MIMETYPE;
-				break;
-			}
-
-			// volumes have to have a B_VOLUME_MIMETYPE type
 			fMimeType = B_VOLUME_MIMETYPE;
 			if (fIconFrom == kUnknownNotFromNode) {
 				if (WellKnowEntryList::Match(NodeRef()) > (directory_which)-1)
@@ -711,7 +790,7 @@ Model::FinishSettingUpType()
 			}
 
 			char name[B_FILE_NAME_LENGTH];
-			BVolume volume(NodeRef()->dereference().dev());
+			BVolume volume(NodeRef()->device());
 			if (volume.InitCheck() == B_OK && volume.GetName(name) == B_OK) {
 				if (fVolumeName != NULL)
 					DeletePreferredAppVolumeNameLinkTo();
@@ -907,12 +986,10 @@ Model::UpdateEntryRef(const node_ref* dirNode, const char* name)
 		fVolumeName = strdup(name);
 	}
 
-	fEntryRef = entry_ref(dirNode->dev(), dirNode->ino(), fEntryRef.name);
-
-	if (fEntryRef.name != NULL && strcmp(fEntryRef.name, name) == 0)
-		return;
-
-	fEntryRef.set_name(name);
+	if (fEntryRef.device() != dirNode->device() || fEntryRef.directory() != dirNode->node())
+		fEntryRef = entry_ref(*dirNode, name);
+	else if (fEntryRef.name == NULL || strcmp(fEntryRef.name, name) != 0)
+		fEntryRef.set_name(name);
 }
 
 
@@ -921,9 +998,13 @@ Model::WatchVolumeAndMountPoint(uint32 , BHandler* target)
 {
 	ASSERT(IsVolume());
 
-	if (fEntryRef.name != NULL && fVolumeName != NULL
-		&& strcmp(fEntryRef.name, "boot") == 0) {
-		// watch mount point for boot volume (at "/" in Vitruvian)
+	// Every volume-root Model's fEntryRef.name is "." (never "/"), and that's
+	// true for every mounted volume's root, so compare the resolved path instead.
+	BEntry entry(&fEntryRef);
+	BPath path;
+	if (fVolumeName != NULL && entry.InitCheck() == B_OK
+		&& entry.GetPath(&path) == B_OK && strcmp(path.Path(), "/") == 0) {
+		// watch mount point for root volume
 		BEntry mountPointEntry("/");
 		Model mountPointModel(&mountPointEntry);
 
@@ -944,13 +1025,8 @@ Model::AttrChanged(const char* attrName)
 	// return true if icon needs updating
 
 	ASSERT(IsNodeOpen());
-	if (attrName != NULL
-		&& (strcmp(attrName, kAttrIcon) == 0
-			|| strcmp(attrName, kAttrMiniIcon) == 0
-			|| strcmp(attrName, kAttrLargeIcon) == 0
-			|| strcmp(attrName, kAttrThumbnail) == 0)) {
+	if (IconAttrChanged(attrName))
 		return true;
-	}
 
 	if (attrName == NULL
 		|| strcmp(attrName, kAttrMIMEType) == 0
@@ -962,10 +1038,8 @@ Model::AttrChanged(const char* attrName)
 		else {
 			// node has a specific mime type
 			fMimeType = type;
-			if (!IsVolume() && !IsSymLink()
-				&& info.GetPreferredApp(type) == B_OK) {
+			if (!IsVolume() && !IsSymLink() && info.GetPreferredApp(type) == B_OK)
 				SetPreferredAppSignature(type);
-			}
 		}
 
 #if xDEBUG
@@ -987,6 +1061,22 @@ Model::AttrChanged(const char* attrName)
 
 
 bool
+Model::IconAttrChanged(const char* attrName)
+{
+	// called on an icon attribute changed by node monitor
+	// return true if icon needs updating
+
+	ASSERT(IsNodeOpen());
+
+	return attrName != NULL
+		&& (strcmp(attrName, kAttrIcon) == 0
+			|| strcmp(attrName, kAttrLargeIcon) == 0
+			|| strcmp(attrName, kAttrMiniIcon) == 0
+			|| strcmp(attrName, kAttrThumbnail) == 0);
+}
+
+
+bool
 Model::StatChanged()
 {
 	if (fNode == NULL)
@@ -994,7 +1084,7 @@ Model::StatChanged()
 
 	ASSERT(IsNodeOpen());
 	mode_t oldMode = fStatBuf.st_mode;
-	fStatus = fNode->GetStat(&fStatBuf);
+	fStatus = _ReadStat(fNode);
 
 	if (oldMode != fStatBuf.st_mode) {
 		bool forWriting = IsNodeOpenForWriting();
@@ -1382,9 +1472,9 @@ Model::PrintToStream(int32 level, bool deep)
 		B_PRIdDEV ", directory inode %" B_PRIdINO "\n",
 		Name() ? Name() : "**empty name**",
 		EntryRef()->name ? EntryRef()->name : "**empty ref name**",
-		NodeRef()->node,
-		NodeRef()->device,
-		EntryRef()->directory));
+		NodeRef()->vnode(),
+		NodeRef()->vdevice(),
+		EntryRef()->vdirectory()));
 	PRINT(("type %s \n", MimeType()));
 
 	PRINT(("model type: "));
@@ -1489,7 +1579,7 @@ Model::PrintToStream(int32 level, bool deep)
 		node_ref nodeRef;
 		fNode->GetNodeRef(&nodeRef);
 		PRINT(("node ref of open Node %" B_PRIdINO " %" B_PRIdDEV "\n",
-			nodeRef.node, nodeRef.device));
+			nodeRef.vnode(), nodeRef.vdevice()));
 	}
 
 	if (deep && IsSymLink()) {
@@ -1498,8 +1588,14 @@ Model::PrintToStream(int32 level, bool deep)
 		PRINT(("symlink to:\n"));
 		tmp.PrintToStream();
 	}
+
+#if 0
+	// Results in infinite recursion through TrackIconSource -> BModelOpener
+	// -> ModelNodeLatyOpener -> ModelNodeLazyOpener::OpenNode -> OpenNode -> OpenNodeCommon
+	// -> PrintToStream
 	TrackIconSource(B_MINI_ICON);
 	TrackIconSource(B_LARGE_ICON);
+#endif
 }
 
 
@@ -1531,7 +1627,7 @@ Model::TrackIconSource(icon_size size)
 	}
 
 	if (fBaseType == kVolumeNode) {
-		BVolume volume(NodeRef()->dereference().dev()); //? dereference().device
+		BVolume volume(NodeRef()->device());
 		status_t result = volume.GetIcon(&bitmap, size);
 		PRINT(("getting icon from volume %s\n", strerror(result)));
 	} else {

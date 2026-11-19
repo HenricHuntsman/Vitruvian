@@ -1,4 +1,7 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
+ */
+/*
 Open Tracker License
 
 Terms and Conditions
@@ -103,9 +106,9 @@ DumpItem(DeskbarItemInfo* item)
 {
 	printf("is addon: %i, id: %" B_PRId32 "\n", item->isAddOn, item->id);
 	printf("entry_ref:  %" B_PRIdDEV ", %" B_PRIdINO ", %s\n",
-		item->entryRef.dev(), item->entryRef.dir(), item->entryRef.name);
-	printf("node_ref:  %" B_PRIdDEV ", %" B_PRIdINO "\n", item->nodeRef.dev(),
-		item->nodeRef.ino());
+		item->entryRef.vdevice(), item->entryRef.vdirectory(), item->entryRef.name);
+	printf("node_ref:  %" B_PRIdDEV ", %" B_PRIdINO "\n", item->nodeRef.vdevice(),
+		item->nodeRef.vnode());
 }
 
 
@@ -465,7 +468,7 @@ TReplicantTray::ShowHideTime()
 	static_cast<TBarApp*>(be_app)->Settings()->showClock = showClock;
 
 	// Send a message to Time preferences telling it to update
-	BMessenger messenger("application/x-vnd.Haiku-Time");
+	BMessenger messenger("application/x-vnd.vos-Time");
 	BMessage message(kShowHideTime);
 	message.AddBool("showClock", showClock);
 	messenger.SendMessage(&message);
@@ -584,13 +587,14 @@ TReplicantTray::HandleEntryUpdate(BMessage* message)
 	switch (opcode) {
 		case B_ENTRY_MOVED:
 		{
-			entry_ref refTo;
+			entry_ref toDir;
 			node_ref node;
+			const char* name;
 			if (message->FindNodeRef("virtual:node", &node) == B_OK
-				&& message->FindRef("virtual:directory", &refTo)) {
-				// change the directory reference to
-				// the new directory
-				MoveItem(&entry_ref(node.dev(), node.ino()), refTo.dir());
+				&& message->FindRef("virtual:to directory", &toDir) == B_OK
+				&& message->FindString("name", &name) == B_OK) {
+				entry_ref entry(toDir.vdevice(), toDir.vdirectory(), name);
+				MoveItem(&entry, toDir.vdirectory());
 			}
 			break;
 		}
@@ -728,7 +732,7 @@ TReplicantTray::UnloadAddOn(node_ref* nodeRef, dev_t* device, bool which,
 			continue;
 
 		if ((which && nodeRef != NULL && item->nodeRef == *nodeRef)
-			|| (device != NULL && item->nodeRef.dereference().dev() == *device)) {
+			|| (device != NULL && item->nodeRef.device() == *device)) {
 
 			if (device != NULL && be_roster->IsRunning(&item->entryRef))
 				continue;
@@ -792,9 +796,9 @@ TReplicantTray::MoveItem(entry_ref* ref, ino_t toDirectory)
 			continue;
 
 		if (strcmp(item->entryRef.name, ref->name) == 0
-			&& item->entryRef.dereference().dev() == ref->dereference().dev()
-			&& item->entryRef.dereference().dir() == ref->dereference().dir()) {
-			item->entryRef = entry_ref(ref->dev(), toDirectory, ref->name);
+			&& item->entryRef.device() == ref->device()
+			&& item->entryRef.directory() == ref->directory()) {
+			item->entryRef = entry_ref(ref->vdevice(), toDirectory, ref->name);
 			break;
 		}
 	}
@@ -1189,11 +1193,14 @@ TReplicantTray::LocationForReplicant(int32 index, float replicantWidth)
 		// try to find free space in every row
 		for (int32 row = 0; ; loc.y += fMaxReplicantHeight + sIconGap, row++) {
 			// determine free space in this row
+			bool emptyRow = true;
 			BRect rowRect(loc.x, loc.y,
 				loc.x + Bounds().Width() - fTrayPadding,
 				loc.y + fMaxReplicantHeight);
-			if (row == 0 && !fTime->IsHidden(fTime))
+			if (row == 0 && !fTime->IsHidden(fTime)) {
 				rowRect.right -= fClockMargin + fTime->Frame().Width();
+				emptyRow = false;
+			}
 
 			BRect replicantRect = rowRect;
 			for (int32 i = 0; i < index; i++) {
@@ -1202,6 +1209,7 @@ TReplicantTray::LocationForReplicant(int32 index, float replicantWidth)
 				if (view == NULL || view->Frame().top != rowRect.top)
 					continue;
 
+				emptyRow = false;
 				// push this replicant placement past the last one
 				replicantRect.left = view->Frame().right + sIconGap + 1;
 			}
@@ -1213,6 +1221,24 @@ TReplicantTray::LocationForReplicant(int32 index, float replicantWidth)
 			// check if replicant fits in this row
 			if (replicantRect.right < rowRect.right) {
 				// replicant fits in this row
+				loc = replicantRect.LeftTop();
+				break;
+			}
+
+			// A replicant too wide for even an empty row fits nowhere; without
+			// this the search never terminates and freezes the window thread.
+			if (replicantRect.left == rowRect.left) {
+				loc = replicantRect.LeftTop();
+				break;
+			}
+
+			if (emptyRow) {
+				// this row is EMPTY: if it doesn't fit there it won't fit anywhere!
+				// Probably due to error in advertised max replicant width.
+				// Anyway, don't loop forever looking for a row which will NEVER
+				// be large enough.
+				// Even if it means this replicant will be clipped, it's better than
+				// a frozen Deskbar eating CPU like crazy in search for unobtainium.
 				loc = replicantRect.LeftTop();
 				break;
 			}
@@ -1546,7 +1572,7 @@ TDragRegion::SwitchModeForRegion(BPoint where, BRegion region,
 		return true;
 	}
 
-	fBarView->ChangeState(newState, newVertical, newLeft, newTop, true);
+	fBarView->ChangeState(newVertical, newLeft, newTop, newState, true);
 
 	return true;
 }

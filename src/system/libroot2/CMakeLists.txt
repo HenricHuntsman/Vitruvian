@@ -1,10 +1,13 @@
 target_sources(root PRIVATE
 	Team.cpp
+	exec_status.cpp
 
 	thread.cpp
 	port.cpp
 	sem.cpp
 	area.cpp
+
+	proc_read.cpp
 
 	byteorder.cpp
 	debug.cpp
@@ -15,7 +18,7 @@ target_sources(root PRIVATE
 	parsedate.cpp
 	real_time_clock.c
 	shutdown.cpp
-	system_info.c
+	system_info.cpp
 	system_revision.c
 
 	SystemWatcher.cpp
@@ -23,12 +26,15 @@ target_sources(root PRIVATE
 
 	fs/fs.cpp
 	fs/vref.cpp
+	fs/VRefCache.cpp
+	fs/VRefTrack.cpp
 	fs/node_monitor.cpp
 	fs/disk_monitor.cpp
 	fs/disk_device.cpp
 	fs/fs_info.cpp
+	fs/MountInfo.cpp
 	fs/mount.cpp
-	fs/attr_stub.cpp
+	fs/attr.cpp
 	fs/index.cpp
 	fs/query.cpp
 	fs/find_directory.cpp
@@ -53,7 +59,11 @@ target_sources(root PRIVATE
 
 	posix/strdup.c
 	posix/strndup.c
+	posix/errors.cpp
 )
+
+# Debug-only vref tracing, off by default: set VREF_TRACE=/dir and re-add this.
+# target_compile_definitions(root PRIVATE ENABLE_VREF_TRACKING)
 
 add_dependencies(root nexus)
 

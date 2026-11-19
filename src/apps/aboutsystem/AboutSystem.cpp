@@ -1,4 +1,5 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2005-2025 Haiku, Inc. All rights reserved.
  * Distributed under the terms of the MIT license.
  *
@@ -88,7 +89,7 @@
 #define B_TRANSLATION_CONTEXT "AboutWindow"
 
 
-static const char* kSignature = "application/x-vnd.Haiku-About";
+static const char* kSignature = "application/x-vnd.vos-About";
 
 static const float kWindowWidth = 500.0f;
 static const float kWindowHeight = 300.0f;
@@ -114,50 +115,16 @@ static const rgb_color kIdealBeOSRed = { 200, 0, 0, 255 };
 static const rgb_color kBlack = { 0, 0, 0, 255 };
 static const rgb_color kWhite = { 255, 255, 255, 255 };
 
-static const char* kBSDTwoClause = B_TRANSLATE_MARK("BSD (2-clause)");
 static const char* kBSDThreeClause = B_TRANSLATE_MARK("BSD (3-clause)");
 static const char* kBSDFourClause = B_TRANSLATE_MARK("BSD (4-clause)");
 static const char* kGPLv2 = B_TRANSLATE_MARK("GNU GPL v2");
 static const char* kGPLv3 = B_TRANSLATE_MARK("GNU GPL v3");
-static const char* kLGPLv2 = B_TRANSLATE_MARK("GNU LGPL v2");
 static const char* kLGPLv21 = B_TRANSLATE_MARK("GNU LGPL v2.1");
 #if 0
 static const char* kPublicDomain = B_TRANSLATE_MARK("Public Domain");
 #endif
 #ifdef __i386__
 #endif
-
-
-//	#pragma mark - TranslationComparator function
-
-
-static int
-TranslationComparator(const void* left, const void* right)
-{
-	const Translation* leftTranslation = *(const Translation**)left;
-	const Translation* rightTranslation = *(const Translation**)right;
-
-	BLanguage* language;
-	BString leftName;
-	if (BLocaleRoster::Default()->GetLanguage(leftTranslation->languageCode,
-			&language) == B_OK) {
-		language->GetName(leftName);
-		delete language;
-	} else
-		leftName = leftTranslation->languageCode;
-
-	BString rightName;
-	if (BLocaleRoster::Default()->GetLanguage(rightTranslation->languageCode,
-			&language) == B_OK) {
-		language->GetName(rightName);
-		delete language;
-	} else
-		rightName = rightTranslation->languageCode;
-
-	BCollator collator;
-	BLocale::Default()->GetCollator(&collator);
-	return collator.Compare(leftName.String(), rightName.String());
-}
 
 
 //	#pragma mark - class definitions
@@ -1111,10 +1078,20 @@ SysInfoView::_GetCPUInfo()
 
 	delete[] topology;
 
+	// Either part can be unknown (ARM has no vendor id, for one).
 	BString cpuType;
-	cpuType << get_cpu_vendor_string(cpuVendor) << " "
-		<< get_cpu_model_string(platform, cpuVendor, cpuModel)
-		<< " @ " << _GetCPUFrequency();
+	const char* vendor = get_cpu_vendor_string(cpuVendor);
+	const char* model = get_cpu_model_string(platform, cpuVendor, cpuModel);
+	if (vendor != NULL)
+		cpuType << vendor;
+	if (model != NULL) {
+		if (!cpuType.IsEmpty())
+			cpuType << " ";
+		cpuType << model;
+	}
+	if (!cpuType.IsEmpty())
+		cpuType << " ";
+	cpuType << "@ " << _GetCPUFrequency();
 
 	return cpuType;
 }
@@ -1176,7 +1153,9 @@ SysInfoView::_GetKernelDateTime(system_info* sysInfo)
 	BString kernelDateTime;
 
 	BString buildDateTime;
-	buildDateTime << sysInfo->kernel_build_date << " " << sysInfo->kernel_build_time;
+	buildDateTime << sysInfo->kernel_build_date;
+	if (sysInfo->kernel_build_time[0] != '\0')
+		buildDateTime << " " << sysInfo->kernel_build_time;
 
 	time_t buildDateTimeStamp = parsedate(buildDateTime, -1);
 
@@ -1675,6 +1654,18 @@ AboutView::_CreateCreditsView()
 		"Maxim Kutnij\n"
 		"\n");
 
+	fCreditsView->SetFontAndColor(&font, B_FONT_ALL, &fHaikuOrangeColor);
+	fCreditsView->Insert(B_TRANSLATE("Contributors:\n"));
+
+	fCreditsView->SetFontAndColor(be_plain_font, B_FONT_ALL, &fTextColor);
+	fCreditsView->Insert(
+		"Ivan Gualandri\n"
+		"Vladislav Janeček\n"
+		"Adam Milner\n"
+		"Mas Ahmad Muhammad\n"
+		"Angelo Scarnà\n"
+		"\n");
+
 	// copyrights for various projects we use
 
 	BPath mitPath;
@@ -1877,7 +1868,7 @@ AboutView::_GetLicensePath(const char* license, BPath& path)
 void
 AboutView::_AddCopyrightsFromAttribute()
 {
-#ifdef __HAIKU__
+#ifdef __VOS__
 	// open the app executable file
 	char appPath[B_PATH_NAME_LENGTH];
 	int appFD;

@@ -15,3 +15,4 @@ Application(
 )
 
 UsePrivateHeaders(StyledEdit textencoding tracker)
+DoCatalogs("x-vnd.vos-StyledEdit" apps/stylededit)

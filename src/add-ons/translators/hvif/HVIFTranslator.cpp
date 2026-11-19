@@ -32,7 +32,7 @@ static const translation_format sInputFormats[] = {
 		B_TRANSLATOR_BITMAP,
 		HVIF_TRANSLATION_QUALITY,
 		HVIF_TRANSLATION_CAPABILITY,
-		"application/x-vnd.Haiku-icon",
+		"application/x-vnd.vos-icon",
 		"Native Haiku vector icon"
 	}
 };
@@ -71,7 +71,7 @@ make_nth_translator(int32 n, image_id image, uint32 flags, ...)
 
 HVIFTranslator::HVIFTranslator()
 	: BaseTranslator(B_TRANSLATE("HVIF icons"), 
-		B_TRANSLATE("Haiku vector icon translator"),
+		B_TRANSLATE("Vector icon translator"),
 		HVIF_TRANSLATOR_VERSION,
 		sInputFormats, kNumInputFormats,
 		sOutputFormats, kNumOutputFormats,

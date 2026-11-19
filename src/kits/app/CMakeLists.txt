@@ -3,6 +3,7 @@ target_sources(be PRIVATE
 	Application.cpp
 	AppMisc.cpp
 	AppServerLink.cpp
+	BusHelpers.cpp
 	Clipboard.cpp
 	Cursor.cpp
 	DesktopLink.cpp
@@ -26,6 +27,7 @@ target_sources(be PRIVATE
 	Notification.cpp
 	PortLink.cpp
 	PropertyInfo.cpp
+	LaunchRoster.cpp
 	RegistrarDefs.cpp
 	Roster.cpp
 	RosterPrivate.cpp

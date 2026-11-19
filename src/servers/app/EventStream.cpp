@@ -1,5 +1,6 @@
 /*
  * Copyright 2005, Haiku, Inc. All Rights Reserved.
+ * Copyright 2026, Dario Casalinuovo.
  * Distributed under the terms of the MIT License.
  *
  * Authors:
@@ -115,8 +116,18 @@ InputServerStream::SendQuit()
 void
 InputServerStream::UpdateScreenBounds(BRect bounds)
 {
+	UpdateScreenBounds(bounds, 0);
+}
+
+
+void
+InputServerStream::UpdateScreenBounds(BRect bounds, int32 orientation,
+	int32 reflection)
+{
 	BMessage update(IS_SCREEN_BOUNDS_UPDATED);
 	update.AddRect("screen_bounds", bounds);
+	update.AddInt32("screen_orientation", orientation);
+	update.AddInt32("screen_reflection", reflection);
 
 	fInputServer.SendMessage(&update);
 }
@@ -179,7 +190,7 @@ InputServerStream::GetNextCursorPosition(BPoint &where, bigtime_t timeout)
 		return B_ERROR;
 	}
 
-#ifdef HAIKU_TARGET_PLATFORM_HAIKU
+#ifdef __VOS__
 	uint32 pos = atomic_get((int32*)&fCursorBuffer->pos);
 #else
 	uint32 pos = fCursorBuffer->pos;

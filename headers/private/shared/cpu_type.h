@@ -1,4 +1,5 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2004-2013, Axel Dörfler, axeld@pinc-software.de.
  * Copyright 2013, Paweł Dziepak, pdziepak@quarnos.org.
  * Distributed under the terms of the MIT License.
@@ -70,8 +71,14 @@ parse_intel(const char* name)
 				sizeof(buffer) - outIndex);
 			index += 3;
 		} else if (!strncmp(&name[index], " CPU", 4)) {
-			// Cut out the CPU string
+			// Cut out the "CPU" string
 			index += 3;
+		} else if (!strncmp(&name[index], " processor", 10)) {
+			// Cut out the "processor" string
+			index += 9;
+		} else if (!strncmp(&name[index], "  ", 2)) {
+			// Skip duplicate spaces
+			index++;
 		} else if (!strncmp(&name[index], " @", 2)) {
 			// Cut off the remainder
 			break;
@@ -239,7 +246,97 @@ get_cpuid_model_string(char *name)
 		}
 	}
 }
+
+
+static uint8
+get_intel_brand_id(void)
+{
+	cpuid_info info;
+	if (get_cpuid(&info, 1, 0) != B_OK)
+		return 0;
+	return info.regs.ebx & 0xff;
+}
+
+
+//! Manually construct a Brand String based on Brand ID for the few older CPUs
+//! that do not return a Brand String
+static const char*
+get_intel_brand_id_string(uint8 brandId, uint32 signature)
+{
+	switch (brandId) {
+		case 0x01:
+			return "Celeron";
+		case 0x02:
+			return "Pentium III";
+		case 0x04:
+			return "Pentium III";
+		case 0x03:
+			return signature == 0x06B1 ? "Celeron" : "Pentium III Xeon";
+		case 0x06:
+			return "Mobile Pentium III-M";
+		case 0x07:
+			return "Mobile Celeron";
+		default:
+			return NULL;
+	}
+}
 #endif	/* __i386__ || __x86_64__ */
+
+
+/*!	Names an ARM core from its MIDR value (see read_cpu_signature() in
+	libroot): implementer[31:24], part number[15:4].
+*/
+static const char*
+get_arm_model_string(uint32 midr)
+{
+	uint32 implementer = midr >> 24;
+	uint32 part = (midr >> 4) & 0xfff;
+
+	if (implementer == 0x41) {
+		switch (part) {
+			case 0xb76: return "ARM1176";
+			case 0xc05: return "ARM Cortex-A5";
+			case 0xc07: return "ARM Cortex-A7";
+			case 0xc08: return "ARM Cortex-A8";
+			case 0xc09: return "ARM Cortex-A9";
+			case 0xc0d: return "ARM Cortex-A12";
+			case 0xc0e: return "ARM Cortex-A17";
+			case 0xc0f: return "ARM Cortex-A15";
+			case 0xd03: return "ARM Cortex-A53";
+			case 0xd04: return "ARM Cortex-A35";
+			case 0xd05: return "ARM Cortex-A55";
+			case 0xd07: return "ARM Cortex-A57";
+			case 0xd08: return "ARM Cortex-A72";
+			case 0xd09: return "ARM Cortex-A73";
+			case 0xd0a: return "ARM Cortex-A75";
+			case 0xd0b: return "ARM Cortex-A76";
+			case 0xd0c: return "ARM Neoverse-N1";
+			case 0xd0d: return "ARM Cortex-A77";
+			case 0xd40: return "ARM Neoverse-V1";
+			case 0xd41: return "ARM Cortex-A78";
+			case 0xd44: return "ARM Cortex-X1";
+			case 0xd46: return "ARM Cortex-A510";
+			case 0xd47: return "ARM Cortex-A710";
+			case 0xd48: return "ARM Cortex-X2";
+			case 0xd49: return "ARM Neoverse-N2";
+			case 0xd4d: return "ARM Cortex-A715";
+			case 0xd4e: return "ARM Cortex-X3";
+			case 0xd80: return "ARM Cortex-A520";
+			case 0xd81: return "ARM Cortex-A720";
+			case 0xd82: return "ARM Cortex-X4";
+		}
+		return "ARM";
+	}
+	if (implementer == 0x51)
+		return "Qualcomm";
+	if (implementer == 0x61)
+		return "Apple";
+	if (implementer == 0x48)
+		return "HiSilicon";
+	if (implementer == 0x4e)
+		return "NVIDIA";
+	return NULL;
+}
 
 
 static const char*
@@ -283,52 +380,11 @@ get_cpu_model_string(enum cpu_platform platform, enum cpu_vendor cpuVendor,
 			if (model == 0xa)
 				return "Geode LX";
 		} else if (family == 6) {
-			if (model <= 2 || model == 4)
-				return "Athlon";
 			if (model == 3)
 				return "Duron";
-			if (model <= 8 || model == 0xa)
-				return "Athlon XP";
-		} else if (family == 0xf) {
-			if (model <= 4 || model == 7 || model == 8
-				|| (model >= 0xb && model <= 0xf) || model == 0x14
-				|| model == 0x18 || model == 0x1b || model == 0x1f
-				|| model == 0x23 || model == 0x2b
-				|| ((model & 0xf) == 0xf && model >= 0x2f && model <= 0x7e)) {
-				return "Athlon 64";
-			}
-			if (model == 5 || model == 0x15 || model == 0x21 || model == 0x25
-				|| model == 0x27) {
-				return "Opteron";
-			}
-			if (model == 0x1c || model == 0x2c || model == 0x7f)
-				return "Sempron 64";
-			if (model == 0x24 || model == 0x4c || model == 0x68)
-				return "Turion 64";
-		} else if (family == 0x1f) {
-			if (model == 2)
-				return "Phenom";
-			if ((model >= 4 && model <= 6) || model == 0xa) {
-				get_cpuid_model_string(cpuidName);
-				if (strcasestr(cpuidName, "Athlon") != NULL)
-					return "Athlon II";
-				return "Phenom II";
-			}
-		} else if (family == 0x3f)
-			return "A-Series";
-		else if (family == 0x5f) {
-			if (model == 1)
-				return "C-Series";
-			if (model == 2)
-				return "E-Series";
-		} else if (family == 0x6f) {
-			if (model == 1 || model == 2)
-				return "FX-Series";
-			if (model == 0x10 || model == 0x13)
-				return "A-Series";
+			if (model <= 4)
+				return "Athlon";
 		}
-
-		// Fallback to manual parsing of the model string
 		get_cpuid_model_string(cpuidName);
 		return parse_amd(cpuidName);
 	}
@@ -342,6 +398,22 @@ get_cpu_model_string(enum cpu_platform platform, enum cpu_vendor cpuVendor,
 	}
 
 	if (cpuVendor == B_CPU_VENDOR_INTEL) {
+		const char* brandIdName;
+
+		// We want to use the CPUID Brand String when the CPU returns one
+		// this should be Pentium 4 and later CPUs
+		get_cpuid_model_string(cpuidName);
+		if (cpuidName[0] != '\0')
+			return parse_intel(cpuidName);
+
+		// Some CPUs do not return a Brand String, but do return a Brand ID
+		// we can use that Brand ID to determine the CPU
+		brandIdName = get_intel_brand_id_string(get_intel_brand_id(), cpuModel);
+		if (brandIdName != NULL)
+			return parse_intel(brandIdName);
+
+		// Even older CPUs do not return a Brand ID or a Brand String, so we
+		// need to look at Model and Family
 		if (family == 5) {
 			if (model == 1 || model == 2)
 				return "Pentium";
@@ -358,58 +430,10 @@ get_cpu_model_string(enum cpu_platform platform, enum cpu_vendor cpuVendor,
 				return "Celeron";
 			if (model == 7 || model == 8 || model == 0xa || model == 0xb)
 				return "Pentium III";
-			if (model == 9 || model == 0xd) {
-				get_cpuid_model_string(cpuidName);
-				if (strcasestr(cpuidName, "Celeron") != NULL)
-					return "Pentium M Celeron";
+			if (model == 9 || model == 0xd)
 				return "Pentium M";
-			}
-			if (model == 0x1c || model == 0x26 || model == 0x36)
-				return "Atom";
-			if (model == 0xe) {
-				get_cpuid_model_string(cpuidName);
-				if (strcasestr(cpuidName, "Celeron") != NULL)
-					return "Core Celeron";
-				return "Core";
-			}
-			if (model == 0xf || model == 0x17) {
-                get_cpuid_model_string(cpuidName);
-				if (strcasestr(cpuidName, "Celeron") != NULL)
-					return "Core 2 Celeron";
-				if (strcasestr(cpuidName, "Xeon") != NULL)
-					return "Core 2 Xeon";
-				if (strcasestr(cpuidName, "Pentium") != NULL)
-					return "Pentium";
-				if (strcasestr(cpuidName, "Extreme") != NULL)
-					return "Core 2 Extreme";
-				return "Core 2";
-			}
-			if (model == 0x25) {
-				get_cpuid_model_string(cpuidName);
-				if (strcasestr(cpuidName, "i3") != NULL)
-					return "Core i3";
-				return "Core i5";
-			}
-			if (model == 0x1a || model == 0x1e) {
-				get_cpuid_model_string(cpuidName);
-				if (strcasestr(cpuidName, "Xeon") != NULL)
-					return "Core i7 Xeon";
-				return "Core i7";
-			}
-		} else if (family == 0xf) {
-			if (model <= 4) {
-				get_cpuid_model_string(cpuidName);
-				if (strcasestr(cpuidName, "Celeron") != NULL)
-					return "Pentium 4 Celeron";
-				if (strcasestr(cpuidName, "Xeon") != NULL)
-					return "Pentium 4 Xeon";
-				return "Pentium 4";
-			}
 		}
-
-		// Fallback to manual parsing of the model string
-		get_cpuid_model_string(cpuidName);
-		return parse_intel(cpuidName);
+		return NULL;
 	}
 
 	if (cpuVendor == B_CPU_VENDOR_NATIONAL_SEMICONDUCTOR) {
@@ -469,6 +493,9 @@ get_cpu_model_string(enum cpu_platform platform, enum cpu_vendor cpuVendor,
 	}
 
 #endif
+
+	if (platform == B_CPU_ARM || platform == B_CPU_ARM_64)
+		return get_arm_model_string(cpuModel);
 
 	return NULL;
 }

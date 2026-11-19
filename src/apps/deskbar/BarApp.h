@@ -38,6 +38,8 @@ All rights reserved.
 
 #include <Server.h>
 
+#include <vector>
+
 #include "BarSettings.h"
 
 
@@ -65,6 +67,9 @@ const uint32 kShutDown = 'ShDn';
 const uint32 kShutdownSystem = 301;
 const uint32 kRebootSystem = 302;
 const uint32 kSuspendSystem = 304;
+const uint32 kLogOutUser = 305;
+const uint32 kHibernateSystem = 306;
+const uint32 kLockScreen = 307;
 
 // icon size constants
 const int32 kIconPadding = B_USE_SMALL_SPACING;
@@ -173,7 +178,18 @@ private:
 
 			void					ResizeTeamIcons();
 			status_t				_CacheTeamIcon(BarTeamInfo* barInfo);
-			status_t				_CacheTeamIcon(BarTeamInfo* barInfo, int32 size);
+			status_t				_CacheTeamIcon(BarTeamInfo* barInfo, int32 size,
+										BBitmap** _icon);
+
+			struct PendingSend {
+				BMessenger			target;
+				BMessage			message;
+			};
+
+			void					_AddTeamLocked(team_id team, uint32 flags,
+										const char* sig, entry_ref* ref,
+										std::vector<PendingSend>& pending);
+	static	void					_SendAll(std::vector<PendingSend>& pending);
 			status_t				_CacheWindowIcon(WindowIconCache* winCache);
 
 private:

@@ -1,4 +1,7 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
+ */
+/*
 Open Tracker License
 
 Terms and Conditions
@@ -69,7 +72,7 @@ class BList;
 	size_t
 	operator()(node_ref ref) const
 	{
-		return ref.ino();
+		return ref.vnode();
 	}
 };*/
 
@@ -117,6 +120,8 @@ public:
 
 	virtual bool IsFilePanel() const;
 	virtual bool IsDesktopView() const;
+	virtual bool IsOpenWithView() const;
+	virtual bool IsQueryView() const;
 
 	// state saving/restoring
 	virtual void SaveState(AttributeStreamNode* node);
@@ -291,14 +296,11 @@ public:
 	virtual void OpenParent();
 	virtual bool CanOpenParent();
 
-	virtual void OpenSelection(BPose* clicked_pose = NULL,
-		int32* index = NULL);
-	void OpenSelectionUsing(BPose* clicked_pose = NULL,
-		int32* index = NULL);
+	virtual void OpenSelection(BPose* clicked_pose = NULL, int32* index = NULL);
+	void OpenSelectionUsing(BPose* clicked_pose = NULL, int32* index = NULL);
 		// launches the open with window
 	virtual void MoveSelectionTo(BPoint, BPoint, BContainerWindow*);
-	void DuplicateSelection(BPoint* dropStart = NULL,
-		BPoint* dropEnd = NULL);
+	void DuplicateSelection(BPoint* dropStart = NULL,BPoint* dropEnd = NULL);
 
 	// Move to trash calls try to select the next pose in the view
 	// when they are dones
@@ -320,6 +322,8 @@ public:
 	void AddRemovePoseFromSelection(BPose* pose, int32 index,
 		bool select);
 	int32 CountSelected() const;
+	bool ExtendSelection() const;
+
 	bool SelectedVolumeIsReadOnly() const;
 	bool TargetVolumeIsReadOnly() const;
 	bool CanEditName() const;
@@ -381,9 +385,9 @@ public:
 	void MoveSelectionInto(Model* destFolder, BContainerWindow* srcWindow, bool forceCopy,
 		bool forceMove = false, bool createLink = false, bool relativeLink = false);
 	static void MoveSelectionInto(Model* destFolder, BContainerWindow* srcWindow,
-		BContainerWindow* destWindow, uint32 buttons, BPoint loc, bool forceCopy,
+		BContainerWindow* destWindow, uint32 buttons, BPoint dropPoint, bool forceCopy,
 		bool forceMove = false, bool createLink = false, bool relativeLink = false,
-		BPoint where = B_ORIGIN, bool pinToGrid = false);
+		BPoint dragStart = B_ORIGIN, bool pinToGrid = false);
 
 	bool UpdateDropTarget(BPoint, const BMessage*, bool trackingContextMenu);
 		// return true if drop target changed
@@ -437,6 +441,13 @@ public:
 	void UpdateDateColumns(BMessage*);
 	virtual void AdaptToVolumeChange(BMessage*);
 	virtual void AdaptToDesktopIntegrationChange(BMessage*);
+	virtual void AdaptToSnapToGridChange(BMessage*);
+
+	void SnapPoseToGrid(BPose* pose, BRect& viewBounds);
+		// snap the pose to the icon grid, moving it to the next free
+		// slot when the nearest grid cell is taken; does nothing in
+		// list mode or unless the "SnapToGrid" setting is on
+	void SnapAllPosesToGrid();
 
 	void SetTextWidgetToCheck(BTextWidget*, BTextWidget* = NULL);
 
@@ -500,8 +511,6 @@ protected:
 
 	virtual void CreateRootPose();
 	virtual void RemoveRootPose();
-
-	void CreateTrashPose();
 
 	virtual bool AddPosesThreadValid(const entry_ref*) const;
 		// verifies whether or not the current set of AddPoses threads
@@ -580,6 +589,7 @@ protected:
 	virtual uint32 WatchNewNodeMask();
 		// override to change different watch modes for query pose
 		// view, etc.
+	status_t StopWatchingNode(const node_ref* item);
 
 	// drag&drop handling
 	static bool EachItemInDraggedSelection(const BMessage* message,
@@ -653,6 +663,7 @@ protected:
 	// background AddPoses task calls
 	static status_t AddPosesTask(void*);
 	virtual void AddPosesCompleted();
+	virtual void CreateTrashPose();
 	bool IsValidAddPosesThread(thread_id) const;
 
 	// typeahead filtering
@@ -692,31 +703,37 @@ private:
 
 protected:
 	struct node_ref_key {
-		node_ref_key() {}
-		node_ref_key(const node_ref& value) : value(value) {}
+		node_ref_key() : device(-1), node(-1) {}
+		node_ref_key(const node_ref& value)
+		{
+			device = value.device();
+			node = value.node();
+		}
 
 		uint32 GetHashCode() const
 		{
-			return (uint32)value.device ^ (uint32)value.node;
+			return (uint32)device ^ (uint32)node;
 		}
 
 		node_ref_key operator=(const node_ref_key& other)
 		{
-			value = other.value;
+			device = other.device;
+			node = other.node;
 			return *this;
 		}
 
 		bool operator==(const node_ref_key& other) const
 		{
-			return (value == other.value);
+			return device == other.device && node == other.node;
 		}
 
 		bool operator!=(const node_ref_key& other) const
 		{
-			return (value != other.value);
+			return !(*this == other);
 		}
 
-		node_ref	value;
+		dev_t	device;
+		ino_t	node;
 	};
 
 protected:
@@ -746,6 +763,7 @@ private:
 	BObjectList<BColumn, true>* fColumnList;
 	BStringList fMimeTypeList;
 	BObjectList<Model>* fBrokenLinks;
+	HashSet<node_ref_key> fWatchedBrokenParents;
 	BCountView* fCountView;
 	float fListElemHeight;
 	float fListOffset;
@@ -937,11 +955,24 @@ BPoseView::SelectionList() const
 	return fSelectionList;
 }
 
+
 inline int32
 BPoseView::CountSelected() const
 {
 	return fSelectionList->CountItems();
 }
+
+
+inline bool
+BPoseView::ExtendSelection() const
+{
+	if (!fMultipleSelection)
+		return false;
+
+	uint32 mods = modifiers();
+	return fTrackMouseUp && ((mods & B_COMMAND_KEY) != 0 || (mods & B_SHIFT_KEY) != 0);
+}
+
 
 inline BStringList*
 BPoseView::MimeTypesInSelection()
@@ -1029,6 +1060,20 @@ BPoseView::IsFilePanel() const
 
 inline bool
 BPoseView::IsDesktopView() const
+{
+	return false;
+}
+
+
+inline bool
+BPoseView::IsOpenWithView() const
+{
+	return false;
+}
+
+
+inline bool
+BPoseView::IsQueryView() const
 {
 	return false;
 }

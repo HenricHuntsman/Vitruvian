@@ -1,4 +1,5 @@
 /*
+ * Copyright 2026, Dario Casalinuovo. All rights reserved.
  * Copyright 2013,	Jérôme DUVAL.
  * All rights reserved. Distributed under the terms of the MIT license.
  */
@@ -32,39 +33,23 @@ EULAWindow::EULAWindow()
 {
 	BString infoText;
 	infoText << B_TRANSLATE(
-		"Welcome to the Haiku Installer!\n\n");
+		"Welcome to the V\\OS Installer.\n\n");
 	infoText << B_TRANSLATE(
-		"IMPORTANT INFORMATION BEFORE INSTALLING HAIKU\n\n");
+		"V\\OS is beta software. Installing it can result in the loss of "
+		"data, so please back up anything important before you continue.\n\n");
 	infoText << B_TRANSLATE(
-		"This is beta-quality software! It means there is a risk of "
-		"losing important data. Make frequent backups! You have been "
-		"warned.\n\n\n");
+		"1)   Partitioning. Choose \"Guided partitioning\" to let the "
+		"Installer prepare a disk for you, or \"Set up partitions\" to "
+		"use DriveSetup directly. Partitions you change or format lose "
+		"their contents.\n\n");
 	infoText << B_TRANSLATE(
-		"1)   If you are installing Haiku onto real hardware (not inside an "
-		"emulator), you may want to prepare a hard disk partition from "
-		"another OS (you could, for example, use a GParted Live-CD, which "
-		"can also resize existing partitions to make room).\n"
-		"You can also set up partitions by launching DriveSetup from "
-		"Installer, but you won't be able to resize existing partitions with "
-		"it. While DriveSetup has been quite thoroughly tested over the "
-		"years, it's recommended to have up-to-date backups of the other "
-		"partitions on your system. Just in case" B_UTF8_ELLIPSIS);
-	infoText << "\n\n\n";
+		"2)   Boot loader. The Installer installs GRUB for you and lets "
+		"you choose UEFI, legacy BIOS or both. It does not add other "
+		"operating systems to the boot menu.\n\n");
 	infoText << B_TRANSLATE(
-		"2)   The Installer will make the Haiku partition itself bootable, "
-		"but takes no steps to integrate Haiku into an existing boot menu. "
-		"If you have GRUB already installed, you can add Haiku to it.\n"
-		"For details, please consult the guide on booting Haiku on our "
-		"website at https://www.haiku-os.org/guides/booting.\n"
-		"Or you can set up a boot menu from Installer's \"Tools\" menu, see "
-		"the Haiku User Guide's topic on the application \"BootManager\"."
-		"\n\n\n");
-	infoText << B_TRANSLATE(
-		"3)   When you successfully boot into Haiku for the first time, make "
-		"sure to read our \"User Guide\" and take the \"Quick Tour\". There "
-		"are links on the Desktop and in WebPositive's bookmarks.\n\n");
-	infoText << B_TRANSLATE(
-		"Have fun and thanks for trying out Haiku!");
+		"3)   Account. You will create the first user account during the "
+		"installation. The Advanced tab holds swap, boot loader and "
+		"root password options.");
 
 	BTextView* textView = new BTextView("eula", be_plain_font, NULL, B_WILL_DRAW);
 	textView->SetInsets(10, 10, 10, 10);

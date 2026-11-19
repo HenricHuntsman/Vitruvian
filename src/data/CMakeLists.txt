@@ -6,8 +6,8 @@ set(MIME_SRC ${CMAKE_CURRENT_SOURCE_DIR}/mime_db)
 set(MIME_OUT ${CMAKE_BINARY_DIR}/mime_db)
 set(MIME_RSRC ${CMAKE_BINARY_DIR}/mime_rsrc)
 
-set(RC      "${CMAKE_BINARY_DIR}/${BUILDTOOLS_DIR}/src/bin/rc/rc")
-set(RESATTR "${CMAKE_BINARY_DIR}/${BUILDTOOLS_DIR}/src/bin/resattr")
+set(RC      "${BUILDTOOLS_DIR}/src/bin/rc/rc")
+set(RESATTR "${BUILDTOOLS_DIR}/src/bin/resattr")
 
 set(MIME_DB_OUTPUTS)
 
@@ -92,10 +92,11 @@ set(MIME_TAR ${CMAKE_BINARY_DIR}/mime_db.tar)
 add_custom_command(
 	OUTPUT ${MIME_TAR}
 	COMMAND tar --xattrs -cf ${MIME_TAR} -C ${CMAKE_BINARY_DIR} mime_db
-	DEPENDS mime_db
+	DEPENDS ${MIME_DB_OUTPUTS}
 	COMMENT "Packaging mime_db with xattrs"
 )
 add_custom_target(mime_db_tar ALL DEPENDS ${MIME_TAR})
 
 install(FILES ${MIME_TAR}
-	DESTINATION /usr/share/vos)
+	DESTINATION /usr/share/vos
+	COMPONENT data)

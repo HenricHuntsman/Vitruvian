@@ -83,7 +83,7 @@ main(int argc, char *argv[])
 void
 do_unchop(char *outfile, char *basename)
 {
-	int fdout = open(outfile, O_WRONLY|O_CREAT|O_APPEND);
+	int fdout = open(outfile, O_WRONLY|O_CREAT|O_APPEND, 0644);
 	if (fdout < 0)
 		fprintf(stderr, "can't open '%s': %s\n", outfile, strerror(errno));
 	
@@ -170,12 +170,19 @@ replace(char *origfile, char *newfile)
 char *
 temp_file(void)
 {
-	// creates a new, temporary file and returns its name
-	
-	char *tmp = tmpnam(NULL);
-	
-	FILE *fp = fopen(tmp, "w");
-	fclose(fp);
-	
-	return tmp;
+	const char* template = "/var/tmp/vitruvian_XXXXXX";
+	size_t len = strlen(template) + 1;
+	if (len > PATH_MAX)
+		return NULL;
+	char *path = malloc(len);
+	if (!path)
+		return NULL;
+	memcpy(path, template, len);
+	int fd = mkstemp(path);
+	if (fd == -1) {
+		free(path);
+		return NULL;
+	}
+	close(fd);
+	return path;
 }

@@ -1,4 +1,4 @@
-1	greek, modern (1453-)	x-vnd.Haiku-DriveSetup	3844018628
+1	greek, modern (1453-)	x-vnd.vos-DriveSetup	2281659502
 Could not unmount partition %s.	MainWindow		Δεν ήταν δυνατή η αποπροσάρτηση της κατάτμησης %s.
 Mount all	MainWindow		Προσάρτηση όλων
 Disk	MainWindow		Δίσκος
@@ -20,6 +20,7 @@ Partition size	CreateParametersPanel		Μέγεθος κατάτμησης
 Validation of the given parameters failed.	MainWindow		Η επικύρωση των δοσμένων παραμέτρων απέτυχε.
 Are you sure you want to format the partition \"%s\"? You will be asked again before changes are written to the disk.	MainWindow		Είστε σίγουρος ότι θέλετε να διαμορφώσετε την κατάτμηση \"%s\"; Θα ρωτηθείτε ξανά πριν εγγραφούν οι αλλαγές στον δίσκο.
 DriveSetup	System name		Διαχειριστής Δίσκου
+Error:	MainWindow	in any error alert	Σφάλμα:
 Mounted at	PartitionList		Προσαρτήθηκε στο
 Create…	MainWindow		Δημιουργία…
 Write changes	MainWindow		Εγγραφή αλλαγών
@@ -28,6 +29,7 @@ Initialization of the partition %s failed. (Nothing has been written to disk.)	M
 Eject	MainWindow		Εξαγωγή
 Read only	PartitionList		Μόνο για ανάγνωση
 Surface test (not implemented)	MainWindow		Έλεγχος επιφάνειας (δεν υλοποιήθηκε)
+Creating disk image	MainWindow		Δημιουργία εικόνας δίσκου
 The panel could not return successfully.	MainWindow		Το πάνελ δεν μπόρεσε να επιστρέψει τιμή με επιτυχία.
 Failed to change the parameters of the partition. No changes have been written to disk.	MainWindow		Η αλλαγή των παραμέτρων της κατάτμησης απέτυχε. Δεν έχει γίνει καμία αλλαγή στον δίσκο.
 Partition %ld	DiskView		Κατάτμηση %ld
@@ -40,6 +42,7 @@ Format	InitializeParametersPanel		Διαμόρφωση
 Could not unmount partition	MainWindow		Δεν ήταν δυνατή η αποπροσάρτηση κατάτμησης
 Create	CreateParametersPanel		Δημιουργία
 File system	PartitionList		Σύστημα αρχείων
+Unknown (%s)	PartitionList		Άγνωστο (%s)
 The selected partition does not contain a partitioning system.	MainWindow		Η επιλεγμένη κατάτμηση δεν περιέχει σύστημα διαμέρισης.
 End: %s	Support		Τέλος: %s
 Partition type	PartitionList		Είδος κατάτμησης
@@ -57,6 +60,8 @@ You need to select a partition entry from the list.	MainWindow		Θα χρεια�
 Offset: %s	Support		Στοίχιση: %s
 SafeBoot encrypted	Encryption utils		Κρυπτογραφημένη με SafeBoot
 Volume name	PartitionList		Όνομα τόμου
+Disk image	MainWindow		Εικόνα δίσκου
+Save image…	MainWindow		Αποθήκευση εικόνας…
 Are you sure you want to write the changes back to disk now?\n\nAll data on the partition will be irretrievably lost if you do so!	MainWindow		Είστε σίγουρος πως θέλετε να εγγράψετε τις αλλαγές στον δίσκο τώρα;\n\nΌλα τα δεδομένα στην επιλεγμένη κατάτμηση θα διαγραφούν οριστικά!
 Change	ChangeParametersPanel		Αλλαγή
 Partition name:	ChangeParametersPanel		Όνομα κατάτμησης:

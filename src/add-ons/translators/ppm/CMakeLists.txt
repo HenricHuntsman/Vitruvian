@@ -1,6 +1,6 @@
 
-Application(
-	PPMTranslator
+TranslatorAddOn(
+	PPMTranslator SHARED
 
 	SOURCES
 	colorspace.cpp	
@@ -14,3 +14,4 @@ Application(
 
 	RDEF PPMTranslator.rdef
 )
+DoCatalogs("x-vnd.vos-PPMTranslator" add-ons/translators/ppm)

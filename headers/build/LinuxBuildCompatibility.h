@@ -55,17 +55,17 @@ typedef unsigned long	haiku_build_addr_t;
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/uio.h>
+typedef struct iovec iovec;
 #include <unistd.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// Is kernel-only under Linux.
-#ifndef strlcpy
+#if !defined(strlcpy) && !(defined(__GLIBC__) && __GLIBC_PREREQ(2, 38))
 extern size_t   strlcpy(char* dest, const char* source, size_t length);
 #endif
-#ifndef strlcat
+#if !defined(strlcat) && !(defined(__GLIBC__) && __GLIBC_PREREQ(2, 38))
 extern size_t	strlcat(char* dest, const char* source, size_t length);
 #endif
 
@@ -76,14 +76,6 @@ extern ssize_t	readv_pos(int fd, off_t pos, const struct iovec* vec,
 					size_t count);
 extern ssize_t	writev_pos(int fd, off_t pos, const struct iovec* vec,
 					size_t count);
-
-#ifndef O_NOTRAVERSE
-#	ifdef __VOS__
-#		define O_NOTRAVERSE AT_SYMLINK_NOFOLLOW
-#	else
-#		error "Search for a proper replacement value for O_NOTRAVERSE"
-#	endif
-#endif
 
 #ifndef S_IUMSK
 #	define S_IUMSK ALLPERMS

@@ -218,10 +218,10 @@ Painter::Painter()
 	fMiterLimit(B_DEFAULT_MITER_LIMIT),
 
 	fPatternHandler(),
+	fInternal(fPatternHandler),
 	fTextRenderer(fSubpixRenderer, fRenderer, fRendererBin, fUnpackedScanline,
 		fSubpixUnpackedScanline, fSubpixRasterizer, fMaskedUnpackedScanline,
-		fTransform),
-	fInternal(fPatternHandler)
+		fTransform)
 {
 	fPixelFormat.SetDrawingMode(fDrawingMode, fAlphaSrcMode, fAlphaFncMode);
 
@@ -260,7 +260,7 @@ Painter::AttachToBuffer(RenderingBuffer* buffer)
 		fValidClipping = fClippingRegion != NULL
 			&& fClippingRegion->Frame().IsValid();
 
-		// These are the AGG renderes and rasterizes which
+		// These are the AGG renders and rasterizes which
 		// will be used for stroking paths
 
 		_SetRendererColor(fPatternHandler.HighColor());
@@ -620,6 +620,8 @@ Painter::StraightLine(BPoint a, BPoint b, const rgb_color& c) const
 		uint8* dst = fBuffer.row_ptr(0);
 		uint32 bpr = fBuffer.stride();
 		int32 x = (int32)a.x;
+		if (x < 0 || x >= (int32)fBuffer.width())
+			return true;
 		dst += x * 4;
 		int32 y1 = (int32)min_c(a.y, b.y);
 		int32 y2 = (int32)max_c(a.y, b.y);
@@ -635,6 +637,13 @@ Painter::StraightLine(BPoint a, BPoint b, const rgb_color& c) const
 				fBaseRenderer.xmax() >= x) {
 				int32 i = max_c(fBaseRenderer.ymin(), y1);
 				int32 end = min_c(fBaseRenderer.ymax(), y2);
+				// clip boxes can predate a modeset; stay in the buffer
+				if (i < 0)
+					i = 0;
+				if (end >= (int32)fBuffer.height())
+					end = (int32)fBuffer.height() - 1;
+				if (i > end)
+					continue;
 				uint8* handle = dst + i * bpr;
 				for (; i <= end; i++) {
 					*(uint32*)handle = color.data32;
@@ -667,6 +676,13 @@ Painter::StraightLine(BPoint a, BPoint b, const rgb_color& c) const
 				fBaseRenderer.ymax() >= y) {
 				int32 i = max_c(fBaseRenderer.xmin(), x1);
 				int32 end = min_c(fBaseRenderer.xmax(), x2);
+				// clip boxes can predate a modeset; stay in the buffer
+				if (i < 0)
+					i = 0;
+				if (end >= (int32)fBuffer.width())
+					end = (int32)fBuffer.width() - 1;
+				if (i > end)
+					continue;
 				uint32* handle = (uint32*)(dst + i * 4);
 				for (; i <= end; i++) {
 					*handle++ = color.data32;
@@ -1710,7 +1726,7 @@ Painter::_UpdateDrawingMode()
 	// DrawingMode*Solid ones) as of now. The PixelFormat knows the
 	// PatternHandler and makes its decision based on the pattern.
 	// When a solid pattern is used, _SetRendererColor()
-	// has to be called so that all internal colors in the renderes
+	// has to be called so that all internal colors in the renderers
 	// are up to date for use by the solid drawing mode version.
 	fPixelFormat.SetDrawingMode(fDrawingMode, fAlphaSrcMode, fAlphaFncMode);
 }
@@ -2136,7 +2152,7 @@ Painter::_RasterizePath(VertexSource& path, const BGradient& gradient)
 
 		default:
 		case BGradient::TYPE_NONE:
-			GTRACE(("Painter::_FillPathGradient> type == TYPE_NONE/unkown\n"));
+			GTRACE(("Painter::_FillPathGradient> type == TYPE_NONE/unknown\n"));
 			break;
 	}
 

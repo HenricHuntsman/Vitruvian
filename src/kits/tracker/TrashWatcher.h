@@ -49,6 +49,8 @@ public:
 	BTrashWatcher();
 	virtual ~BTrashWatcher();
 
+	virtual thread_id Run();
+
 	bool CheckTrashDirs();
 	bool IsTrashNode(const node_ref*) const;
 
@@ -57,7 +59,8 @@ protected:
 
 private:
 	void WatchTrashDirs();
-	void UpdateTrashIcons();
+	void UpdateTrashIcon();
+	void ReconcileTrashDirs();
 
 	bool fTrashFull;
 	BObjectList<node_ref, true> fTrashNodeList;
